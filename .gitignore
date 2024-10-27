@@ -7,8 +7,17 @@
 # Ignore all .fits files
 *.fits
 
+# ignore all .pth files
+*.pth
+
+# Ignore al .pyc files
+*.pyc 
+
 # Ignore the images folder
 images/
 
 # Ignore the experiments folder
 experiments/
+
+# Ignore logs folder
+logs/ 

@@ -1,0 +1,57 @@
+Data:
+  # Basics
+  log_dir: '/data/lightSpec/logs'
+  # Data
+  dataset: "SpectraDataset"
+  data_dir: '/data/lamost/data'
+  batch_size: 4
+  num_epochs: 50
+  max_len_spectra: 3909
+  max_days_lc: 720
+  lc_freq: 0.0208
+
+Astroconformer:
+  # Model
+  in_channels: 1
+  encoder: ["mhsa_pro", "conv", "mhsa_pro"]
+  decoder: ["mhsa_decoder",  "conv", "mhsa_decoder"]
+  timeshift: false
+  num_layers: 6
+  num_decoder_layers: 6
+  stride: 2
+  encoder_dim: 64
+  decoder_dim: 64
+  num_heads: 4
+  kernel_size: 3
+  dropout_p: 0.35
+  output_dim: 3
+  norm: "postnorm"
+  load_checkpoint: True
+  checkpoint_path: '/data/lightSpec/logs/exp2/astroconf_spectra.pth'
+  checkpoint_num: 3
+  beta: 1
+
+CNN:
+  # Model
+  in_channels: 1
+  num_layers: 6
+  stride: 1
+  encoder_dim: 32
+  kernel_size: 3
+  dropout_p: 0.3
+  output_dim: 2
+  beta: 1
+
+Optimization SSL:
+  # Optimization
+  max_lr: 1e-4
+  weight_decay: 1e-5
+  warmup_pct: 0.3
+  steps_per_epoch: 3500
+
+Optimization:
+  # Optimization
+  max_lr: 1e-5
+  weight_decay: 5e-6
+  warmup_pct: 0.3
+  steps_per_epoch: 3500
