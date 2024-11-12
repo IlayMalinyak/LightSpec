@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import copy
+from nn.simsiam import projection_MLP
 
 
 
@@ -198,7 +199,8 @@ class MultimodalMoCo(nn.Module):
         self,
         spectra_encoder,  # pre-trained spectra encoder
         lightcurve_encoder,  # pre-trained light curve encoder
-        projection_dim=128,  # Final projection dimension
+        projection_dim=32,  # Final projection dimension
+        hidden_dim=512,  # Hidden dimension of projection MLP
         K=65536,  # Queue size
         m=0.999,  # Momentum coefficient
         T=0.07,  # Temperature
@@ -227,8 +229,8 @@ class MultimodalMoCo(nn.Module):
             lightcurve_out_dim = lightcurve_encoder.output_dim
         
         # Projection heads for query encoders
-        self.spectra_proj_q = self._build_projector(spectra_out_dim, projection_dim)
-        self.lightcurve_proj_q = self._build_projector(lightcurve_out_dim, projection_dim)
+        self.spectra_proj_q = projection_MLP(spectra_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
+        self.lightcurve_proj_q = projection_MLP(lightcurve_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
         
         # Key path: Create momentum encoders and projectors
         self.spectra_encoder_k = copy.deepcopy(spectra_encoder)

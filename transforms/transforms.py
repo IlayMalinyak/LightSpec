@@ -3,6 +3,8 @@ import torch
 import time
 from scipy.signal import savgol_filter as savgol
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+
 
 
 class Compose:
@@ -23,9 +25,10 @@ class Compose:
                 x = x[:, np.newaxis]
         out = x
         t0 = time.time()
+        # print(f"Initial type: {out.dtype}")
         for t in self.transforms:
             out, mask, info = t(out, mask=mask, info=info)
-            # print(f"{t} took {time.time() - t0}")
+            # print(f"{t} took {time.time() - t0}, type: {out.dtype}")
             # if mask is not None:
             #     print("mask shape: ", mask.shape)
             # else:
@@ -333,7 +336,7 @@ class AvgDetrend:
         ma[-half_window:] = ma[-half_window-1]
         
         # Subtract moving average from the original series
-        return (x - ma)[:, np.newaxis], mask, info
+        return (x - ma)[np.newaxis, :], mask, info
 
     def _detrend_torch(self, x, mask=None, info=dict()):
         if mask is None:
@@ -473,3 +476,18 @@ class FillNans():
         return x
     def __repr__(self):
         return f"FillNans(interpolate={self.interpolate})"
+    
+
+class SmoothSpectraGaussian():
+    def __init__(self, sigma=35):
+        self.sigma = sigma
+
+    def __call__(self, x, mask=None, info=None):
+        if isinstance(x, np.ndarray):
+            gaussian_weight_matrix = np.exp(-0.5*(x[:,None]-x[None,:])**2/(self.sigma**2))
+            smoothed_flux = np.sum(gaussian_weight_matrix*x, axis=1)/np.sum(gaussian_weight_matrix, axis=1)
+            x = x / smoothed_flux
+        else:
+            raise NotImplementedError
+        return x, mask, info
+        

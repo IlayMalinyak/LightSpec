@@ -31,7 +31,7 @@ Astroconformer:
   load_light_checkpoint: True
   light_checkpoint_path: '/data/lightSpec/logs/exp3/astroconf_lc_ssl.pth'
   load_spec_checkpoint: True
-  spec_checkpoint_path: '/data/lightSpec/logs/exp4/astroconf_spectra_3.pth'
+  spec_checkpoint_path: '/data/lightSpec/logs/exp5/astroconf_spectra_1.pth'
 
 AstroEncoderDecoder:
   # Model
@@ -64,7 +64,7 @@ CNN:
 
 Optimization SSL:
   # Optimization
-  max_lr: 1e-4
+  max_lr: 1e-5
   weight_decay: 1e-5
   warmup_pct: 0.15
   steps_per_epoch: 3500

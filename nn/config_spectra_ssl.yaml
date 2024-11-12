@@ -6,6 +6,7 @@ Data:
   data_dir: '/data/lamost/data'
   batch_size: 4
   num_epochs: 50
+  exp_num: 6
   max_len_spectra: 3909
   max_days_lc: 720
   lc_freq: 0.0208
@@ -19,16 +20,16 @@ Astroconformer:
   num_layers: 6
   num_decoder_layers: 6
   stride: 2
-  encoder_dim: 64
-  decoder_dim: 64
+  encoder_dim: 512
+  decoder_dim: 512
   num_heads: 4
   kernel_size: 3
   dropout_p: 0.35
   output_dim: 3
   norm: "postnorm"
-  load_checkpoint: True
-  checkpoint_path: '/data/lightSpec/logs/exp2/astroconf_spectra.pth'
-  checkpoint_num: 3
+  load_checkpoint: False
+  checkpoint_path: '/data/lightSpec/logs/exp5/astroconf_spectra.pth'
+  checkpoint_num: 1
   beta: 1
 
 CNN:

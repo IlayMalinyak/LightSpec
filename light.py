@@ -36,10 +36,10 @@ torch.cuda.empty_cache()
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lc_ssl.yaml'
 model_name = 'Astroconformer'
-exp_num = 3
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+exp_num = data_args.exp_num
 if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
     os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
 
@@ -79,9 +79,12 @@ backbone.pred_layer = torch.nn.Identity()
 model = SimSiam(backbone)
 model = model.to(local_rank)
 
+model_suffix = 0
+checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
+    prev_checkpoint_num = checkpoint_num - 1
     print("****Loading checkpoint******")
-    state_dict = torch.load(f'{data_args.log_dir}/exp{exp_num}/astroconf_lc_ssl.pth', map_location=torch.device('cpu'))
+    state_dict = torch.load(f'{data_args.log_dir}/exp{exp_num}/astroconf_lc_{prev_checkpoint_num}.pth', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -113,7 +116,7 @@ val_dataloader = DataLoader(val_subset,
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
     
 loss_fn = torch.nn.MSELoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=float(optim_args.weight_decay))
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 scheduler = OneCycleLR(
         optimizer,
@@ -132,16 +135,16 @@ scheduler = OneCycleLR(
 # plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=scaler,
-                       scheduler=scheduler, train_dataloader=train_dataloader,
+                       scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,
-                        exp_name="astroconf_lc_ssl") 
+                        exp_name=f"astroconf_lc_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/exp{exp_num}/astroconf_lc_ssl.json'
+output_filename = f'{data_args.log_dir}/exp{exp_num}/astroconf_lc_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_lc_ssl.png")
+plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_lc_{checkpoint_num}.png")
 plt.clf()

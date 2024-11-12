@@ -322,7 +322,7 @@ class MaskedSSLTrainer(Trainer):
         acc = self.mask_accuracy(out, y, mask)
         return loss, acc, y
     
-    def mask_accuracy(self, result, target, inverse_token_mask, epsilon=1e-3):
+    def mask_accuracy(self, result, target, inverse_token_mask, epsilon=1e-5):
         # print(inverse_token_mask.shape, result.shape, target.shape)
         r = result.masked_select(inverse_token_mask)
         t = target.masked_select(inverse_token_mask)

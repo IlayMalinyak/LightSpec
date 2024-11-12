@@ -56,20 +56,20 @@ spec_transforms = Compose([MovingAvg(7),
                            ])
 
 kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
-lamost_kepler_df = pd.read_csv('/data/lamost/lamost_kepler_dr5.csv')
+lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
 lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
 lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
-lamost_kepler_df = lamost_kepler_df.merge(kepler_df[['KID']], on='KID', how='inner')
+lamost_kepler_df = lamost_kepler_df.merge(kepler_df[['KID']], on='KID', how='inner').astype(int)
 
 # all_spectra_files = os.listdir(spectra_dir)
 # spectra_kids = np.array([int(os.path.splitext(filename)[0]) for filename in all_spectra_files if filename.endswith('.fits')])
 # print(spectra_kids[:10])
 # print(kepler_df['KID'].iloc[:10])
-# plt.hist(kepler_df['KID'].values, bins=100, density=True, alpha=0.5, label='kepler')
-# plt.hist(lamost_kepler_df['KID'].values, bins=100, alpha=0.5, density=True, label='spectra')
-# plt.legend()
-# plt.savefig('/data/lightSpec/spectra_kepler_hist.png')
-# plt.close()
+plt.hist(kepler_df['KID'].values, bins=100, density=True, alpha=0.5, label='kepler')
+plt.hist(lamost_kepler_df['KID'].values, bins=100, alpha=0.5, density=True, label='spectra')
+plt.legend()
+plt.savefig('/data/lightSpec/spectra_kepler_hist.png')
+plt.close()
 kepler_df_filtered = kepler_df[kepler_df['KID'].isin(lamost_kepler_df['KID'].values)]
 # kepler_df_filtered = kepler_df_filtered.merge(lamost_kepler_df[['KID', 'ObsID']], on='KID')
 
@@ -135,8 +135,8 @@ if model_args.load_spec_checkpoint:
 else:
     deepnorm_init(spec_model, model_args)
 
-model = MultimodalMoCo(spec_model.encoder, light_model.backbone).to(local_rank)
-model = DDP(model, device_ids=[local_rank],)
+model = MultimodalMoCo(spec_model.encoder, light_model.backbone, hidden_dim=512, projection_dim=128).to(local_rank)
+model = DDP(model, device_ids=[local_rank],find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")

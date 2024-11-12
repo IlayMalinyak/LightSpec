@@ -4,8 +4,9 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  batch_size: 8
-  num_epochs: 60
+  batch_size: 6
+  num_epochs: 58
+  exp_num: 5
   max_len_spectra: 3909
   max_days_lc: 720
   lc_freq: 0.0208
@@ -19,15 +20,16 @@ Astroconformer:
   num_layers: 12
   num_decoder_layers: 12
   stride: 16
-  encoder_dim: 64
-  decoder_dim: 64
+  encoder_dim: 512
+  decoder_dim: 512
   num_heads: 4
   kernel_size: 3
   dropout_p: 0.3
   output_dim: 3
   norm: "postnorm"
-  load_checkpoint: False
-  checkpoint_path: '/data/lightSpec/logs/exp2/astroconf_spectra.pth'
+  load_checkpoint: True
+  checkpoint_path: '/data/lightSpec/logs/exp5/astroconf_lc_ssl.pth'
+  checkpoint_num: 1
   beta: 1
 
 CNN:

@@ -26,7 +26,9 @@ from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
 from nn.train import MaskedSSLTrainer
 from nn.utils import deepnorm_init
+from nn.scheduler import WarmupScheduler
 from util.utils import Container, plot_fit, plot_lr_schedule
+
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
@@ -55,27 +57,40 @@ def setup():
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_spectra_ssl.yaml'
 model_name = 'Astroconformer'
-exp_num = 4
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+exp_num = data_args.exp_num
 if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
     os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
 
-transforms = Compose([MovingAvg(7), Normalize("minmax", axis=0), RandomMasking()])
+transforms = Compose([MovingAvg(7),
+                       Normalize("minmax", axis=0),
+                        # SmoothSpectraGaussian(sigma=35),
+                        AvgDetrend(kernel_size=100),
+                        ToTensor(),
+                         RandomMasking()])
 train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, max_len=int(data_args.max_len_spectra))
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
+expected_shape = data_args.max_len_spectra
+start = time.time()
+for i in range(len(train_dataset)):
+    x_masked, x, mask = train_dataset[i]
+    if (x.shape[0] != expected_shape) or (x_masked.shape[0] != expected_shape) or (mask.shape[0] != expected_shape):
+        print(f"shape mismatch: {i}, {x.shape}, {x_masked.shape}, {mask.shape}")
+print("average time taken per iteration: ", (time.time()-start)/len(train_dataset))
+
 
 model = AstroEncoderDecoder(model_args)
 model = model.to(local_rank)
 
 model_suffix = 0
+checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
-    checkpoint_num = int(model_args.checkpoint_num)
     prev_checkpoint_num = checkpoint_num - 1
     print("****Loading checkpoint******")
     state_dict = torch.load(f'{data_args.log_dir}/exp{exp_num}/astroconf_spectra_{prev_checkpoint_num}.pth', map_location=torch.device('cpu'))
@@ -104,26 +119,33 @@ val_dataloader = DataLoader(val_subset, batch_size=int(data_args.batch_size), sa
                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
     
 loss_fn = torch.nn.MSELoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=float(optim_args.weight_decay))
+optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
-scheduler = OneCycleLR(
-        optimizer,
-        max_lr=float(optim_args.max_lr),
-        epochs= int(data_args.num_epochs),
-        steps_per_epoch = len(train_dataloader),
-        pct_start=float(optim_args.warmup_pct),
-        anneal_strategy='cos',
-        cycle_momentum=True,
-        base_momentum=0.85,
-        max_momentum=0.95,
-        div_factor=25.0,
-        final_div_factor=10000.0
-    )
-fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
+total_steps = int(data_args.num_epochs) * len(train_dataloader)
+scheduler = WarmupScheduler(optimizer,
+                            warmup_steps=total_steps//10,
+                            total_steps=total_steps,
+                            base_lr=float(optim_args.max_lr)/100,
+                                final_lr=float(optim_args.max_lr))
+# scheduler = OneCycleLR(
+#         optimizer,
+#         max_lr=float(optim_args.max_lr),
+#         epochs= int(data_args.num_epochs),
+#         steps_per_epoch = len(train_dataloader),
+#         pct_start=float(optim_args.warmup_pct),
+#         anneal_strategy='cos',
+#         cycle_momentum=True,
+#         base_momentum=0.85,
+#         max_momentum=0.95,
+#         div_factor=10.0,
+#         final_div_factor=100.0
+#     )
+# fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
+# plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
+
 trainer = MaskedSSLTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=scaler,
-                       scheduler=None, train_dataloader=train_dataloader,
+                       scheduler=scheduler, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,

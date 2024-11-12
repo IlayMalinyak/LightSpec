@@ -99,22 +99,23 @@ class SpectraDataset(Dataset):
             spectra, wv, meta = self.read_spectra(self.path_list[idx])
         except OSError as e:
             print("Error reading file ", self.path_list[idx])
-            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(self.max_len, dtype=torch.bool)
-        spectra = torch.tensor(spectra, dtype=torch.float32)
-        wv = torch.tensor(wv, dtype=torch.float32).squeeze()
-        mask = torch.zeros_like(spectra)
+            return torch.zeros(self.max_len), torch.zeros(self.max_len),
+            torch.zeros(self.max_len, dtype=torch.bool)
+        # spectra = torch.tensor(spectra, dtype=torch.float32)
+        # wv = torch.tensor(wv, dtype=torch.float32).squeeze()
+        # mask = torch.zeros_like(spectra)
         if self.transforms:
             spectra, _, _ = self.transforms(spectra, None, meta)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, meta)
         if spectra_masked.shape[-1] < self.max_len:
-            pad = torch.zeros(self.max_len - spectra_masked.shape[-1])
+            pad = torch.zeros(1, self.max_len - spectra_masked.shape[-1])
             spectra_masked = torch.cat([spectra_masked, pad], dim=-1)
-            pad_mask = torch.zeros(self.max_len  - mask.shape[-1], dtype=torch.bool)
+            pad_mask = torch.zeros(1, self.max_len  - mask.shape[-1], dtype=torch.bool)
             mask = torch.cat([mask, pad_mask], dim=-1)
-            pad_spectra = torch.zeros(self.max_len - spectra.shape[-1])
+            pad_spectra = torch.zeros(1, self.max_len - spectra.shape[-1])
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
 
-        return spectra_masked, spectra, mask
+        return spectra_masked.float().squeeze(0), spectra.float().squeeze(0), mask.squeeze(0)
 
 if __name__ == '__main__':
     s_transforms = Compose([MovingAvg(7), Normalize("minmax", axis=0), ])
@@ -211,7 +212,7 @@ class KeplerDataset():
 
     if self.npy_path is not None:
         try:
-            file_path = os.path.join(self.npy_path, f"{row['KID']}.npy")
+            file_path = os.path.join(self.npy_path, f"{int(row['KID'])}.npy")
             x = np.load(file_path)            
             # Check if x is a numpy array and has a length
             if not isinstance(x, np.ndarray) or x.size == 0:
@@ -369,8 +370,8 @@ class LightSpecDataset(KeplerDataset):
 
     def __getitem__(self, idx):
         light, _, _, _, info, _ = super().__getitem__(idx)
-        kid = info['KID']
-        obsid = self.df.iloc[idx]['ObsID']
+        kid = int(info['KID'])
+        obsid = int(self.df.iloc[idx]['ObsID'])
         info['obsid'] = obsid
         spectra_filename = os.path.join(self.spec_path, f'{obsid}.fits')
         try:

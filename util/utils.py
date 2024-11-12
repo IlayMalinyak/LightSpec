@@ -374,3 +374,4 @@ def get_all_samples_df(num_qs:int=8, read_from_csv:bool=True):
         kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
         kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(convert_ints_to_list)
     return kepler_df
+
