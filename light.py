@@ -25,6 +25,8 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import KeplerDataset
 from nn.astroconf import Astroconformer
+from nn.cnn import CNNEncoder
+# from nn.mamba import MambaEncoder
 from nn.simsiam import SimSiam
 from nn.train import ContrastiveTrainer
 from nn.utils import deepnorm_init
@@ -35,7 +37,7 @@ torch.cuda.empty_cache()
 
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lc_ssl.yaml'
-model_name = 'Astroconformer'
+model_name = 'CNN'
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
@@ -74,8 +76,10 @@ train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
 
-backbone = Astroconformer(model_args)
-backbone.pred_layer = torch.nn.Identity()
+# backbone = Astroconformer(model_args)
+# backbone.pred_layer = torch.nn.Identity()
+backbone = CNNEncoder(model_args)
+# backbone = MambaEncoder(model_args)
 model = SimSiam(backbone)
 model = model.to(local_rank)
 
@@ -84,7 +88,7 @@ checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
     prev_checkpoint_num = checkpoint_num - 1
     print("****Loading checkpoint******")
-    state_dict = torch.load(f'{data_args.log_dir}/exp{exp_num}/astroconf_lc_{prev_checkpoint_num}.pth', map_location=torch.device('cpu'))
+    state_dict = torch.load(f'{data_args.log_dir}/exp{exp_num}/{model_name}_lc_{prev_checkpoint_num}.pth', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -139,12 +143,12 @@ trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,
-                        exp_name=f"astroconf_lc_{checkpoint_num}") 
+                        exp_name=f"{model_name}_lc_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/exp{exp_num}/astroconf_lc_{checkpoint_num}.json'
+output_filename = f'{data_args.log_dir}/exp{exp_num}/{model_name}_lc_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_lc_{checkpoint_num}.png")
+plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_{model_name}_lc_{checkpoint_num}.png")
 plt.clf()

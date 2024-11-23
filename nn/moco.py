@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 from nn.simsiam import projection_MLP
+import time
 
 
 
@@ -192,7 +193,7 @@ def concat_all_gather(tensor):
 
     output = torch.cat(tensors_gather, dim=0)
     return output
-
+    
 
 class MultimodalMoCo(nn.Module):
     def __init__(
@@ -229,8 +230,10 @@ class MultimodalMoCo(nn.Module):
             lightcurve_out_dim = lightcurve_encoder.output_dim
         
         # Projection heads for query encoders
-        self.spectra_proj_q = projection_MLP(spectra_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
-        self.lightcurve_proj_q = projection_MLP(lightcurve_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
+        # self.spectra_proj_q = projection_MLP(spectra_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
+        # self.lightcurve_proj_q = projection_MLP(lightcurve_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
+        self.spectra_proj_q = self._build_projector(spectra_out_dim, projection_dim)
+        self.lightcurve_proj_q = self._build_projector(lightcurve_out_dim, projection_dim)
         
         # Key path: Create momentum encoders and projectors
         self.spectra_encoder_k = copy.deepcopy(spectra_encoder)
@@ -239,33 +242,39 @@ class MultimodalMoCo(nn.Module):
         self.lightcurve_proj_k = copy.deepcopy(self.lightcurve_proj_q)
         
         # Freeze key encoders and projectors
-        # self._freeze_encoder(self.spectra_encoder_k)
-        # self._freeze_encoder(self.lightcurve_encoder_k)
-        # self._freeze_encoder(self.spectra_proj_k)
-        # self._freeze_encoder(self.lightcurve_proj_k)
+        self._freeze_encoder(self.spectra_encoder_k)
+        self._freeze_encoder(self.lightcurve_encoder_k)
+        self._freeze_encoder(self.spectra_proj_k)
+        self._freeze_encoder(self.lightcurve_proj_k)
         
         # Initialize queues for both directions if bidirectional
-        self.register_buffer("spectra_queue", torch.randn(projection_dim, K))
-        self.spectra_queue = F.normalize(self.spectra_queue, dim=0)
-        self.register_buffer("spectra_queue_ptr", torch.zeros(1, dtype=torch.long))
+        self.register_buffer("lightcurve_queue", torch.randn(projection_dim, K))
+        self.lightcurve_queue = F.normalize(self.lightcurve_queue, dim=0)
+        self.register_buffer("lightcurve_queue_ptr", torch.zeros(1, dtype=torch.long))
         
         if bidirectional:
-            self.register_buffer("lightcurve_queue", torch.randn(projection_dim, K))
-            self.lightcurve_queue = F.normalize(self.lightcurve_queue, dim=0)
-            self.register_buffer("lightcurve_queue_ptr", torch.zeros(1, dtype=torch.long))
+            self.register_buffer("spectra_queue", torch.randn(projection_dim, K))
+            self.spectra_queue = F.normalize(self.spectra_queue, dim=0)
+            self.register_buffer("spectra_queue_ptr", torch.zeros(1, dtype=torch.long))
 
     def _freeze_encoder(self, encoder):
         """Freeze encoder parameters"""
-        for param in encoder.parameters():
+        for name, param in encoder.named_parameters():
+            # print(name)
+            # if ('blocks.11' not in name):
             param.requires_grad = False
             
             
     def _build_projector(self, in_dim, out_dim):
-        """Build MLP projector"""
+        """Modified projector with layer normalization"""
         return nn.Sequential(
             nn.Linear(in_dim, in_dim),
+            nn.LayerNorm(in_dim),
+            nn.Dropout(0.2),
             nn.ReLU(),
-            nn.Linear(in_dim, out_dim)
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.Dropout(0.2),
         )
     
     @torch.no_grad()
@@ -291,18 +300,28 @@ class MultimodalMoCo(nn.Module):
     
     @torch.no_grad()
     def _dequeue_and_enqueue(self, keys, queue, queue_ptr):
-        """Update queue"""
+        """Update queue with handling for variable batch sizes"""
         batch_size = keys.shape[0]
         ptr = int(queue_ptr)
         
-        # Replace the keys at ptr (dequeue and enqueue)
-        queue[:, ptr:ptr + batch_size] = keys.T
-        ptr = (ptr + batch_size) % self.K  # move pointer
+        # Check if we'll exceed queue size
+        if ptr + batch_size > self.K:
+            # Split the operation into two parts
+            first_part = self.K - ptr  # number of slots until end of queue
+            queue[:, ptr:] = keys.T[:, :first_part]  # fill until end
+            remaining = batch_size - first_part
+            if remaining > 0:  # if we still have keys to insert
+                queue[:, :remaining] = keys.T[:, first_part:]  # wrap around to start
+            ptr = remaining if remaining > 0 else 0
+        else:
+            # Normal case - enough space in queue
+            queue[:, ptr:ptr + batch_size] = keys.T
+            ptr = (ptr + batch_size) % self.K  # move pointer
         
         queue_ptr[0] = ptr
         return queue, queue_ptr
     
-    def forward(self, spectra, lightcurves):
+    def forward(self,lightcurves,  spectra):
         """
         Forward pass computing contrastive loss in both directions
         Args:
@@ -312,16 +331,22 @@ class MultimodalMoCo(nn.Module):
             losses and logits for both directions
         """
         # Compute query features
+        # print("spectra shape: ", spectra.shape)
+        start = time.time()
         spectra, _ = self.spectra_encoder_q(spectra)
         lightcurves, _ = self.lightcurve_encoder_q(lightcurves)
         q_s = self.spectra_proj_q(spectra)
         q_l = self.lightcurve_proj_q(lightcurves)
+        
+        # forward_time = time.time()-start
+        # print("time taken for forward pass: ", forward_time)
         
         # Normalize features
         q_s = F.normalize(q_s, dim=1)
         q_l = F.normalize(q_l, dim=1)
         
         # Compute key features
+
         with torch.no_grad():
             self._momentum_update()
             spectra, _ = self.spectra_encoder_k(spectra)
@@ -331,17 +356,25 @@ class MultimodalMoCo(nn.Module):
             
             k_s = F.normalize(k_s, dim=1)
             k_l = F.normalize(k_l, dim=1)
+
+            # keys_time = time.time()- start -forward_time
+            # print("time taken for keys: ", keys_time)
         
         # Compute logits for spectra->lightcurve direction
         l_pos_s = torch.einsum('nc,nc->n', [q_s, k_l]).unsqueeze(-1)
         l_neg_s = torch.einsum('nc,ck->nk', [q_s, self.lightcurve_queue.clone().detach()])
         logits_s = torch.cat([l_pos_s, l_neg_s], dim=1)
         logits_s /= self.T
+
+        # logits_time = time.time()- start - keys_time
+        # print("time taken for logits: ", logits_time)
         
         # Update spectra->lightcurve queue
         self.lightcurve_queue, self.lightcurve_queue_ptr = self._dequeue_and_enqueue(
             k_l, self.lightcurve_queue, self.lightcurve_queue_ptr
         )
+        # enqueue_time = time.time()- start - logits_time
+        # print("time taken for enqueue: ", enqueue_time)
         
         if self.bidirectional:
             # Compute logits for lightcurve->spectra direction
@@ -368,5 +401,219 @@ class MultimodalMoCo(nn.Module):
         else:
             loss = loss_s
             logits = logits_s
+        
+        return {'loss': loss, 'logits': logits , 'labels': labels}
+
+class LightCurveSpectraMoCo(nn.Module):
+    def __init__(self, 
+                 spectra_encoder, 
+                 lightcurve_encoder, 
+                 projection_dim=256,  # Final projection dimension
+                 K=2048, 
+                 m=0.999,
+                 T=0.07,
+                 freeze_lightcurve=True,
+                 freeze_spectra=True,
+                 bidirectional=False):
+        """
+        Modified MoCo model for aligning light curves and spectra
+        
+        Args:
+            light_curve_encoder (nn.Module): Encoder for light curve data
+            spectra_encoder (nn.Module): Encoder for spectra data
+            feature_dim (int): Dimension of the feature representation
+            queue_size (int): Size of the memory queue
+            momentum (float): Momentum coefficient for key encoder update
+        """
+        super().__init__()
+        
+        # Encoders
+        self.light_curve_encoder = lightcurve_encoder
+        # self.light_curve_key_encoder = self._copy_encoder(lightcurve_encoder)
+        self.spectra_encoder = spectra_encoder
+        if freeze_lightcurve:
+            self._freeze_encoder(self.light_curve_encoder)
+        if freeze_spectra:
+            self._freeze_encoder(self.spectra_encoder)
+        spectra_out_dim = spectra_encoder.output_dim
+        lightcurve_out_dim = lightcurve_encoder.output_dim
+        
+        
+        # Projection heads
+
+        self.light_curve_projector = self._build_projector(lightcurve_out_dim, projection_dim)
+        
+        self.spectra_projector = self._build_projector(spectra_out_dim, projection_dim)
+
+
+        self._freeze_encoder(self.light_curve_projector)
+        
+        # Register queue for spectra keys
+        # self.register_buffer("spectra_queue", torch.randn(projection_dim, K))
+        # self.spectra_queue = F.normalize(self.spectra_queue, dim=0)
+
+        self.register_buffer("queue", torch.randn(projection_dim, K))
+        self.queue = F.normalize(self.queue, dim=0)
+        
+        # Queue pointer
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+        
+        # Hyperparameters
+        # self.feature_dim = feature_dim
+        self.queue_size = K
+        self.m = m
+        self.T = T
+
+    def _freeze_encoder(self, encoder):
+        """Freeze encoder parameters"""
+        for name, param in encoder.named_parameters():
+            # print(name)
+            # if ('blocks.11' not in name):
+            param.requires_grad = False
+        
+    
+    def _build_projector(self, in_dim, out_dim):
+        """Modified projector with layer normalization"""
+        return nn.Sequential(
+            nn.Linear(in_dim, in_dim),
+            nn.LayerNorm(in_dim),
+            nn.Dropout(0.2),
+            nn.ReLU(),
+            nn.Linear(in_dim, out_dim),
+            nn.LayerNorm(out_dim),
+            nn.Dropout(0.2),
+        )
+    
+    @torch.no_grad()
+    def _batch_shuffle_ddp(self, x):
+        """
+        Batch shuffle, for making use of BatchNorm.
+        *** Only support DistributedDataParallel (DDP) model. ***
+        """
+        # gather from all gpus
+        batch_size_this = x.shape[0]
+        x_gather = concat_all_gather(x)
+        batch_size_all = x_gather.shape[0]
+
+        num_gpus = batch_size_all // batch_size_this
+
+        # random shuffle index
+        idx_shuffle = torch.randperm(batch_size_all).cuda()
+
+        # broadcast to all gpus
+        torch.distributed.broadcast(idx_shuffle, src=0)
+
+        # index for restoring
+        idx_unshuffle = torch.argsort(idx_shuffle)
+
+        # shuffled index for this gpu
+        gpu_idx = torch.distributed.get_rank()
+        idx_this = idx_shuffle.view(num_gpus, -1)[gpu_idx]
+
+        return x_gather[idx_this], idx_unshuffle
+
+    @torch.no_grad()
+    def _batch_unshuffle_ddp(self, x, idx_unshuffle):
+        """
+        Undo batch shuffle.
+        *** Only support DistributedDataParallel (DDP) model. ***
+        """
+        # gather from all gpus
+        batch_size_this = x.shape[0]
+        x_gather = concat_all_gather(x)
+        batch_size_all = x_gather.shape[0]
+
+        num_gpus = batch_size_all // batch_size_this
+
+        # restored index for this gpu
+        gpu_idx = torch.distributed.get_rank()
+        idx_this = idx_unshuffle.view(num_gpus, -1)[gpu_idx]
+
+        return x_gather[idx_this]
+    
+    def _update_key_encoder(self):
+        """
+        Update key encoder parameters using momentum update
+        """
+        for param_q, param_k in zip(
+            self.light_curve_query_encoder.parameters(), 
+            self.light_curve_key_encoder.parameters()
+        ):
+            param_k.data = param_k.data * self.momentum + param_q.data * (1. - self.momentum)
+    
+    def _dequeue_and_enqueue(self, keys):
+        """
+        Dequeue the oldest batch and enqueue the new batch of keys
+        
+        Args:
+            keys (torch.Tensor): New keys to enqueue
+        """
+        # Gather keys across all GPUs
+        keys = keys.detach()
+        
+        batch_size = keys.shape[0]
+        ptr = int(self.queue_ptr)
+        
+        # Replace the keys at ptr
+        if ptr + batch_size > self.queue_size:
+            # Wrap around
+            self.queue[:, ptr:] = keys[:self.queue_size - ptr].T
+            self.queue[:, :ptr + batch_size - self.queue_size] = keys[self.queue_size - ptr:].T
+        else:
+            self.queue[:, ptr:ptr + batch_size] = keys.T
+        
+        # Move pointer
+        ptr = (ptr + batch_size) % self.queue_size
+        self.queue_ptr[0] = ptr
+    
+    def _momentum_update_key_encoder(self, query_encoder, key_encoder):
+        """
+        Momentum update where key_encoder is updated based on query_encoder
+        
+        Args:
+            query_encoder (nn.Module): The encoder being trained
+            key_encoder (nn.Module): The momentum-updated encoder
+        """
+        for param_q,  param_k in zip(
+            query_encoder.parameters(), 
+            key_encoder.parameters()
+        ):
+            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+    
+    def forward(self, light_curves, spectra):
+        # Query features from light curves
+        q = self.spectra_projector(
+            self.spectra_encoder(spectra)[0]
+        )
+        q = F.normalize(q, dim=1)
+
+        
+        # Key features from spectra with momentum update
+        with torch.no_grad():
+            # Momentum update of spectra (key) encoder
+            self._momentum_update_key_encoder(
+                self.spectra_projector,        # Key encoder
+                self.light_curve_projector  # Query encoder
+            )
+            # k, idx_unshuffle = self._batch_shuffle_ddp(self.light_curve_encoder(light_curves)[0])
+            k = self.light_curve_encoder(light_curves)[0]
+
+            # Compute key features using momentum-updated encoder
+            k = self.light_curve_projector(k)
+            k = F.normalize(k, dim=1)
+            # k = self._batch_unshuffle_ddp(k, idx_unshuffle)
+        # print(q[0,:10], k[0,:10])
+        # Contrastive learning logic
+        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+        
+        logits = torch.cat([l_pos, l_neg], dim=1)
+        labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+        
+        # Compute NT-Xent (Normalized Temperature Cross Entropy) loss
+        loss = F.cross_entropy(logits / self.T , labels)
+        
+        # Update queue with current spectra keys
+        self._dequeue_and_enqueue(k)
         
         return {'loss': loss, 'logits': logits , 'labels': labels}

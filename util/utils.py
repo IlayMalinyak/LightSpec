@@ -44,6 +44,9 @@ class Container(object):
     for key, value in vars(self).items():
       print(f"{key}: {value}")
 
+  def get_dict(self):
+    return self.__dict__
+
 def plot_fit(
     fit_res: dict,
     fig: plt.figure = None,

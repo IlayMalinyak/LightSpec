@@ -4,9 +4,9 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  batch_size: 6
-  num_epochs: 58
-  exp_num: 5
+  batch_size: 16
+  num_epochs: 60
+  exp_num: 7
   max_len_spectra: 3909
   max_days_lc: 720
   lc_freq: 0.0208
@@ -35,13 +35,33 @@ Astroconformer:
 CNN:
   # Model
   in_channels: 1
-  num_layers: 6
+  num_layers: 12
   stride: 1
-  encoder_dim: 32
+  encoder_dim: 512
   kernel_size: 3
   dropout_p: 0.3
   output_dim: 2
   beta: 1
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+
+Mamba:
+  # Model
+  in_channels: 1
+  num_layers: 12
+  stride: 1
+  encoder_dim: 64
+  kernel_size: 3
+  dropout_p: 0.3
+  output_dim: 2
+  beta: 1
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "silu"
+  sine_w0: 1.0
+
 
 Optimization SSL:
   # Optimization

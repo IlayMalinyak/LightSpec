@@ -21,3 +21,5 @@ experiments/
 
 # Ignore logs folder
 logs/ 
+
+wandb/

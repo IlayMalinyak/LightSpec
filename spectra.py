@@ -76,13 +76,15 @@ train_indices, val_indices = train_test_split(indices, test_size=0.2, random_sta
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
-expected_shape = data_args.max_len_spectra
-start = time.time()
-for i in range(len(train_dataset)):
-    x_masked, x, mask = train_dataset[i]
-    if (x.shape[0] != expected_shape) or (x_masked.shape[0] != expected_shape) or (mask.shape[0] != expected_shape):
-        print(f"shape mismatch: {i}, {x.shape}, {x_masked.shape}, {mask.shape}")
-print("average time taken per iteration: ", (time.time()-start)/len(train_dataset))
+# expected_shape = data_args.max_len_spectra
+# start = time.time()
+# for i in range(len(train_dataset)):
+#     if i % 10000 == 0:
+#         print(f"processing {i}", time.time()-start)
+#     x_masked, x, mask = train_dataset[i]
+#     if (x.shape[0] != expected_shape) or (x_masked.shape[0] != expected_shape) or (mask.shape[0] != expected_shape):
+#         print(f"shape mismatch: {i}, {x.shape}, {x_masked.shape}, {mask.shape}")
+# print("average time taken per iteration: ", (time.time()-start)/len(train_dataset))
 
 
 model = AstroEncoderDecoder(model_args)
@@ -122,11 +124,15 @@ loss_fn = torch.nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 total_steps = int(data_args.num_epochs) * len(train_dataloader)
-scheduler = WarmupScheduler(optimizer,
-                            warmup_steps=total_steps//10,
-                            total_steps=total_steps,
-                            base_lr=float(optim_args.max_lr)/100,
-                                final_lr=float(optim_args.max_lr))
+# scheduler = WarmupScheduler(optimizer,
+#                             warmup_steps=total_steps//10,
+#                             total_steps=total_steps,
+#                             base_lr=float(optim_args.max_lr)/100,
+#                                 final_lr=float(optim_args.max_lr))
+
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
+                                                    T_max=total_steps,
+                                                    eta_min=float(optim_args.max_lr)/100)
 # scheduler = OneCycleLR(
 #         optimizer,
 #         max_lr=float(optim_args.max_lr),
@@ -140,11 +146,11 @@ scheduler = WarmupScheduler(optimizer,
 #         div_factor=10.0,
 #         final_div_factor=100.0
 #     )
-# fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-# plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
+fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
+plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
 
 trainer = MaskedSSLTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=1, scaler=scaler,
+                        criterion=loss_fn, output_dim=1, scaler=scaler, grad_clip=True,
                        scheduler=scheduler, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=exp_num, log_path=data_args.log_dir, range_update=None,

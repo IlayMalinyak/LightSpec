@@ -1,0 +1,45 @@
+project: moco_hyperparam_search
+program: tune_model.py
+method: bayes
+metric:
+  name: loss
+  goal: minimize
+parameters:
+  projection_dim:
+    values: [64, 128, 512]
+  K:
+    values: [512, 1024, 2048]
+  T:
+    distribution: log_uniform
+    min: -4.605  # log(0.01)
+    max: -2.303  # log(0.1)
+  m:
+    distribution: uniform
+    min: 0.9
+    max: 0.999
+  optimizer:
+    values: ['adamw', 'sgd']
+  lr:
+    distribution: log_uniform
+    min: -11.513  # log(1e-5)
+    max: -6.908   # log(1e-3)
+  weight_decay:
+    distribution: log_uniform
+    min: -13.816  # log(1e-6)
+    max: -9.210   # log(1e-4)
+  beta1:
+    value: 0.9
+  beta2:
+    value: 0.999
+  momentum:
+    distribution: uniform
+    min: 0.8
+    max: 0.99
+  nesterov:
+    values: [true, false]
+  max_iterations:
+    value: 400
+  freeze_lightcurve:
+    values: [true, false]
+  freeze_spectra:
+    values: [true, false]

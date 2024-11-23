@@ -117,14 +117,18 @@ class Trainer(object):
                         improved = True
                 
                 if improved:
-                    print("saving model...")
-                    torch.save(self.model.state_dict(), f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth')
+                    model_name = f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth'
+                    print(f"saving model at {model_name}...")
+                    torch.save(self.model.state_dict(), model_name)
                     self.best_state_dict = self.model.state_dict()
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
 
-                print(f'Epoch {epoch}: Train Loss: {global_train_loss:.6f}, Val Loss:'\
+                current_lr = self.optimizer.param_groups[0]['lr'] if self.scheduler is None \
+                            else self.scheduler.get_last_lr()[0]
+
+                print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s', flush=True)
                 if epoch % 10 == 0:
@@ -178,6 +182,13 @@ class Trainer(object):
         # print("model: ", self.model.state_dict().keys())
 
         self.model.load_state_dict(state_dict, strict=False)
+
+    def check_gradients(self):
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                grad_norm = param.grad.norm().item()
+                if grad_norm > 10:
+                    print(f"Large gradient in {name}: {grad_norm}")
 
     def train_epoch(self, device, epoch):
         """
@@ -240,6 +251,8 @@ class Trainer(object):
             all_accs = all_accs + acc
             total += len(y)
             pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item()}")
+            if i > self.max_iter:
+                break
         return val_loss, all_accs/total
 
     def eval_batch(self, batch, batch_idx, device):
@@ -289,14 +302,20 @@ class MaskedSSLTrainer(Trainer):
         """
         Trains the model for one batch.
         """
-        with autocast():
-            x, y, mask = batch
-            y, mask, x = y.to(device), mask.to(device), x.to(device)
-            out = self.model(x, y)
-            loss = self.criterion(out, y)
+        # with autocast():
+        x, y, mask = batch
+        y, mask, x = y.to(device), mask.to(device), x.to(device)
+        out = self.model(x, y)
+        loss = self.criterion(out, y)
+        
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
             if (batch_idx + 1) % self.accumulation_step == 0:
+                # Add gradient clipping before optimizer step
+                if self.grad_clip:
+                    self.scaler.unscale_(self.optimizer)
+                    self.check_gradients()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -304,9 +323,13 @@ class MaskedSSLTrainer(Trainer):
         else:
             loss.backward()
             if (batch_idx + 1) % self.accumulation_step == 0:
+                # Add gradient clipping before optimizer step
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
+        
         acc = self.mask_accuracy(out, y, mask)
         return loss, acc, y
     
@@ -337,19 +360,24 @@ class ContrastiveTrainer(Trainer):
         self.temperature = temperature
         
     def train_batch(self,batch, batch_idx, device):
-        
+        start_time = time.time()
         x1, x2, _, _, info1, info2 = batch 
         x1, x2 = x1.to(device), x2.to(device)
         if self.stack_pairs:
             x = torch.cat((x1, x2), dim=0)
             out = self.model(x, temperature=self.temperature)
+            model_time = time.time() - start_time
         else:
             out = self.model(x1, x2)
+            model_time = time.time() - start_time
         loss = out['loss']
         loss.backward()
+        backward_time = time.time() - start_time - model_time
         self.optimizer.step()
+        optimizer_time = time.time() - start_time - model_time - backward_time
         if self.scheduler is not None:
                     self.scheduler.step()
+        # print(f"model time: {model_time}, backward time: {backward_time}, optimizer time: {optimizer_time}")
         return loss, 0., x1
 
     def eval_batch(self,batch, batch_idx, device):

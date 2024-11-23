@@ -25,24 +25,27 @@ print("running from ", ROOT_DIR)
 
 from transforms.transforms import *
 from dataset.dataset import LightSpecDataset
+from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
-from nn.moco import MoCo, MultimodalMoCo
+from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
 from nn.simsiam import SimSiam
 from nn.utils import deepnorm_init
 from util.utils import *
 from nn.train import ContrastiveTrainer
+
+META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar']
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lightspec_ssl.yaml'
-model_name = 'Astroconformer'
-exp_num = 3
-model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
+light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Astroconformer'])
 spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))['AstroEncoderDecoder'])
+moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+exp_num = data_args.exp_num
 if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
     os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
 
@@ -52,14 +55,17 @@ light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_fr
                          ])
 spec_transforms = Compose([MovingAvg(7),
                            Normalize("minmax", axis=0),
+                           AvgDetrend(kernel_size=100),
                            ToTensor(),
                            ])
 
 kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
+kepler_meta = pd.read_csv('/data/lightPred/tables/berger_catalog.csv')
+kepler_df = kepler_df.merge(kepler_meta, on='KID', how='left')
 lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
 lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
 lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
-lamost_kepler_df = lamost_kepler_df.merge(kepler_df[['KID']], on='KID', how='inner').astype(int)
+lamost_kepler_df = lamost_kepler_df.merge(kepler_df[META_COLUMNS], on='KID', how='inner')
 
 # all_spectra_files = os.listdir(spectra_dir)
 # spectra_kids = np.array([int(os.path.splitext(filename)[0]) for filename in all_spectra_files if filename.endswith('.fits')])
@@ -97,13 +103,30 @@ for i in range(100):
 print("average time taken per iteration: ", (time.time()-start)/100)
 print("no_founds: ", no_founds)
 
-light_backbone = Astroconformer(model_args)
+train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
+
+train_dataloader = DataLoader(train_subset,
+                              batch_size=int(data_args.batch_size), \
+                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                              collate_fn=kepler_collate_fn,
+                              sampler=train_sampler)
+
+
+val_sampler = torch.utils.data.distributed.DistributedSampler(val_subset, num_replicas=world_size, rank=local_rank)
+
+val_dataloader = DataLoader(val_subset,
+                            batch_size=int(data_args.batch_size),
+                            collate_fn=kepler_collate_fn,
+                            sampler=val_sampler, \
+                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+
+light_backbone = Astroconformer(light_model_args)
 light_backbone.pred_layer = torch.nn.Identity()
 light_model = SimSiam(light_backbone)
 
-if model_args.load_light_checkpoint:
-    print("****Loading light checkpoint******")
-    state_dict = torch.load(f'{model_args.light_checkpoint_path}', map_location=torch.device('cpu'))
+if light_model_args.load_light_checkpoint:
+    print("****Loading light checkpoint****")
+    state_dict = torch.load(f'{light_model_args.light_checkpoint_path}', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -116,13 +139,14 @@ if model_args.load_light_checkpoint:
     print("unexpected keys: ", unexpected)
     
 else:
-    deepnorm_init(light_backbone, model_args)
+    print("****deepnorm init for lightcurve****")
+    deepnorm_init(light_backbone, light_model_args)
 
 spec_model = AstroEncoderDecoder(spec_model_args)
 
-if model_args.load_spec_checkpoint:
+if spec_model_args.load_spec_checkpoint:
     print("****Loading spectra checkpoint******")
-    state_dict = torch.load(f'{model_args.spec_checkpoint_path}', map_location=torch.device('cpu'))
+    state_dict = torch.load(f'{spec_model_args.spec_checkpoint_path}', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -133,54 +157,37 @@ if model_args.load_spec_checkpoint:
     print("missing keys: ", missing)
     print("unexpected keys: ", unexpected)
 else:
-    deepnorm_init(spec_model, model_args)
+    print("****deepnorm init for spectra****")
+    deepnorm_init(spec_model, spec_model_args)
 
-model = MultimodalMoCo(spec_model.encoder, light_model.backbone, hidden_dim=512, projection_dim=128).to(local_rank)
-model = DDP(model, device_ids=[local_rank],find_unused_parameters=True)
+# model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+model = LightCurveSpectraMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
-
-train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
-train_dataloader = DataLoader(train_subset,
-                              batch_size=int(data_args.batch_size), \
-                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                              collate_fn=kepler_collate_fn,
-                              sampler=train_sampler)
-
-
-val_sampler = torch.utils.data.distributed.DistributedSampler(val_subset, num_replicas=world_size, rank=local_rank)
-val_dataloader = DataLoader(val_subset,
-                            batch_size=int(data_args.batch_size),
-                            collate_fn=kepler_collate_fn,
-                            sampler=val_sampler, \
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+print("number of training samples: ", len(train_subset), len(val_subset))
+print("model: \n", model)
 
 loss_fn = torch.nn.CrossEntropyLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=float(optim_args.weight_decay))
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
-scheduler = OneCycleLR(
-        optimizer,
-        max_lr=float(optim_args.max_lr),
-        epochs= int(data_args.num_epochs),
-        steps_per_epoch = len(train_dataloader),
-        pct_start=float(optim_args.warmup_pct),
-        anneal_strategy='cos',
-        cycle_momentum=True,
-        base_momentum=0.85,
-        max_momentum=0.95,
-        div_factor=10.0,
-        final_div_factor=100.0
-    )
 
 # print all the trainable layers in the model
+print("Trainable layers in the model: ")
 for name, param in model.named_parameters():
     if param.requires_grad:
         print(name, param.shape)
 
+# save all containers in log directory
+all_args = yaml.safe_load(open(args_dir, 'r'))
+yaml.dump(all_args, open(f"{data_args.log_dir}/exp{exp_num}/config.yaml", 'w'))
+
+print("config saved in ", f"{data_args.log_dir}/exp{exp_num}/config.yaml")
+
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=1, scaler=scaler,
-                       scheduler=scheduler, train_dataloader=train_dataloader,
+                        criterion=loss_fn, output_dim=1, scaler=None,
+                       scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,

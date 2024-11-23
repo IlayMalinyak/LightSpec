@@ -97,10 +97,9 @@ class SpectraDataset(Dataset):
     def __getitem__(self, idx):
         try:
             spectra, wv, meta = self.read_spectra(self.path_list[idx])
-        except OSError as e:
+        except OSError:
             print("Error reading file ", self.path_list[idx])
-            return torch.zeros(self.max_len), torch.zeros(self.max_len),
-            torch.zeros(self.max_len, dtype=torch.bool)
+            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(self.max_len, dtype=torch.bool)
         # spectra = torch.tensor(spectra, dtype=torch.float32)
         # wv = torch.tensor(wv, dtype=torch.float32).squeeze()
         # mask = torch.zeros_like(spectra)
@@ -114,6 +113,7 @@ class SpectraDataset(Dataset):
             mask = torch.cat([mask, pad_mask], dim=-1)
             pad_spectra = torch.zeros(1, self.max_len - spectra.shape[-1])
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
+        spectra = torch.nan_to_num(spectra, nan=0)
 
         return spectra_masked.float().squeeze(0), spectra.float().squeeze(0), mask.squeeze(0)
 
@@ -224,8 +224,10 @@ class KeplerDataset():
         except Exception as e:
             print(f"Error loading file for {row['KID']}: {str(e)}")
             x = np.zeros((self.seq_len, 1))
-        
-        meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'KMAG': None}
+        if 'Teff' in row.keys():
+            meta = {'TEFF': row['Teff'], 'RADIUS': row['Rstar'], 'LOGG': row['logg'], 'M':row['Mstar'], 'KMAG': None}
+        else:
+            meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'M': None, 'KMAG': None}
         return x, meta, None, y_val
 
     try:
@@ -242,7 +244,7 @@ class KeplerDataset():
             self.cur_len = len(x)
     except (TypeError, ValueError, FileNotFoundError, OSError) as e:
         print("Error: ", e)
-        x_tot, meta = np.zeros((self.seq_len), 1), {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'KMAG': None}
+        x_tot, meta = np.zeros((self.seq_len), 1), {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'KMAG': None, 'M': None}
     return x_tot, meta, None, y_val
   
   def fill_nan_np(self, x:np.ndarray, interpolate:bool=True):
@@ -320,6 +322,7 @@ class KeplerDataset():
       info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
       info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
       info['kmag'] = meta['KMAG'] if meta['KMAG'] is not None else 0
+      info['M'] = meta['M'] if meta['M'] is not None else 0
     # info['path'] = self.df.iloc[idx]['data_file_path'] 
     info['KID'] = self.df.iloc[idx]['KID'] 
     toc = time.time()
