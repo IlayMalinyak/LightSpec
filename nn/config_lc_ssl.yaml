@@ -4,6 +4,7 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
+  model_name: "CNNEncoder"
   batch_size: 16
   num_epochs: 60
   exp_num: 7
@@ -32,7 +33,7 @@ Astroconformer:
   checkpoint_num: 1
   beta: 1
 
-CNN:
+CNNEncoder:
   # Model
   in_channels: 1
   num_layers: 12
@@ -42,8 +43,8 @@ CNN:
   dropout_p: 0.3
   output_dim: 2
   beta: 1
-  load_checkpoint: False
-  checkpoint_num: 1
+  load_checkpoint: True
+  checkpoint_num: 2
   activation: "sine"
   sine_w0: 1.0
 

@@ -35,13 +35,15 @@ from util.utils import *
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
+models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder}
+
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lc_ssl.yaml'
-model_name = 'CNN'
-model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+model_name = data_args.model_name
 exp_num = data_args.exp_num
+model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
+optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
     os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
 
@@ -78,8 +80,9 @@ val_subset = Subset(train_dataset, val_indices)
 
 # backbone = Astroconformer(model_args)
 # backbone.pred_layer = torch.nn.Identity()
-backbone = CNNEncoder(model_args)
+# backbone = CNNEncoder(model_args)
 # backbone = MambaEncoder(model_args)
+backbone = models[model_name](model_args)
 model = SimSiam(backbone)
 model = model.to(local_rank)
 
