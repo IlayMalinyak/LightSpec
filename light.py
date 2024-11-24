@@ -123,7 +123,7 @@ val_dataloader = DataLoader(val_subset,
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
     
 loss_fn = torch.nn.MSELoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=float(optim_args.weight_decay))
+optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 scheduler = OneCycleLR(
         optimizer,
@@ -138,6 +138,23 @@ scheduler = OneCycleLR(
         div_factor=10.0,
         final_div_factor=100.0
     )
+
+config_save_path = f"{data_args.log_dir}/exp{exp_num}/{model_name}_lc_{checkpoint_num}_complete_config.yaml"
+
+complete_config = {
+    "model_name": model_name,
+    "data_args": data_args.__dict__,
+    "model_args": model_args.__dict__,
+    "optim_args": optim_args.__dict__,
+    "num_params": num_params,
+    "model_structure": str(model)  # Add the model structure to the configuration
+}
+
+# Save the complete configuration to a YAML file
+with open(config_save_path, "w") as config_file:
+    yaml.dump(complete_config, config_file, default_flow_style=False)
+
+print(f"Configuration (with model structure) saved at {config_save_path}.")
 # fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
 # plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,

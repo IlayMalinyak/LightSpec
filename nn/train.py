@@ -130,7 +130,8 @@ class Trainer(object):
 
                 print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
-                f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()}, Time: {time.time() - start_time:.2f}s', flush=True)
+                f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()},'\
+                  f'Time: {time.time() - start_time:.2f}s, Total Time: {(time.time() - global_time)/3600} hr', flush=True)
                 if epoch % 10 == 0:
                     print(os.system('nvidia-smi'))
 
@@ -141,7 +142,8 @@ class Trainer(object):
                     print("time limit reached")
                     break 
 
-        return {"num_epochs":num_epochs, "train_loss": train_loss, "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc}
+        return {"num_epochs":num_epochs, "train_loss": train_loss,
+                 "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc}
 
     def process_loss(self, acc, loss_mean):
         if  torch.cuda.is_available() and torch.distributed.is_initialized():
