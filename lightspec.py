@@ -15,6 +15,8 @@ import yaml
 import json
 from collections import OrderedDict
 import warnings
+import datetime
+
 warnings.filterwarnings("ignore")
 
 import sys
@@ -27,8 +29,11 @@ from transforms.transforms import *
 from dataset.dataset import LightSpecDataset
 from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
+from nn.cnn import CNNEncoder
+from nn.mlp import MLPEncoder
+from nn.simsiam import MultiModalSimSiam
 from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
-from nn.simsiam import SimSiam
+from nn.simsiam import SimSiam, projection_MLP
 from nn.utils import deepnorm_init
 from util.utils import *
 from nn.train import ContrastiveTrainer
@@ -38,16 +43,24 @@ META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar']
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
+current_date = datetime.date.today().strftime("%Y-%m-%d")
+datetime_dir = f"lightspec_{current_date}"
+
+models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'AstroEncoderDecoder': AstroEncoderDecoder}
+
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lightspec_ssl.yaml'
-light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Astroconformer'])
-spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))['AstroEncoderDecoder'])
-moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 exp_num = data_args.exp_num
-if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
-    os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
+light_model_name = data_args.light_model_name
+spec_model_name = data_args.spec_model_name
+light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[light_model_name])
+spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[spec_model_name])
+sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['SimSiam'])
+moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
+optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
+    os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
 light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                         Normalize('std'),
@@ -55,7 +68,7 @@ light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_fr
                          ])
 spec_transforms = Compose([MovingAvg(7),
                            Normalize("minmax", axis=0),
-                           AvgDetrend(kernel_size=100),
+                        #    AvgDetrend(kernel_size=100),
                            ToTensor(),
                            ])
 
@@ -66,6 +79,24 @@ lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv'
 lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
 lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
 lamost_kepler_df = lamost_kepler_df.merge(kepler_df[META_COLUMNS], on='KID', how='inner')
+# lamost_kepler_df = lamost_kepler_df.drop_duplicates(subset='KID')
+
+lamost_kepler_df['main_seq'] = lamost_kepler_df.apply(giant_cond, axis=1)
+lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==True]
+# lamost_kepler_df = lamost_kepler_df[(lamost_kepler_df['Teff'] < 7000) & (lamost_kepler_df['Teff'] > 3000)]
+
+# duplicates = lamost_kepler_df[lamost_kepler_df.duplicated(subset='KID', keep=False)]
+# for kid, group in duplicates.groupby('KID'):
+#     print(f"KID: {kid}")
+#     print(group)  # Print all rows with the same KID
+#     # Check if rows are identical in other columns
+#     identical = group.drop(columns='KID').nunique().max() == 1
+#     if identical:
+#         print("All rows are identical for this KID.")
+#     else:
+#         print("Rows differ for this KID.")
+#     print("-" * 50)
+
 
 # all_spectra_files = os.listdir(spectra_dir)
 # spectra_kids = np.array([int(os.path.splitext(filename)[0]) for filename in all_spectra_files if filename.endswith('.fits')])
@@ -87,7 +118,6 @@ train_dataset = LightSpecDataset(df=lamost_kepler_df, light_transforms=light_tra
                                 light_seq_len=int(data_args.max_days_lc/data_args.lc_freq),
                                 spec_seq_len=int(data_args.max_len_spectra)
                                 )
-                        
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 train_subset = Subset(train_dataset, train_indices)
@@ -120,8 +150,9 @@ val_dataloader = DataLoader(val_subset,
                             sampler=val_sampler, \
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
-light_backbone = Astroconformer(light_model_args)
-light_backbone.pred_layer = torch.nn.Identity()
+light_backbone = models[light_model_name](light_model_args)
+if light_model_name == 'Astroconformer':
+    light_backbone.pred_layer = torch.nn.Identity()
 light_model = SimSiam(light_backbone)
 
 if light_model_args.load_light_checkpoint:
@@ -142,7 +173,7 @@ else:
     print("****deepnorm init for lightcurve****")
     deepnorm_init(light_backbone, light_model_args)
 
-spec_model = AstroEncoderDecoder(spec_model_args)
+spec_model = models[spec_model_name](spec_model_args)
 
 if spec_model_args.load_spec_checkpoint:
     print("****Loading spectra checkpoint******")
@@ -161,7 +192,11 @@ else:
     deepnorm_init(spec_model, spec_model_args)
 
 # model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
-model = LightCurveSpectraMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+# model = LightCurveSpectraMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+simsiam_backbone = projection_MLP(in_dim=sims_args.input_dim,
+                                    hidden_dim=sims_args.hidden_dim,
+                                     out_dim=sims_args.output_dim)
+model = MultiModalSimSiam(simsiam_backbone, light_model.backbone, spec_model.encoder).to(local_rank)
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -170,7 +205,8 @@ print("number of training samples: ", len(train_subset), len(val_subset))
 print("model: \n", model)
 
 loss_fn = torch.nn.CrossEntropyLoss()
-optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=float(optim_args.weight_decay))
+optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr),
+ weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 
 # print all the trainable layers in the model
@@ -181,9 +217,9 @@ for name, param in model.named_parameters():
 
 # save all containers in log directory
 all_args = yaml.safe_load(open(args_dir, 'r'))
-yaml.dump(all_args, open(f"{data_args.log_dir}/exp{exp_num}/config.yaml", 'w'))
+yaml.dump(all_args, open(f"{data_args.log_dir}/{datetime_dir}/lightspec_config_{exp_num}.yaml", 'w'))
 
-print("config saved in ", f"{data_args.log_dir}/exp{exp_num}/config.yaml")
+print("config saved in ", f"{data_args.log_dir}/{datetime_dir}/lightspec_config_{exp_num}.yaml")
 
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=None,
@@ -191,12 +227,12 @@ trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,
-                        exp_name="lightspec_ssl") 
+                        exp_name=f"lightspec_ssl_{exp_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/exp{exp_num}/lightspec.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_lightspec.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_lightspec_{exp_num}.png")
 plt.clf()

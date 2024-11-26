@@ -17,7 +17,7 @@ class ConvBlock(nn.Module):
     elif args.activation == 'sine':
         self.activation = Sine(w0=args.sine_w0)
     else:
-        self.activation = nn.Relu()
+        self.activation = nn.ReLU()
     in_channels = args.encoder_dims[num_layer-1] if num_layer < len(args.encoder_dims) else args.encoder_dims[-1]
     out_channels = args.encoder_dims[num_layer] if num_layer < len(args.encoder_dims) else args.encoder_dims[-1]
     self.layers = nn.Sequential(
@@ -41,7 +41,7 @@ class CNNEncoder(nn.Module):
         elif args.activation == 'sine':
             self.activation = Sine(w0=args.sine_w0)
         else:
-            self.activation = nn.Relu()
+            self.activation = nn.ReLU()
         self.embedding = nn.Sequential(nn.Conv1d(in_channels = args.in_channels,
                 kernel_size=3, out_channels = args.encoder_dims[0], stride=1, padding = 'same', bias = False),
                         nn.BatchNorm1d(args.encoder_dims[0]),
@@ -53,6 +53,7 @@ class CNNEncoder(nn.Module):
         self.pool = nn.MaxPool1d(2)
         self.output_dim = args.encoder_dims[-1]
         self.min_seq_len = 2 
+        self.avg_output = args.avg_output
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if len(x.shape)==2:
@@ -64,5 +65,84 @@ class CNNEncoder(nn.Module):
             x = m(x)
             if x.shape[-1] > self.min_seq_len:
                 x = self.pool(x)
-        x = x.mean(dim=-1)
+        if self.avg_output:
+            x = x.mean(dim=-1)
         return x
+
+class CNNDecoder(nn.Module):
+    def __init__(self, args) -> None:
+        super().__init__()
+        print("Using CNN decoder with activation: ", args.activation)
+        
+        # Reverse the encoder dimensions for upsampling
+        decoder_dims = args.encoder_dims[::-1]
+        
+        if args.activation == 'silu':
+            self.activation = nn.SiLU()
+        elif args.activation == 'sine':
+            self.activation = Sine(w0=args.sine_w0)
+        else:
+            self.activation = nn.ReLU()
+        
+        # Initial embedding layer to expand the compressed representation
+        self.initial_expand = nn.Linear(decoder_dims[0], decoder_dims[0] * 4)
+        
+        # Transposed Convolutional layers for upsampling
+        self.layers = nn.ModuleList()
+        for i in range(args.num_layers):
+            if i  < len(decoder_dims) - 1:
+                in_channels = decoder_dims[i] 
+                out_channels = decoder_dims[i+1]
+            else:
+                in_channels = decoder_dims[-1]
+                out_channels = decoder_dims[-1]
+            
+            # Transposed Convolution layer
+            layer = nn.Sequential(
+                nn.ConvTranspose1d(in_channels=in_channels, 
+                                   out_channels=out_channels, 
+                                   kernel_size=4, 
+                                   stride=2, 
+                                   padding=1, 
+                                   bias=False),
+                nn.BatchNorm1d(out_channels),
+                self.activation
+            )
+            self.layers.append(layer)
+        
+        # Final layer to match original input channels
+        self.final_conv = nn.ConvTranspose1d(in_channels=decoder_dims[-1], 
+                                             out_channels=args.in_channels, 
+                                             kernel_size=3, 
+                                             stride=1, 
+                                             padding=1)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Expand the compressed representation
+        # x = self.initial_expand(x)
+        # x = x.unsqueeze(-1)  # Add sequence dimension
+        
+        # Apply transposed convolution layers
+        for layer in self.layers:
+            x = layer(x)
+        
+        # Final convolution to get back to original input channels
+        x = self.final_conv(x)
+        
+        return x.squeeze()
+
+class CNNEncoderDecoder(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        
+        self.encoder = CNNEncoder(args)
+        self.decoder = CNNDecoder(args)
+    
+    def forward(self, x, y=None):
+        # Encode the input
+        encoded = self.encoder(x)
+        
+        # Decode the compressed representation
+        reconstructed = self.decoder(encoded)
+        
+        return reconstructed

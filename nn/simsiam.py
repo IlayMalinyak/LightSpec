@@ -25,6 +25,7 @@ class projection_MLP(nn.Module):
         put fc. Its output fc has no ReLU. The hidden fc is 2048-d. 
         This MLP has 3 layers.
         '''
+        self.output_dim = out_dim
         self.layer1 = nn.Sequential(
             nn.Linear(in_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
@@ -131,6 +132,42 @@ class SimSiam(nn.Module):
         self.predictor = prediction_MLP()
     
     def forward(self, x1, x2):
+        f, h = self.encoder, self.predictor
+        z1, z2 = f(x1), f(x2)
+        p1, p2 = h(z1), h(z2)
+        L = D(p1, z2) / 2 + D(p2, z1) / 2
+        return {'loss': L}
+
+
+class MultiModalSimSiam(nn.Module):
+    def __init__(self, backbone, lightcurve_backbone, spectra_backbone):
+        super().__init__()
+        
+        self.lightcurve_backbone = lightcurve_backbone
+        self.spectra_backbone = spectra_backbone
+        # self.__freeze_backbone()
+        self.backbone = backbone
+        self.projector = projection_MLP(backbone.output_dim, hidden_dim=128, out_dim=128)
+
+        self.encoder = nn.Sequential( # f encoder
+            self.backbone,
+            self.projector
+        )
+        self.predictor = prediction_MLP(in_dim=128, hidden_dim=64, out_dim=128)
+        # print all trainable parameters
+        for name, param in self.named_parameters():
+            if param.requires_grad:
+                print(name)
+    
+    def __freeze_backbone(self):
+        for param in self.lightcurve_backbone.parameters():
+            param.requires_grad = False
+        for param in self.spectra_backbone.parameters():
+            param.requires_grad = False
+    
+    def forward(self, lightcurve, spectra):
+        x1 = self.lightcurve_backbone(lightcurve)
+        x2 = self.spectra_backbone(spectra)
         f, h = self.encoder, self.predictor
         z1, z2 = f(x1), f(x2)
         p1, p2 = h(z1), h(z2)

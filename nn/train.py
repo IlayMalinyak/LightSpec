@@ -10,6 +10,7 @@ from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
 import umap
+import wandb
 
 
 def count_occurence(x,y):
@@ -29,8 +30,7 @@ class Trainer(object):
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
                  scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None,
                   grad_clip=False, exp_num=None, log_path=None, exp_name=None, plot_every=None,
-                   cos_inc=False, range_update=None, accumulation_step=1,
-                  ):
+                   cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
@@ -54,6 +54,7 @@ class Trainer(object):
         self.logger = None
         self.range_update = range_update
         self.accumulation_step = accumulation_step
+        self.wandb = wandb_log
         # if log_path is not None:
         #     self.logger =SummaryWriter(f'{self.log_path}/exp{self.exp_num}')
         #     # print(f"logger path: {self.log_path}/exp{self.exp_num}")
@@ -91,14 +92,14 @@ class Trainer(object):
             start_time = time.time()
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
             t_loss, t_acc = self.train_epoch(device, epoch=epoch)
-            t_loss_mean = np.mean(t_loss)
+            t_loss_mean = np.nanmean(t_loss)
             train_loss.extend(t_loss)
             global_train_accuracy, global_train_loss = self.process_loss(t_acc, t_loss_mean)
             if main_proccess:  # Only perform this on the master GPU
                 train_acc.append(global_train_accuracy.mean().item())
                 
             v_loss, v_acc = self.eval_epoch(device, epoch=epoch)
-            v_loss_mean = np.mean(v_loss)
+            v_loss_mean = np.nanmean(v_loss)
             val_loss.extend(v_loss)
             global_val_accuracy, global_val_loss = self.process_loss(v_acc, v_loss_mean)
             if main_proccess:  # Only perform this on the master GPU                
@@ -117,7 +118,7 @@ class Trainer(object):
                         improved = True
                 
                 if improved:
-                    model_name = f'{self.log_path}/exp{self.exp_num}/{self.exp_name}.pth'
+                    model_name = f'{self.log_path}/{self.exp_num}/{self.exp_name}.pth'
                     print(f"saving model at {model_name}...")
                     torch.save(self.model.state_dict(), model_name)
                     self.best_state_dict = self.model.state_dict()
@@ -235,6 +236,8 @@ class Trainer(object):
             self.scheduler.step()
         diff = torch.abs(y_pred - y)
         acc = (diff < (y/10)).sum(0)
+        if self.wandb:
+            wandb.log({"train_loss": loss.item(), "train_acc": acc})
         return loss, acc, y
 
     def eval_epoch(self, device, epoch):
@@ -268,6 +271,8 @@ class Trainer(object):
         loss = self.criterion(y_pred, y)      
         diff = torch.abs(y_pred - y)
         acc = (diff < (y/10)).sum(0)
+        if self.wandb:
+            wandb.log({"val_loss": loss.item(), "val_acc": acc})
         return loss, acc, y
 
     def predict(self, test_dataloader, device, load_best=True):
@@ -305,9 +310,15 @@ class MaskedSSLTrainer(Trainer):
         Trains the model for one batch.
         """
         # with autocast():
-        x, y, mask = batch
+        x, y, mask,_,info,_ = batch
         y, mask, x = y.to(device), mask.to(device), x.to(device)
         out = self.model(x, y)
+        if x.isnan().sum() > 0:
+            print("nan in x, idx: ", batch_idx)
+        if y.isnan().sum() > 0:
+            print("nan in y, idx: ", batch_idx)
+        if out.isnan().sum() > 0:
+            print("nan in out, idx: ", batch_idx)
         loss = self.criterion(out, y)
         
         if self.scaler is not None:
@@ -331,20 +342,23 @@ class MaskedSSLTrainer(Trainer):
                 self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
-        
         acc = self.mask_accuracy(out, y, mask)
+        if self.wandb:
+            wandb.log({"train_loss": loss.item(), "train_acc": acc})
         return loss, acc, y
     
     def eval_batch(self, batch, batch_idx, device):
         """
         Evaluates the model for one batch.
         """
-        x, y, mask = batch
+        x, y, mask,_,info,_ = batch
         y, mask, x = y.to(device), mask.to(device), x.to(device)
         with torch.no_grad():
             out = self.model(x, y)
         loss = self.criterion(out, y)
         acc = self.mask_accuracy(out, y, mask)
+        if self.wandb:
+            wandb.log({"val_loss": loss.item(), "val_acc": acc})
         return loss, acc, y
     
     def mask_accuracy(self, result, target, inverse_token_mask, epsilon=1e-5):
@@ -379,6 +393,8 @@ class ContrastiveTrainer(Trainer):
         optimizer_time = time.time() - start_time - model_time - backward_time
         if self.scheduler is not None:
                     self.scheduler.step()
+        if self.wandb:
+            wandb.log({"train_loss": loss.item()})
         # print(f"model time: {model_time}, backward time: {backward_time}, optimizer time: {optimizer_time}")
         return loss, 0., x1
 
@@ -391,5 +407,7 @@ class ContrastiveTrainer(Trainer):
                 out = self.model(x, temperature=self.temperature)
             else:
                 out = self.model(x1, x2)
-        loss = out['loss']  
+        loss = out['loss']
+        if self.wandb:
+            wandb.log({"val_loss": loss.item()}) 
         return loss, 0, x1

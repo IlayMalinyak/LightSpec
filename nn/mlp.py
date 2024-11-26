@@ -24,11 +24,12 @@ class MLPEncoder(nn.Module):
         for hidden_dim in args.hidden_dims:
             layers.append(nn.Linear(prev_dim, hidden_dim))
             layers.append(nn.LayerNorm(hidden_dim)) 
-            layers.append(nn.ReLU())  
+            layers.append(nn.SiLU())  
             if args.dropout > 0.0:
                 layers.append(nn.Dropout(args.dropout))  
             prev_dim = hidden_dim
         self.model = nn.Sequential(*layers)
+        self.output_dim = hidden_dim
         
     
     def forward(self, x, y):

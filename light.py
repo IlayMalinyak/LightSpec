@@ -50,10 +50,10 @@ if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
 transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                     #   FillNans(interpolate=True),
                         MovingAvg(13),
-                        RandomTransform([AddGaussianNoise(sigma=0.0001),
-                                        RandomMasking(mask_prob=0.05),
-                                        Shuffle(segment_len=270/data_args.lc_freq),
-                                        Identity()]),
+                        # RandomTransform([AddGaussianNoise(sigma=0.0001),
+                        #                 RandomMasking(mask_prob=0.05),
+                        #                 Shuffle(segment_len=270/data_args.lc_freq),
+                        #                 Identity()]),
                         Normalize('std'),
                         ToTensor(), ])
 
@@ -147,7 +147,8 @@ complete_config = {
     "model_args": model_args.__dict__,
     "optim_args": optim_args.__dict__,
     "num_params": num_params,
-    "model_structure": str(model)  # Add the model structure to the configuration
+    "model_structure": str(model),  # Add the model structure to the configuration
+    "transforms": str(transforms)
 }
 
 # Save the complete configuration to a YAML file

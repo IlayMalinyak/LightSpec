@@ -4,48 +4,53 @@ Data:
   # Data
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
+  model_name: CNNEncoderDecoder
   batch_size: 4
   num_epochs: 20
-  exp_num: 6
-  max_len_spectra: 3909
+  exp_num: 8
+  max_len_spectra: 3520
   max_days_lc: 720
   lc_freq: 0.0208
 
-Astroconformer:
+AstroEncoderDecoder:
   # Model
   in_channels: 1
   encoder: ["mhsa_pro", "conv", "mhsa_pro"]
   decoder: ["mhsa_decoder",  "conv", "mhsa_decoder"]
   timeshift: false
-  num_layers: 6
-  num_decoder_layers: 6
+  num_layers: 4
+  num_decoder_layers: 4
   stride: 2
-  encoder_dim: 512
-  decoder_dim: 512
+  encoder_dim: 256
+  decoder_dim: 256
   num_heads: 4
   kernel_size: 3
   dropout_p: 0.35
   output_dim: 3
   norm: "postnorm"
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra.pth'
-  checkpoint_num: 3
+  checkpoint_num: 1
   beta: 1
 
-CNN:
+CNNEncoderDecoder:
   # Model
   in_channels: 1
   num_layers: 6
   stride: 1
-  encoder_dim: 32
+  encoder_dims: [32,64,128,256,512]
   kernel_size: 3
   dropout_p: 0.3
+  avg_output: False
   output_dim: 2
   beta: 1
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "silu"
 
 Optimization SSL:
   # Optimization
-  max_lr: 1e-4
+  max_lr: 1e-5
   weight_decay: 1e-5
   warmup_pct: 0.3
   steps_per_epoch: 3500

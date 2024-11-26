@@ -91,6 +91,23 @@ def setup_data():
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
     lamost_kepler_df = lamost_kepler_df.merge(kepler_df[['KID']], on='KID', how='inner')
+
+    try:
+        # Try to get a unique integer from the run name/ID
+        seed = int(wandb.run.name.split('-')[-1]) if wandb.run.name else hash(wandb.run.id)
+    except:
+        # Fallback to a default seed
+        seed = 42
+    
+    # Shuffle the DataFrame
+    lamost_kepler_df = lamost_kepler_df.sample(frac=1, random_state=seed).reset_index(drop=True)
+    
+    # Log dataset info to wandb
+    wandb.log({
+        "dataset_size": len(lamost_kepler_df),
+        "unique_kids": lamost_kepler_df['KID'].nunique(),
+        "shuffle_seed": seed
+    })
     
     dataset = LightSpecDataset(
         df=lamost_kepler_df,
@@ -164,14 +181,37 @@ def train():
                        scheduler=None, train_dataloader=train_loader,
                        val_dataloader=val_loader, device=local_rank,
                            exp_num=0, log_path='/data/lightSpec/logs/tune', range_update=None,
-                           accumulation_step=1, max_iter=wandb.config.max_iterations,
+                           accumulation_step=1, max_iter=wandb.config.max_iterations, wandb_log=True,
                         exp_name="lightspec_ssl") 
         fit_res = trainer.fit(num_epochs=1, device=local_rank,
                                 early_stopping=40, only_p=False, best='loss', conf=True) 
+        # Log both detailed arrays and mean values
         wandb.log({
-            "val_loss": fit_res['val_loss'],
-            "train_loss": fit_res['train_loss']
+            # Mean values
+            "mean_val_loss": np.mean(fit_res['val_loss']),
+            "mean_train_loss": np.mean(fit_res['train_loss']),
+            
+            # Log as line plots
+            "val_loss_curve": wandb.plot.line_series(
+                xs=list(range(len(fit_res['val_loss']))),
+                ys=[fit_res['val_loss']],
+                keys=["Validation Loss"],
+                title="Validation Loss Over Time",
+                xname="Step"
+            ),
+            "train_loss_curve": wandb.plot.line_series(
+                xs=list(range(len(fit_res['train_loss']))),
+                ys=[fit_res['train_loss']],
+                keys=["Training Loss"],
+                title="Training Loss Over Time",
+                xname="Step"
+            ),
+            
+            # Store raw values for later analysis
+            "val_loss_values": fit_res['val_loss'],
+            "train_loss_values": fit_res['train_loss']
         })
+        
         return np.mean(fit_res['val_loss'])
     
     finally:
@@ -253,7 +293,7 @@ def main():
                 'values': [True, False]
             },
             'max_iterations': {
-                'value': 300
+                'value': 1000
             },
             'freeze_lightcurve': {
                 'values': [True, False]
@@ -267,11 +307,11 @@ def main():
     # Initialize sweep
     sweep_id = wandb.sweep(
         sweep_config,
-        project="moco_hyperparam_search"
+        project="moco_spcetra_hyperparam_search"
     )
     
     # Start sweep
-    wandb.agent(sweep_id, function=train, count=50)
+    wandb.agent(sweep_id, function=train, count=100)
 
 if __name__ == "__main__":
     main()

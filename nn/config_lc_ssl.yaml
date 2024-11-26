@@ -7,7 +7,7 @@ Data:
   model_name: "CNNEncoder"
   batch_size: 16
   num_epochs: 60
-  exp_num: 9
+  exp_num: 10
   max_len_spectra: 3909
   max_days_lc: 720
   lc_freq: 0.0208
@@ -38,7 +38,7 @@ CNNEncoder:
   in_channels: 1
   num_layers: 8
   stride: 1
-  encoder_dims: [32,64,128,256,512,1024]
+  encoder_dims: [32,64,128,256,512]
   kernel_size: 3
   dropout_p: 0.3
   output_dim: 2

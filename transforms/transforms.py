@@ -4,6 +4,9 @@ import time
 from scipy.signal import savgol_filter as savgol
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import scipy.interpolate as interpolate
+from scipy.signal import medfilt
+from scipy.optimize import curve_fit
 
 
 
@@ -490,4 +493,214 @@ class SmoothSpectraGaussian():
         else:
             raise NotImplementedError
         return x, mask, info
+
+
+class LAMOSTSpectrumPreprocessor:
+    """
+    Preprocessing class for LAMOST spectra implementing wavelength correction, 
+    resampling, denoising, continuum normalization, and secondary normalization.
+    
+    Follows preprocessing steps from
+    "Estimating stellar parameters from LAMOST low-resolution spectra", X. Li, B. Lin.
+    """
+    def __init__(self, 
+                 blue_wavelength_range=(3841, 5699),
+                 red_wavelength_range=(5901, 8798),
+                 resample_step=0.0001,
+                 median_filter_size=3,
+                 polynomial_order=5,
+                 plot_steps=False):
+        """
+        Initialize preprocessing parameters.
         
+        Args:
+            blue_wavelength_range (tuple): Wavelength range for blue end
+            red_wavelength_range (tuple): Wavelength range for red end
+            resample_step (float): Logarithmic resampling step size
+            median_filter_size (int): Size of median filter window
+            polynomial_order (int): Order of polynomial for continuum estimation
+        """
+        self.blue_range = blue_wavelength_range
+        self.red_range = red_wavelength_range
+        self.resample_step = resample_step
+        self.median_filter_size = median_filter_size
+        self.polynomial_order = polynomial_order
+        self.plot_steps = plot_steps
+
+    def __call__(self, spectrum, mask=None, info=dict()):
+        """
+        Apply full preprocessing pipeline to input spectrum.
+        
+        Args:
+            spectrum (np.ndarray or torch.Tensor): Input spectrum flux values
+            wavelength (np.ndarray): Original wavelength array
+            radial_velocity (float): Radial velocity for wavelength correction
+        
+        Returns:
+            Preprocessed spectrum
+        """
+        # Convert to numpy if torch tensor
+        if torch.is_tensor(spectrum):
+            spectrum = spectrum.numpy()
+
+        radial_velocity = info['RV']
+        wavelength = info['wavelength']
+
+        if self.plot_steps:
+            fig, ax = plt.subplots(6, 2, figsize=(60, 36), gridspec_kw={'height_ratios': [1, 1, 1, 1, 1, 1]})
+
+            merged_ax = fig.add_subplot(611)  # Spans across both columns
+            print("wavelength shape: ", wavelength.shape, "spectrum shape: ", spectrum.shape)
+            merged_ax.plot(wavelength.squeeze(), spectrum.squeeze())
+            merged_ax.set_title("Original Spectrum")
+        
+        # 1. Wavelength Correction
+        corrected_wavelength = self._wavelength_correction(wavelength, radial_velocity)
+        info['corrected_wavelength'] = corrected_wavelength
+        
+        # Separate blue and red ends
+        blue_mask = (corrected_wavelength >= self.blue_range[0]) & (corrected_wavelength <= self.blue_range[1])
+        red_mask = (corrected_wavelength >= self.red_range[0]) & (corrected_wavelength <= self.red_range[1])
+        
+        blue_wavelength = corrected_wavelength[blue_mask]
+        red_wavelength = corrected_wavelength[red_mask]
+        info['blue_corrected_wavelength'] = blue_wavelength
+        info['red_corrected_wavelength'] = red_wavelength
+        
+        blue_spectrum = spectrum[blue_mask]
+        red_spectrum = spectrum[red_mask]
+
+        if self.plot_steps:
+            ax[1,0].plot(blue_wavelength, blue_spectrum, label='Blue Spectrum')
+            ax[1,1].plot(red_wavelength, red_spectrum, label='Red Spectrum')
+            ax[1, 0].set_title("WV Correction blue", loc='center')
+            ax[1, 1].set_title("WV Correction red", loc='center')
+
+            
+        
+        # 2. Linear Interpolation Resampling (Separately)
+        blue_resampled = self._linear_interpolation_resample(blue_spectrum, blue_wavelength, is_blue=True)
+        red_resampled = self._linear_interpolation_resample(red_spectrum, red_wavelength, is_blue=False)
+
+        if self.plot_steps:
+            ax[2,0].plot(np.arange(len(blue_resampled)), blue_resampled, label='Blue Resampled')
+            ax[2,1].plot(np.arange(len(red_resampled)), red_resampled, label='Red Resampled')
+            ax[2, 0].set_title("Linear Interpolation Resampling blue")
+            ax[2, 1].set_title("Linear Interpolation Resampling red")
+
+        
+        # 3. Denoising (Median Filtering)
+        blue_denoised = self._median_filter_denoise(blue_resampled)
+        red_denoised = self._median_filter_denoise(red_resampled)
+
+        if self.plot_steps:
+            ax[3,0].plot(np.arange(len(blue_denoised)), blue_denoised, label='Blue Denoised')
+            ax[3,1].plot(np.arange(len(red_denoised)), red_denoised, label='Red Denoised')
+            ax[3, 0].set_title("Median Filtering Denoising blue")
+            ax[3, 1].set_title("Median Filtering Denoising red")
+        
+        # 4. Continuum Normalization (Separately)
+        blue_normalized = self._continuum_normalization(blue_denoised, is_blue=True)
+        red_normalized = self._continuum_normalization(red_denoised, is_blue=False)
+
+        if self.plot_steps:
+            ax[4,0].plot(np.arange(len(blue_normalized)), blue_normalized, label='Blue Normalized')
+            ax[4,1].plot(np.arange(len(red_normalized)), red_normalized, label='Red Normalized')
+            ax[4, 0].set_title("Continuum Normalization blue")
+            ax[4, 1].set_title("Continuum Normalization red")
+        
+        # 5. Secondary Denoising and Normalization
+        blue_final = self._secondary_normalization(blue_normalized)
+        red_final = self._secondary_normalization(red_normalized)
+
+        if self.plot_steps:
+            ax[5,0].plot(np.arange(len(blue_final)), blue_final, label='Blue Final')
+            ax[5,1].plot(np.arange(len(red_final)), red_final, label='Red Final')
+            ax[5, 0].set_title("Secondary Normalization blue")
+            ax[5, 1].set_title("Secondary Normalization red")
+            fig.suptitle(f"LAMOST Spectrum Preprocessing - {info['obsid']}")
+            plt.tight_layout()
+            plt.savefig(f'/data/lightSpec/images/lamost_{info["obsid"]}_preprocessing.png')
+        
+        return np.concatenate([blue_final, red_final])[None,:], mask, info
+
+    def _wavelength_correction(self, wavelength, radial_velocity):
+        """
+        Correct wavelength based on radial velocity.
+        
+        λ′ = λ * (1 + RV/c)
+        """
+        c = 299792.458  # Speed of light in km/s
+        return wavelength * (1 + radial_velocity / c)
+
+    def _linear_interpolation_resample(self, spectrum, wavelength, is_blue=True):
+        """
+        Resample spectrum using linear interpolation in logarithmic space.
+        """
+        # Determine wavelength range based on whether it's blue or red end
+        wave_range = self.blue_range if is_blue else self.red_range
+        
+        # Create logarithmic wavelength grid
+        log_wave_start = np.log10(wave_range[0])
+        log_wave_end = np.log10(wave_range[1])
+        new_log_wavelengths = np.arange(
+            log_wave_start, 
+            log_wave_end, 
+            self.resample_step
+        )
+        new_wavelengths = 10 ** new_log_wavelengths
+        
+        # Interpolate spectrum
+        interpolator = interpolate.interp1d(
+            wavelength, 
+            spectrum, 
+            kind='linear', 
+            fill_value='extrapolate'
+        )
+        resampled_spectrum = interpolator(new_wavelengths)
+        
+        return resampled_spectrum
+
+    def _median_filter_denoise(self, spectrum):
+        """
+        Apply median filtering for noise reduction.
+        """
+        return medfilt(spectrum, kernel_size=self.median_filter_size)
+
+    def _continuum_normalization(self, spectrum, is_blue=True):
+        """
+        Estimate and normalize continuum using polynomial fitting.
+        """
+        x = np.arange(len(spectrum))
+        poly_coeffs = np.polyfit(x, spectrum, deg=self.polynomial_order)
+        continuum = np.polyval(poly_coeffs, x)
+        
+        # Normalize by dividing spectrum by its estimated continuum
+        normalized_spectrum = spectrum / continuum
+        
+        return normalized_spectrum
+
+    def _secondary_normalization(self, spectrum):
+        """
+        Secondary normalization with outlier replacement and z-score transformation.
+        """
+        mu = np.mean(spectrum)
+        sigma = np.std(spectrum)
+        
+        # Replace outliers
+        spectrum = np.where(
+            (spectrum < mu - 3*sigma) | (spectrum > mu + 3*sigma), 
+            mu, 
+            spectrum
+        )
+        
+        # Z-score transformation
+        normalized_spectrum = (spectrum - mu) / sigma
+        
+        return normalized_spectrum
+
+    def __repr__(self):
+        return (f"LAMOSTSpectrumPreprocessor("
+                f"blue_range={self.blue_range}, "
+                f"red_range={self.red_range}, "
+                f"resample_step={self.resample_step})")

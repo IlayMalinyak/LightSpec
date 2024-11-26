@@ -205,6 +205,8 @@ class MultimodalMoCo(nn.Module):
         K=65536,  # Queue size
         m=0.999,  # Momentum coefficient
         T=0.07,  # Temperature
+        freeze_lightcurve=True,  # Whether to freeze light curve encoder
+        freeze_spectra=True,  # Whether to freeze spectra encoder
         bidirectional=True  # Whether to train in both directions
     ):
         super(MultimodalMoCo, self).__init__()
@@ -216,8 +218,10 @@ class MultimodalMoCo(nn.Module):
         self.criterion = nn.CrossEntropyLoss()
         
         # Freeze pre-trained encoders (optional, can be fine-tuned)
-        self._freeze_encoder(spectra_encoder)
-        self._freeze_encoder(lightcurve_encoder)
+        if freeze_lightcurve:
+            self._freeze_encoder(spectra_encoder)
+        if freeze_spectra:
+            self._freeze_encoder(lightcurve_encoder)
         
         # Query path: Add projection heads to pre-trained encoders
         self.spectra_encoder_q = spectra_encoder
@@ -333,8 +337,12 @@ class MultimodalMoCo(nn.Module):
         # Compute query features
         # print("spectra shape: ", spectra.shape)
         start = time.time()
-        spectra, _ = self.spectra_encoder_q(spectra)
-        lightcurves, _ = self.lightcurve_encoder_q(lightcurves)
+        spectra = self.spectra_encoder_q(spectra)
+        if isinstance(spectra, tuple):
+            spectra = spectra[0]
+        lightcurves = self.lightcurve_encoder_q(lightcurves)
+        if isinstance(lightcurves, tuple):
+            lightcurves = lightcurves[0]
         q_s = self.spectra_proj_q(spectra)
         q_l = self.lightcurve_proj_q(lightcurves)
         
@@ -349,8 +357,12 @@ class MultimodalMoCo(nn.Module):
 
         with torch.no_grad():
             self._momentum_update()
-            spectra, _ = self.spectra_encoder_k(spectra)
-            lightcurves, _ = self.lightcurve_encoder_k(lightcurves)
+            spectra = self.spectra_encoder_k(spectra)
+            if isinstance(spectra, tuple):
+                spectra = spectra[0]
+            lightcurves = self.lightcurve_encoder_k(lightcurves)
+            if isinstance(lightcurves, tuple):
+                lightcurves = lightcurves[0]
             k_s = self.spectra_proj_k(spectra)
             k_l = self.lightcurve_proj_k(lightcurves)
             
@@ -408,6 +420,7 @@ class LightCurveSpectraMoCo(nn.Module):
     def __init__(self, 
                  spectra_encoder, 
                  lightcurve_encoder, 
+                 hidden_dim=512,
                  projection_dim=256,  # Final projection dimension
                  K=2048, 
                  m=0.999,
@@ -441,12 +454,12 @@ class LightCurveSpectraMoCo(nn.Module):
         
         # Projection heads
 
-        self.light_curve_projector = self._build_projector(lightcurve_out_dim, projection_dim)
+        self.light_curve_projector = self._build_projector(lightcurve_out_dim, hidden_dim, projection_dim)
         
-        self.spectra_projector = self._build_projector(spectra_out_dim, projection_dim)
+        self.spectra_projector = self._build_projector(spectra_out_dim, hidden_dim, projection_dim)
 
 
-        self._freeze_encoder(self.light_curve_projector)
+        self._freeze_projector(self.light_curve_projector, self.spectra_projector)
         
         # Register queue for spectra keys
         # self.register_buffer("spectra_queue", torch.randn(projection_dim, K))
@@ -467,21 +480,27 @@ class LightCurveSpectraMoCo(nn.Module):
     def _freeze_encoder(self, encoder):
         """Freeze encoder parameters"""
         for name, param in encoder.named_parameters():
-            # print(name)
-            # if ('blocks.11' not in name):
             param.requires_grad = False
         
+    def _freeze_projector(self, k_projector, q_projector):
+        """Freeze projector parameters"""
+        for param_k, param_q in zip(k_projector.parameters(), q_projector.parameters()):
+            if param_k.shape == param_q.shape:
+                param_k.requires_grad = False
+                param_k.data = param_q.data
     
-    def _build_projector(self, in_dim, out_dim):
+    def _build_projector(self, in_dim, hidden_dim, out_dim):
         """Modified projector with layer normalization"""
         return nn.Sequential(
-            nn.Linear(in_dim, in_dim),
-            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Dropout(0.2),
             nn.ReLU(),
-            nn.Linear(in_dim, out_dim),
-            nn.LayerNorm(out_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
             nn.Dropout(0.2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, out_dim),
         )
     
     @torch.no_grad()
@@ -569,6 +588,7 @@ class LightCurveSpectraMoCo(nn.Module):
     def _momentum_update_key_encoder(self, query_encoder, key_encoder):
         """
         Momentum update where key_encoder is updated based on query_encoder
+        only for the parameters that are shared between the two encoders
         
         Args:
             query_encoder (nn.Module): The encoder being trained
@@ -578,13 +598,15 @@ class LightCurveSpectraMoCo(nn.Module):
             query_encoder.parameters(), 
             key_encoder.parameters()
         ):
-            param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
+            if param_k.shape == param_q.shape:
+                param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
     
     def forward(self, light_curves, spectra):
         # Query features from light curves
-        q = self.spectra_projector(
-            self.spectra_encoder(spectra)[0]
-        )
+        q = self.spectra_encoder(spectra)
+        if isinstance(q, tuple):
+            q = q[0]
+        q = self.spectra_projector(q)
         q = F.normalize(q, dim=1)
 
         
@@ -596,8 +618,9 @@ class LightCurveSpectraMoCo(nn.Module):
                 self.light_curve_projector  # Query encoder
             )
             # k, idx_unshuffle = self._batch_shuffle_ddp(self.light_curve_encoder(light_curves)[0])
-            k = self.light_curve_encoder(light_curves)[0]
-
+            k = self.light_curve_encoder(light_curves)
+            if isinstance(k, tuple):
+                k = k[0]
             # Compute key features using momentum-updated encoder
             k = self.light_curve_projector(k)
             k = F.normalize(k, dim=1)

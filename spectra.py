@@ -13,6 +13,7 @@ import matplotlib as mpl
 import yaml
 import json
 from collections import OrderedDict
+import datetime
 
 
 import sys
@@ -24,14 +25,20 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
+from nn.cnn import CNNEncoderDecoder
 from nn.train import MaskedSSLTrainer
 from nn.utils import deepnorm_init
 from nn.scheduler import WarmupScheduler
-from util.utils import Container, plot_fit, plot_lr_schedule
+from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn
 
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
+
+models = {'CNNEncoderDecoder': CNNEncoderDecoder, 'AstroEncoderDecoder': AstroEncoderDecoder}
+
+current_date = datetime.date.today().strftime("%Y-%m-%d")
+datetime_dir = f"spec_{current_date}"
 
 
 def setup():
@@ -56,20 +63,25 @@ def setup():
 
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_spectra_ssl.yaml'
-model_name = 'Astroconformer'
-model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 exp_num = data_args.exp_num
-if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
-    os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
+model_name = data_args.model_name
+model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
+optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
+    os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
-transforms = Compose([MovingAvg(7),
-                       Normalize("minmax", axis=0),
-                        # SmoothSpectraGaussian(sigma=35),
-                        AvgDetrend(kernel_size=100),
+# transforms = Compose([MovingAvg(7),
+#                        Normalize("minmax", axis=0),
+#                         # SmoothSpectraGaussian(sigma=35),
+#                         AvgDetrend(kernel_size=100),
+#                         ToTensor(),
+#                          RandomMasking()])
+transforms = Compose([LAMOSTSpectrumPreprocessor(plot_steps=False),
                         ToTensor(),
-                         RandomMasking()])
+                         ])
+
+
 train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, max_len=int(data_args.max_len_spectra))
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
@@ -77,17 +89,13 @@ train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
 # expected_shape = data_args.max_len_spectra
-# start = time.time()
-# for i in range(len(train_dataset)):
-#     if i % 10000 == 0:
-#         print(f"processing {i}", time.time()-start)
-#     x_masked, x, mask = train_dataset[i]
-#     if (x.shape[0] != expected_shape) or (x_masked.shape[0] != expected_shape) or (mask.shape[0] != expected_shape):
-#         print(f"shape mismatch: {i}, {x.shape}, {x_masked.shape}, {mask.shape}")
-# print("average time taken per iteration: ", (time.time()-start)/len(train_dataset))
+start = time.time()
+for i in range(100):
+    x_masked, x, mask, _, info, _ = train_dataset[i]
+    # print(x_masked.shape, x.shape, mask.shape, info.keys())
+print("average time taken per iteration: ", (time.time()-start)/100)
 
-
-model = AstroEncoderDecoder(model_args)
+model = models[model_name](model_args)
 model = model.to(local_rank)
 
 model_suffix = 0
@@ -106,19 +114,26 @@ if model_args.load_checkpoint:
 else:
     deepnorm_init(model, model_args)
 
-model = DDP(model, device_ids=[local_rank])
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
-train_dataloader = DataLoader(train_subset, batch_size=int(data_args.batch_size), sampler=train_sampler, \
-                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]), pin_memory=True)
+train_dataloader = DataLoader(train_subset, batch_size=int(data_args.batch_size),
+                                             sampler=train_sampler, \
+                                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                               collate_fn=kepler_collate_fn,
+                                               )
 
 
 val_sampler = torch.utils.data.distributed.DistributedSampler(val_subset, num_replicas=world_size, rank=local_rank)
-val_dataloader = DataLoader(val_subset, batch_size=int(data_args.batch_size), sampler=val_sampler, \
-                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+val_dataloader = DataLoader(val_subset,
+                                 batch_size=int(data_args.batch_size),
+                                 sampler=val_sampler, \
+                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                collate_fn=kepler_collate_fn,
+                                )
     
 loss_fn = torch.nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
@@ -145,22 +160,40 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
 #         max_momentum=0.95,
 #         div_factor=10.0,
 #         final_div_factor=100.0
-#     )
+    # )
 fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
+
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{checkpoint_num}_complete_config.yaml"
+
+complete_config = {
+    "model_name": model_name,
+    "data_args": data_args.__dict__,
+    "model_args": model_args.__dict__,
+    "optim_args": optim_args.__dict__,
+    "num_params": num_params,
+    "model_structure": str(model),  # Add the model structure to the configuration
+    "transforms": str(transforms)
+}
+
+# Save the complete configuration to a YAML file
+with open(config_save_path, "w") as config_file:
+    yaml.dump(complete_config, config_file, default_flow_style=False)
+
+print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 trainer = MaskedSSLTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=scaler, grad_clip=True,
                        scheduler=scheduler, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
+                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,
-                        exp_name=f"astroconf_spectra_{checkpoint_num}") 
+                        exp_name=f"{model_name}_spectra_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/exp{exp_num}/astroconf_{checkpoint_num}.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_{checkpoint_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/{model_name}_fit_{checkpoint_num}.png")
 plt.clf()

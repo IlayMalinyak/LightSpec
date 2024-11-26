@@ -90,21 +90,25 @@ class SpectraDataset(Dataset):
           header = hdulist[0].header
         x = binaryext['FLUX'].astype(np.float32)
         wv = binaryext['WAVELENGTH'].astype(np.float32)
-        meta = dict()
-        return x,wv, meta
+        rv = header['HELIO_RV']
+        meta = {'RV': rv, 'wavelength': wv}
+        return x, meta
 
 
     def __getitem__(self, idx):
+        obsid = os.path.basename(self.path_list[idx])
         try:
-            spectra, wv, meta = self.read_spectra(self.path_list[idx])
+            spectra, meta = self.read_spectra(self.path_list[idx])
         except OSError:
             print("Error reading file ", self.path_list[idx])
-            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(self.max_len, dtype=torch.bool)
+            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(self.max_len, dtype=torch.bool),\
+            torch.zeros(self.max_len, dtype=torch.bool), {'obsid': obsid}, {'obsid': obsid}
+        meta['obsid'] = obsid
         # spectra = torch.tensor(spectra, dtype=torch.float32)
         # wv = torch.tensor(wv, dtype=torch.float32).squeeze()
         # mask = torch.zeros_like(spectra)
         if self.transforms:
-            spectra, _, _ = self.transforms(spectra, None, meta)
+            spectra, _, info = self.transforms(spectra, None, meta)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, meta)
         if spectra_masked.shape[-1] < self.max_len:
             pad = torch.zeros(1, self.max_len - spectra_masked.shape[-1])
@@ -114,8 +118,8 @@ class SpectraDataset(Dataset):
             pad_spectra = torch.zeros(1, self.max_len - spectra.shape[-1])
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
         spectra = torch.nan_to_num(spectra, nan=0)
-
-        return spectra_masked.float().squeeze(0), spectra.float().squeeze(0), mask.squeeze(0)
+        return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
+         mask.squeeze(0),mask.squeeze(0), info, info)
 
 if __name__ == '__main__':
     s_transforms = Compose([MovingAvg(7), Normalize("minmax", axis=0), ])

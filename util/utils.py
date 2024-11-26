@@ -131,7 +131,7 @@ def plot_lr_schedule(scheduler, steps_per_epoch, epochs):
         lrs.append(scheduler.get_last_lr()[0])
         scheduler.optimizer.step()
         scheduler.step()
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=(28, 15))
     plt.plot(lrs)
     plt.title("Learning Rate Schedule")
     plt.xlabel("Step")
@@ -377,4 +377,21 @@ def get_all_samples_df(num_qs:int=8, read_from_csv:bool=True):
         kepler_df = kepler_df[kepler_df['consecutive_qs'] >= num_qs]
         kepler_df['longest_consecutive_qs_indices'] = kepler_df['longest_consecutive_qs_indices'].apply(convert_ints_to_list)
     return kepler_df
+
+def giant_cond(x):
+    """
+    condition for red giants in kepler object.
+    the criterion for red giant is given in Ciardi et al. 2011
+    :param: x row in dataframe with columns - Teff, logg
+    :return: boolean
+    """
+    logg, teff = x['logg'], x['Teff']
+    if teff >= 6000:
+        thresh = 3.5
+    elif teff <= 4250:
+        thresh = 4
+    else:
+        thresh = 5.2 - (2.8 * 1e-4 * teff)
+    return logg >= thresh
+
 
