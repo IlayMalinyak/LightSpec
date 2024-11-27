@@ -81,6 +81,7 @@ class Trainer(object):
         best_acc = 0
         train_loss, val_loss,  = [], []
         train_acc, val_acc = [], []
+        lrs = []
         # self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
         main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
@@ -128,6 +129,8 @@ class Trainer(object):
 
                 current_lr = self.optimizer.param_groups[0]['lr'] if self.scheduler is None \
                             else self.scheduler.get_last_lr()[0]
+                
+                lrs.append(current_lr)
 
                 print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
@@ -144,7 +147,7 @@ class Trainer(object):
                     break 
 
         return {"num_epochs":num_epochs, "train_loss": train_loss,
-                 "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc}
+                 "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc, "lrs": lrs}
 
     def process_loss(self, acc, loss_mean):
         if  torch.cuda.is_available() and torch.distributed.is_initialized():
@@ -320,7 +323,12 @@ class MaskedSSLTrainer(Trainer):
         if out.isnan().sum() > 0:
             print("nan in out, idx: ", batch_idx)
         loss = self.criterion(out, y)
-        
+
+        if loss.isnan():
+            print("nan in loss, idx: ", batch_idx)
+            print("out range", out.min(), out.max())
+            print("y range", y.min(), y.max())
+            
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
             if (batch_idx + 1) % self.accumulation_step == 0:

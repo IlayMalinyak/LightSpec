@@ -17,6 +17,7 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
+from dataset.sampler import DistributedUniqueLightCurveSampler
 
 mpl.rcParams['axes.linewidth'] = 4
 plt.rcParams.update({'font.size': 30, 'figure.figsize': (14,10), 'lines.linewidth': 4})
@@ -118,6 +119,7 @@ class SpectraDataset(Dataset):
             pad_spectra = torch.zeros(1, self.max_len - spectra.shape[-1])
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
         spectra = torch.nan_to_num(spectra, nan=0)
+        spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
          mask.squeeze(0),mask.squeeze(0), info, info)
 
@@ -368,12 +370,13 @@ class LightSpecDataset(KeplerDataset):
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:
-            binaryext = hdulist[1].data
-            header = hdulist[0].header
+          binaryext = hdulist[1].data
+          header = hdulist[0].header
         x = binaryext['FLUX'].astype(np.float32)
         wv = binaryext['WAVELENGTH'].astype(np.float32)
-        meta = dict()
-        return x,wv, meta
+        rv = header['HELIO_RV']
+        meta = {'RV': rv, 'wavelength': wv}
+        return x, meta
 
     def __getitem__(self, idx):
         light, _, _, _, info, _ = super().__getitem__(idx)
@@ -382,16 +385,33 @@ class LightSpecDataset(KeplerDataset):
         info['obsid'] = obsid
         spectra_filename = os.path.join(self.spec_path, f'{obsid}.fits')
         try:
-            spectra, wv, meta = self.read_spectra(spectra_filename)
+            spectra, meta = self.read_spectra(spectra_filename)
         except OSError as e:
             print("Error reading file ", obsid, e)
             spectra = np.zeros((1, self.spec_seq_len))
-            meta = dict()
-        # spectra = torch.tensor(spectra, dtype=torch.float32)
-        # wv = torch.tensor(wv, dtype=torch.float32).squeeze()
-        # mask = torch.zeros_like(spectra)
+            meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
         if self.spec_transforms:
-            spectra, _, _ = self.spec_transforms(spectra, None, meta)
+            spectra, _, spec_info = self.spec_transforms(spectra, None, meta)
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
+        info.update(spec_info)
         return light.float(), spectra.float(), torch.zeros_like(light), torch.zeros_like(spectra), info, info
+    
+
+
+def create_moco_loader(dataset, batch_size, num_workers=4, **kwargs):
+    """
+    Create a distributed data loader with the custom sampler
+    """
+    sampler = DistributedUniqueLightCurveSampler(
+        dataset, 
+        batch_size=batch_size
+    )
+    
+    return torch.utils.data.DataLoader(
+        dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=num_workers,
+        **kwargs
+    )

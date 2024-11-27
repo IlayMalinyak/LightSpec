@@ -26,10 +26,10 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
-from dataset.dataset import LightSpecDataset
+from dataset.dataset import LightSpecDataset, create_moco_loader
 from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
-from nn.cnn import CNNEncoder
+from nn.cnn import CNNEncoder, CNNEncoderDecoder
 from nn.mlp import MLPEncoder
 from nn.simsiam import MultiModalSimSiam
 from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
@@ -37,6 +37,7 @@ from nn.simsiam import SimSiam, projection_MLP
 from nn.utils import deepnorm_init
 from util.utils import *
 from nn.train import ContrastiveTrainer
+from tests.test_unique_sampler import run_sampler_tests
 
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar']
 
@@ -46,7 +47,8 @@ torch.cuda.empty_cache()
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"lightspec_{current_date}"
 
-models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'AstroEncoderDecoder': AstroEncoderDecoder}
+models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder,
+           'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lightspec_ssl.yaml'
@@ -54,6 +56,8 @@ data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
 light_model_name = data_args.light_model_name
 spec_model_name = data_args.spec_model_name
+if data_args.test_run:
+    datetime_dir = f"test_{current_date}"
 light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[light_model_name])
 spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[spec_model_name])
 sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['SimSiam'])
@@ -63,13 +67,12 @@ if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
 light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
-                        Normalize('std'),
-                        ToTensor(),
+                            MovingAvg(13),
+                            Normalize('std'),
+                            ToTensor(),
                          ])
-spec_transforms = Compose([MovingAvg(7),
-                           Normalize("minmax", axis=0),
-                        #    AvgDetrend(kernel_size=100),
-                           ToTensor(),
+spec_transforms = Compose([LAMOSTSpectrumPreprocessor(plot_steps=False),
+                            ToTensor()
                            ])
 
 kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
@@ -123,41 +126,63 @@ train_indices, val_indices = train_test_split(indices, test_size=0.2, random_sta
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
-start = time.time()
-no_founds = 0
-for i in range(100):
-    light, spec, _,_, info,_ = train_dataset[i]
-    if light.sum() == 0:
-        no_founds += 1
-    # print(light.shape, spec.shape)
-print("average time taken per iteration: ", (time.time()-start)/100)
-print("no_founds: ", no_founds)
+# start = time.time()
+# no_founds = 0
+# for i in range(10):
+#     light, spec, _,_, info,_ = train_dataset[i]
+#     if light.sum() == 0:
+#         no_founds += 1
+#     print(light.shape, spec.shape, info.keys())
+#     fig, axes = plt.subplots(1,2, figsize=(24,14))
+#     axes[0].plot(light[0].cpu().numpy())
+#     axes[1].plot(spec[0].cpu().numpy())
+#     axes[0].set_title(f"Lightcurve: {info['KID']}")
+#     axes[1].set_title(f"Spectrum: {info['obsid']}")
+#     plt.savefig(f'/data/lightSpec/images/lightspec_{i}.png')
+#     plt.close()
+#     # print(light.shape, spec.shape)
+# print("average time taken per iteration: ", (time.time()-start)/100)
+# print("no_founds: ", no_founds)
 
-train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
+run_sampler_tests(val_subset, batch_size=32, num_batches=10)
 
-train_dataloader = DataLoader(train_subset,
-                              batch_size=int(data_args.batch_size), \
-                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                              collate_fn=kepler_collate_fn,
-                              sampler=train_sampler)
+exit()
+
+train_dataloader = create_moco_loader(train_subset,
+                                      batch_size=int(data_args.batch_size), \
+                                      num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                      collate_fn=kepler_collate_fn )
+
+val_dataloader = create_moco_loader(val_subset,
+                                    batch_size=int(data_args.batch_size),
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                    collate_fn=kepler_collate_fn,
+                                    )
+# train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
+
+# train_dataloader = DataLoader(train_subset,
+#                               batch_size=int(data_args.batch_size), \
+#                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+#                               collate_fn=kepler_collate_fn,
+#                               sampler=train_sampler)
 
 
-val_sampler = torch.utils.data.distributed.DistributedSampler(val_subset, num_replicas=world_size, rank=local_rank)
+# val_sampler = torch.utils.data.distributed.DistributedSampler(val_subset, num_replicas=world_size, rank=local_rank)
 
-val_dataloader = DataLoader(val_subset,
-                            batch_size=int(data_args.batch_size),
-                            collate_fn=kepler_collate_fn,
-                            sampler=val_sampler, \
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+# val_dataloader = DataLoader(val_subset,
+#                             batch_size=int(data_args.batch_size),
+#                             collate_fn=kepler_collate_fn,
+#                             sampler=val_sampler, \
+#                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
 light_backbone = models[light_model_name](light_model_args)
 if light_model_name == 'Astroconformer':
     light_backbone.pred_layer = torch.nn.Identity()
 light_model = SimSiam(light_backbone)
 
-if light_model_args.load_light_checkpoint:
+if light_model_args.load_checkpoint:
     print("****Loading light checkpoint****")
-    state_dict = torch.load(f'{light_model_args.light_checkpoint_path}', map_location=torch.device('cpu'))
+    state_dict = torch.load(f'{light_model_args.checkpoint_path}', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -175,9 +200,9 @@ else:
 
 spec_model = models[spec_model_name](spec_model_args)
 
-if spec_model_args.load_spec_checkpoint:
+if spec_model_args.load_checkpoint:
     print("****Loading spectra checkpoint******")
-    state_dict = torch.load(f'{spec_model_args.spec_checkpoint_path}', map_location=torch.device('cpu'))
+    state_dict = torch.load(f'{spec_model_args.checkpoint_path}', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -191,12 +216,12 @@ else:
     print("****deepnorm init for spectra****")
     deepnorm_init(spec_model, spec_model_args)
 
-# model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
 # model = LightCurveSpectraMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
 simsiam_backbone = projection_MLP(in_dim=sims_args.input_dim,
                                     hidden_dim=sims_args.hidden_dim,
                                      out_dim=sims_args.output_dim)
-model = MultiModalSimSiam(simsiam_backbone, light_model.backbone, spec_model.encoder).to(local_rank)
+# model = MultiModalSimSiam(simsiam_backbone, light_model.backbone, spec_model.encoder).to(local_rank)
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -234,5 +259,5 @@ output_filename = f'{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_lightspec_{exp_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lightspec_fit_{exp_num}.png")
 plt.clf()

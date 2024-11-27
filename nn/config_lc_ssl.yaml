@@ -6,7 +6,7 @@ Data:
   data_dir: '/data/lightPred/data'
   model_name: "CNNEncoder"
   batch_size: 16
-  num_epochs: 60
+  num_epochs: 120
   exp_num: 10
   max_len_spectra: 3909
   max_days_lc: 720
@@ -47,6 +47,7 @@ CNNEncoder:
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
+  avg_output: True
 
 Mamba:
   # Model
@@ -66,10 +67,10 @@ Mamba:
 
 Optimization SSL:
   # Optimization
-  max_lr: 1e-5
+  max_lr: 5e-5
   weight_decay: 1e-5
   warmup_pct: 0.15
-  steps_per_epoch: 3500
+  steps_per_epoch: 2500
 
 Optimization:
   # Optimization

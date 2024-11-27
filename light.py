@@ -14,6 +14,7 @@ import yaml
 import json
 from collections import OrderedDict
 import warnings
+import datetime
 warnings.filterwarnings("ignore")
 
 import sys
@@ -37,6 +38,9 @@ torch.cuda.empty_cache()
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder}
 
+current_date = datetime.date.today().strftime("%Y-%m-%d")
+datetime_dir = f"light_{current_date}"
+
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lc_ssl.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
@@ -44,12 +48,13 @@ model_name = data_args.model_name
 exp_num = data_args.exp_num
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
-if not os.path.exists(f"{data_args.log_dir}/exp{exp_num}"):
-    os.makedirs(f"{data_args.log_dir}/exp{exp_num}")
+if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
+    os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
 transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                     #   FillNans(interpolate=True),
                         MovingAvg(13),
+                        RandomMasking(mask_prob=0.05),
                         # RandomTransform([AddGaussianNoise(sigma=0.0001),
                         #                 RandomMasking(mask_prob=0.05),
                         #                 Shuffle(segment_len=270/data_args.lc_freq),
@@ -125,21 +130,25 @@ val_dataloader = DataLoader(val_subset,
 loss_fn = torch.nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
-scheduler = OneCycleLR(
-        optimizer,
-        max_lr=float(optim_args.max_lr),
-        epochs= int(data_args.num_epochs),
-        steps_per_epoch = len(train_dataloader),
-        pct_start=float(optim_args.warmup_pct),
-        anneal_strategy='cos',
-        cycle_momentum=True,
-        base_momentum=0.85,
-        max_momentum=0.95,
-        div_factor=10.0,
-        final_div_factor=100.0
-    )
+total_steps = int(data_args.num_epochs) * len(train_dataloader)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
+                                                    T_max=total_steps,
+                                                    eta_min=float(optim_args.max_lr)/10)
+# scheduler = OneCycleLR(
+#         optimizer,
+#         max_lr=float(optim_args.max_lr),
+#         epochs= int(data_args.num_epochs),
+#         steps_per_epoch = len(train_dataloader),
+#         pct_start=float(optim_args.warmup_pct),
+#         anneal_strategy='cos',
+#         cycle_momentum=True,
+#         base_momentum=0.85,
+#         max_momentum=0.95,
+#         div_factor=10.0,
+#         final_div_factor=100.0
+#     )
 
-config_save_path = f"{data_args.log_dir}/exp{exp_num}/{model_name}_lc_{checkpoint_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{checkpoint_num}_complete_config.yaml"
 
 complete_config = {
     "model_name": model_name,
@@ -156,20 +165,20 @@ with open(config_save_path, "w") as config_file:
     yaml.dump(complete_config, config_file, default_flow_style=False)
 
 print(f"Configuration (with model structure) saved at {config_save_path}.")
-# fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-# plt.savefig(f"{data_args.log_dir}/exp{exp_num}/lr_schedule.png")
+fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=scaler,
-                       scheduler=None, train_dataloader=train_dataloader,
+                       scheduler=scheduler, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=exp_num, log_path=data_args.log_dir, range_update=None,
+                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,
                         exp_name=f"{model_name}_lc_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/exp{exp_num}/{model_name}_lc_{checkpoint_num}.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/exp{exp_num}/fit_{model_name}_lc_{checkpoint_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_lc_{checkpoint_num}.png")
 plt.clf()

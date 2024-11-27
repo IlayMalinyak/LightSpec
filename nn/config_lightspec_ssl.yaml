@@ -3,7 +3,7 @@ Data:
   log_dir: '/data/lightSpec/logs'
   exp_num: 7
   light_model_name: "CNNEncoder"
-  spec_model_name: "AstroEncoderDecoder"
+  spec_model_name: "CNNEncoderDecoder"
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
@@ -13,6 +13,7 @@ Data:
   max_len_spectra: 3909
   max_days_lc: 720
   lc_freq: 0.0208
+  test_run: True
 
 Astroconformer:
   # Model
@@ -57,19 +58,36 @@ AstroEncoderDecoder:
 CNNEncoder:
   # Model
   in_channels: 1
-  num_layers: 6
+  num_layers: 8
   stride: 1
-  encoder_dims: [64,128,256,512]
+  encoder_dims: [32,64,128,256,512]
   kernel_size: 3
   dropout_p: 0.2
   output_dim: 2
   beta: 1
   load_checkpoint: True
+  avg_output: True
   checkpoint_num: 2
   activation: "sine"
   sine_w0: 1.0
-  load_light_checkpoint: False
-  light_checkpoint_path: '/data/lightSpec/logs/exp9/CNNEncoder_lc_2.pth'
+  load_checkpoint: True
+  checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
+
+CNNEncoderDecoder:
+  # Model
+  in_channels: 1
+  num_layers: 6
+  stride: 1
+  encoder_dims: [32,64,128,256,512]
+  kernel_size: 3
+  dropout_p: 0.3
+  avg_output: True
+  output_dim: 2
+  beta: 1
+  load_checkpoint: True
+  checkpoint_path: '/data/lightSpec/logs/spec_2024-11-27/CNNEncoderDecoder_spectra_1.pth'
+  checkpoint_num: 2
+  activation: "silu"
 
 MoCo:
   # Model

@@ -73,7 +73,7 @@ def plot_fit(
         fig, axes = plt.subplots(
             nrows=nrows,
             ncols=ncols,
-            figsize=(8 * ncols, 5 * nrows),
+            figsize=(12 * ncols, 8 * nrows),
             sharex="col",
             sharey=False,
             squeeze=False,

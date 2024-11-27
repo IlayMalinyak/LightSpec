@@ -1,10 +1,11 @@
 import os
+# os.system("pip install mamba-ssm[causal-conv1d]")
 import torch
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader, Subset
 from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR
 from astropy.io import fits
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -26,6 +27,7 @@ from transforms.transforms import *
 from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
 from nn.cnn import CNNEncoderDecoder
+# from nn.mamba import MambaSeq2Seq
 from nn.train import MaskedSSLTrainer
 from nn.utils import deepnorm_init
 from nn.scheduler import WarmupScheduler
@@ -36,6 +38,9 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
 models = {'CNNEncoderDecoder': CNNEncoderDecoder, 'AstroEncoderDecoder': AstroEncoderDecoder}
+          
+schedulers = {'WarmupScheduler': WarmupScheduler, 'OneCycleLR': OneCycleLR,
+ 'CosineAnnealingLR': CosineAnnealingLR, 'none': None}
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"spec_{current_date}"
@@ -66,10 +71,13 @@ args_dir = '/data/lightSpec/nn/config_spectra_ssl.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
 model_name = data_args.model_name
+if data_args.test_run:
+    datetime_dir = f"test_{current_date}"
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
+
 
 # transforms = Compose([MovingAvg(7),
 #                        Normalize("minmax", axis=0),
@@ -101,9 +109,8 @@ model = model.to(local_rank)
 model_suffix = 0
 checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
-    prev_checkpoint_num = checkpoint_num - 1
     print("****Loading checkpoint******")
-    state_dict = torch.load(f'{data_args.log_dir}/exp{exp_num}/astroconf_spectra_{prev_checkpoint_num}.pth', map_location=torch.device('cpu'))
+    state_dict = torch.load(f'{model_args.checkpoint_path}', map_location=torch.device('cpu'))
     new_state_dict = OrderedDict()
     for key, value in state_dict.items():
         while key.startswith('module.'):
@@ -139,32 +146,15 @@ loss_fn = torch.nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 total_steps = int(data_args.num_epochs) * len(train_dataloader)
-# scheduler = WarmupScheduler(optimizer,
-#                             warmup_steps=total_steps//10,
-#                             total_steps=total_steps,
-#                             base_lr=float(optim_args.max_lr)/100,
-#                                 final_lr=float(optim_args.max_lr))
+scheduler = schedulers[optim_args.scheduler]
+if scheduler is not None:
+    scheduler = scheduler(optimizer, **optim_args.scheduler_args)
+    print("scheduler ", scheduler)
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
-                                                    T_max=total_steps,
-                                                    eta_min=float(optim_args.max_lr)/100)
-# scheduler = OneCycleLR(
-#         optimizer,
-#         max_lr=float(optim_args.max_lr),
-#         epochs= int(data_args.num_epochs),
-#         steps_per_epoch = len(train_dataloader),
-#         pct_start=float(optim_args.warmup_pct),
-#         anneal_strategy='cos',
-#         cycle_momentum=True,
-#         base_momentum=0.85,
-#         max_momentum=0.95,
-#         div_factor=10.0,
-#         final_div_factor=100.0
-    # )
 fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
 plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
 
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{checkpoint_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_{checkpoint_num}_complete_config.yaml"
 
 complete_config = {
     "model_name": model_name,
@@ -191,9 +181,9 @@ trainer = MaskedSSLTrainer(model=model, optimizer=optimizer,
                         exp_name=f"{model_name}_spectra_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_{checkpoint_num}.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/{model_name}_fit_{checkpoint_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_fit_{checkpoint_num}.png")
 plt.clf()
