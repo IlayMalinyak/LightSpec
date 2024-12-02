@@ -88,6 +88,47 @@ class prediction_MLP(nn.Module):
         x = self.layer2(x)
         return x 
 
+def weighted_info_nce_loss(features, sample_properties, t):
+    # Calculate cosine similarity
+    cos_sim = F.cosine_similarity(features[:, None, :], features[None, :, :], dim=-1)
+    # print("cos_sim: ", cos_sim.shape, cos_sim.max(), cos_sim.min())
+    
+    # Mask out cosine similarity to itself
+    self_mask = torch.eye(cos_sim.shape[0], dtype=torch.bool, device=cos_sim.device)
+    cos_sim.masked_fill_(self_mask, -9e15)
+    
+    # Find positive pairs 
+    batch_size = cos_sim.shape[0] // 2
+    pos_mask = torch.zeros_like(cos_sim, dtype=torch.bool)
+    pos_mask[torch.arange(batch_size), torch.arange(batch_size) + batch_size] = True
+    pos_mask[torch.arange(batch_size) + batch_size, torch.arange(batch_size)] = True
+    
+    # Compute L2 distance between sample properties
+    prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
+    # print("prop_distances: ", prop_distances.shape, prop_distances.max(), prop_distances.min())
+    
+    # Normalize distances to use as weights
+    distance_weights = (prop_distances - prop_distances.min()) / (prop_distances.max() - prop_distances.min())
+    # distance_weights = prop_distances 
+    
+    # Create a mask for negative pairs (non-diagonal, non-positive elements)
+    negative_mask = ~(self_mask | pos_mask)
+    
+    # Apply temperature scaling
+    cos_sim = cos_sim / t
+    
+    # Create a copy of cos_sim to modify for weighted loss
+    weighted_cos_sim = cos_sim.clone()
+    
+    # Scale negative similarities by their distance weights
+    weighted_cos_sim[negative_mask] *= (1 + distance_weights[negative_mask])
+    
+    # Compute negative log-likelihood with weighted similarities
+    nll = -cos_sim[pos_mask] + torch.logsumexp(weighted_cos_sim, dim=-1)
+    nll = nll.mean()
+    
+    return nll
+
 def info_nce_loss(features, t):
     # Calculate cosine similarity
     cos_sim = F.cosine_similarity(features[:, None, :], features[None, :, :], dim=-1)
@@ -98,18 +139,19 @@ def info_nce_loss(features, t):
     pos_mask = self_mask.roll(shifts=cos_sim.shape[0] // 2, dims=0)
     # InfoNCE loss
     cos_sim = cos_sim / t
+    print("info nce loss cos_sim: ", cos_sim.shape)
     nll = -cos_sim[pos_mask] + torch.logsumexp(cos_sim, dim=-1)
     nll = nll.mean()
     return nll
 
 class SimCLR(nn.Module):
-    def __init__(self, backbone, hidden_dim=64):
+    def __init__(self, backbone, args):
         super(SimCLR, self).__init__()
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.num_features,
-                                        hidden_dim=hidden_dim, out_dim=hidden_dim)
-        self.predictor = prediction_MLP(in_dim=hidden_dim,
-                                        hidden_dim=hidden_dim//2, out_dim=hidden_dim)
+        self.projector = projection_MLP(backbone.output_idm,
+                                        hidden_dim=args.hidden_dim, out_dim=args.hidden_dim)
+        self.predictor = prediction_MLP(in_dim=args.hidden_dim,
+                                        hidden_dim=args.hidden_dim//2, out_dim=args.hidden_dim)
     def forward(self, x, temperature=1.0):
         z = self.backbone(x)
         p = self.projector(z)
@@ -138,26 +180,62 @@ class SimSiam(nn.Module):
         L = D(p1, z2) / 2 + D(p2, z1) / 2
         return {'loss': L}
 
-
-class MultiModalSimSiam(nn.Module):
-    def __init__(self, backbone, lightcurve_backbone, spectra_backbone):
+class MultiModalSimCLR(nn.Module):
+    def __init__(self, backbone,
+                  lightcurve_backbone,
+                    spectra_backbone,
+                    args):
         super().__init__()
         
         self.lightcurve_backbone = lightcurve_backbone
         self.spectra_backbone = spectra_backbone
-        # self.__freeze_backbone()
+        if args.freeze_backbone:
+            self.__freeze_backbone()
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.output_dim, hidden_dim=128, out_dim=128)
+        self.projector = projection_MLP(backbone.output_dim,
+                                        hidden_dim=args.hidden_dim, out_dim=args.hidden_dim)
+        self.predictor = prediction_MLP(in_dim=args.hidden_dim,
+                                        hidden_dim=args.hidden_dim//2, out_dim=args.hidden_dim)
+        # print all trainable parameters
+    
+    def __freeze_backbone(self):
+        for param in self.lightcurve_backbone.parameters():
+            param.requires_grad = False
+        for param in self.spectra_backbone.parameters():
+            param.requires_grad = False
+    
+    def forward(self, lightcurve, spectra, w, temperature=1.0):
+        x1 = self.lightcurve_backbone(lightcurve)
+        x2 = self.spectra_backbone(spectra)
+        x = torch.cat((x1, x2), dim=0)
+        w = torch.cat((w, w), dim=0)
+        z = self.backbone(x)
+        p = self.projector(z)
+        p = self.predictor(p)
+        # print("p: ", p.shape, "z: ", z.shape)
+        L = weighted_info_nce_loss(p, w, t=temperature)
+        return {'loss': L, 'features': z, 'predictions': p}
+
+class MultiModalSimSiam(nn.Module):
+    def __init__(self, backbone,
+                  lightcurve_backbone,
+                    spectra_backbone,
+                    args):
+        super().__init__()
+        
+        self.lightcurve_backbone = lightcurve_backbone
+        self.spectra_backbone = spectra_backbone
+        if args.freeze_backbone:
+            self.__freeze_backbone()
+        self.backbone = backbone
+        self.projector = projection_MLP(backbone.output_dim, hidden_dim=args.hidden_dim, out_dim=args.projection_dim)
 
         self.encoder = nn.Sequential( # f encoder
             self.backbone,
             self.projector
         )
-        self.predictor = prediction_MLP(in_dim=128, hidden_dim=64, out_dim=128)
-        # print all trainable parameters
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                print(name)
+        self.predictor = prediction_MLP(in_dim=args.projection_dim, hidden_dim=args.projection_dim //2 ,
+                                     out_dim=args.output_dim)
     
     def __freeze_backbone(self):
         for param in self.lightcurve_backbone.parameters():

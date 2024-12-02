@@ -378,21 +378,25 @@ class MaskedSSLTrainer(Trainer):
 
 
 class ContrastiveTrainer(Trainer):
-    def __init__(self, temperature=1, stack_pairs=False, **kwargs):
+    def __init__(self, temperature=1, stack_pairs=False, use_w=False, **kwargs):
         super().__init__(**kwargs)
         self.stack_pairs = stack_pairs
         self.temperature = temperature
+        self.use_w = use_w
         
     def train_batch(self,batch, batch_idx, device):
         start_time = time.time()
-        x1, x2, _, _, info1, info2 = batch 
+        x1, x2, w, _, info1, info2 = batch 
         x1, x2 = x1.to(device), x2.to(device)
         if self.stack_pairs:
             x = torch.cat((x1, x2), dim=0)
             out = self.model(x, temperature=self.temperature)
             model_time = time.time() - start_time
         else:
-            out = self.model(x1, x2)
+            if self.use_w:
+                out = self.model(x1, x2, w)
+            else:
+                out = self.model(x1, x2)
             model_time = time.time() - start_time
         loss = out['loss']
         loss.backward()
@@ -407,14 +411,17 @@ class ContrastiveTrainer(Trainer):
         return loss, 0., x1
 
     def eval_batch(self,batch, batch_idx, device):
-        x1, x2, _, _, info1, info2 = batch 
+        x1, x2, w, _, info1, info2 = batch 
         x1, x2 = x1.to(device), x2.to(device)
         with torch.no_grad():
             if self.stack_pairs:
                 x = torch.cat((x1, x2), dim=0)
                 out = self.model(x, temperature=self.temperature)
             else:
-                out = self.model(x1, x2)
+                if self.use_w:
+                    out = self.model(x1, x2, w)
+                else:
+                    out = self.model(x1, x2)
         loss = out['loss']
         if self.wandb:
             wandb.log({"val_loss": loss.item()}) 

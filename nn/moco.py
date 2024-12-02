@@ -195,6 +195,8 @@ def concat_all_gather(tensor):
     return output
     
 
+
+
 class MultimodalMoCo(nn.Module):
     def __init__(
         self,
@@ -261,6 +263,39 @@ class MultimodalMoCo(nn.Module):
             self.spectra_queue = F.normalize(self.spectra_queue, dim=0)
             self.register_buffer("spectra_queue_ptr", torch.zeros(1, dtype=torch.long))
 
+    def weighted_contrastive_loss(self, q, k, sample_properties):
+        # Normalize query and key vectors
+        q = F.normalize(q, dim=1)
+        k = F.normalize(k, dim=1)
+        
+        # Compute similarity matrix
+        logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
+        
+        # Compute L2 distance between sample properties
+        # Assumes sample_properties is a tensor of shape (batch_size, n_features)
+        prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
+        
+        # Normalize distances to use as weights
+        # You might want to adjust this normalization strategy
+        distance_weights = (prop_distances - prop_distances.min()) / (prop_distances.max() - prop_distances.min())
+        
+        # Create a mask for negative pairs (non-diagonal elements)
+        N = logits.shape[0]
+        positive_mask = torch.eye(N, dtype=torch.bool, device=logits.device)
+        negative_mask = ~positive_mask
+        
+        # Apply weights to negative pairs
+        weighted_logits = logits.clone()
+        weighted_logits[negative_mask] *= (1 + distance_weights[negative_mask])
+        
+        # Prepare labels (positive pair on diagonal)
+        labels = torch.arange(N, dtype=torch.long, device=logits.device)
+        
+        # Compute cross-entropy loss
+        loss = F.cross_entropy(weighted_logits, labels)
+        
+        return loss, logits, labels
+
     def _freeze_encoder(self, encoder):
         """Freeze encoder parameters"""
         for name, param in encoder.named_parameters():
@@ -325,7 +360,7 @@ class MultimodalMoCo(nn.Module):
         queue_ptr[0] = ptr
         return queue, queue_ptr
     
-    def forward(self,lightcurves,  spectra):
+    def forward(self,lightcurves,  spectra, w=None):
         """
         Forward pass computing contrastive loss in both directions
         Args:
@@ -346,9 +381,6 @@ class MultimodalMoCo(nn.Module):
         q_s = self.spectra_proj_q(spectra)
         q_l = self.lightcurve_proj_q(lightcurves)
         
-        # forward_time = time.time()-start
-        # print("time taken for forward pass: ", forward_time)
-        
         # Normalize features
         q_s = F.normalize(q_s, dim=1)
         q_l = F.normalize(q_l, dim=1)
@@ -368,15 +400,12 @@ class MultimodalMoCo(nn.Module):
             
             k_s = F.normalize(k_s, dim=1)
             k_l = F.normalize(k_l, dim=1)
-
-            # keys_time = time.time()- start -forward_time
-            # print("time taken for keys: ", keys_time)
         
         # Compute logits for spectra->lightcurve direction
-        l_pos_s = torch.einsum('nc,nc->n', [q_s, k_l]).unsqueeze(-1)
-        l_neg_s = torch.einsum('nc,ck->nk', [q_s, self.lightcurve_queue.clone().detach()])
-        logits_s = torch.cat([l_pos_s, l_neg_s], dim=1)
-        logits_s /= self.T
+        # l_pos_s = torch.einsum('nc,nc->n', [q_s, k_l]).unsqueeze(-1)
+        # l_neg_s = torch.einsum('nc,ck->nk', [q_s, self.lightcurve_queue.clone().detach()])
+        # logits_s = torch.cat([l_pos_s, l_neg_s], dim=1)
+        # logits_s /= self.T
 
         # logits_time = time.time()- start - keys_time
         # print("time taken for logits: ", logits_time)
@@ -387,28 +416,12 @@ class MultimodalMoCo(nn.Module):
         )
         # enqueue_time = time.time()- start - logits_time
         # print("time taken for enqueue: ", enqueue_time)
-        
-        if self.bidirectional:
-            # Compute logits for lightcurve->spectra direction
-            l_pos_l = torch.einsum('nc,nc->n', [q_l, k_s]).unsqueeze(-1)
-            l_neg_l = torch.einsum('nc,ck->nk', [q_l, self.spectra_queue.clone().detach()])
-            logits_l = torch.cat([l_pos_l, l_neg_l], dim=1)
-            logits_l /= self.T
-            
-            # Update lightcurve->spectra queue
-            self.spectra_queue, self.spectra_queue_ptr = self._dequeue_and_enqueue(
-                k_s, self.spectra_queue, self.spectra_queue_ptr
-            )
-        else:
-            logits_l = None
-            
-        # Create labels (positives are the 0th index)
-        labels = torch.zeros(logits_s.shape[0], dtype=torch.long).cuda()
 
-        loss_s = self.criterion(logits_s, labels)
+        loss_s, logits_s, labels = self.weighted_contrastive_loss(q_l, k_s, w)
+    
         if self.bidirectional:
-            loss_l = self.criterion(logits_l, labels)
-            loss = loss_s + loss_l
+            loss_l, logits_l, labels_l = self.weighted_contrastive_loss(q_s, k_l, w) 
+            loss = (loss_s + loss_l) / 2
             logits = logits_s + logits_l
         else:
             loss = loss_s
@@ -476,6 +489,39 @@ class LightCurveSpectraMoCo(nn.Module):
         self.queue_size = K
         self.m = m
         self.T = T
+
+    def weighted_contrastive_loss(self, q, k, sample_properties):
+        # Normalize query and key vectors
+        q = F.normalize(q, dim=1)
+        k = F.normalize(k, dim=1)
+        
+        # Compute similarity matrix
+        logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
+        
+        # Compute L2 distance between sample properties
+        # Assumes sample_properties is a tensor of shape (batch_size, n_features)
+        prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
+        
+        # Normalize distances to use as weights
+        # You might want to adjust this normalization strategy
+        distance_weights = (prop_distances - prop_distances.min()) / (prop_distances.max() - prop_distances.min())
+        
+        # Create a mask for negative pairs (non-diagonal elements)
+        N = logits.shape[0]
+        positive_mask = torch.eye(N, dtype=torch.bool, device=logits.device)
+        negative_mask = ~positive_mask
+        
+        # Apply weights to negative pairs
+        weighted_logits = logits.clone()
+        weighted_logits[negative_mask] *= (1 + distance_weights[negative_mask])
+        
+        # Prepare labels (positive pair on diagonal)
+        labels = torch.arange(N, dtype=torch.long, device=logits.device)
+        
+        # Compute cross-entropy loss
+        loss = F.cross_entropy(weighted_logits, labels)
+        
+        return loss, logits, labels
 
     def _freeze_encoder(self, encoder):
         """Freeze encoder parameters"""
@@ -601,7 +647,7 @@ class LightCurveSpectraMoCo(nn.Module):
             if param_k.shape == param_q.shape:
                 param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
     
-    def forward(self, light_curves, spectra):
+    def forward(self, light_curves, spectra, w):
         # Query features from light curves
         q = self.spectra_encoder(spectra)
         if isinstance(q, tuple):
@@ -627,14 +673,16 @@ class LightCurveSpectraMoCo(nn.Module):
             # k = self._batch_unshuffle_ddp(k, idx_unshuffle)
         # print(q[0,:10], k[0,:10])
         # Contrastive learning logic
-        l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
-        l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
+        loss, logits, labels = self.weighted_contrastive_loss(q, k, w)
+
+        # l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
+        # l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
         
-        logits = torch.cat([l_pos, l_neg], dim=1)
-        labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
+        # logits = torch.cat([l_pos, l_neg], dim=1)
+        # labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
         
-        # Compute NT-Xent (Normalized Temperature Cross Entropy) loss
-        loss = F.cross_entropy(logits / self.T , labels)
+        # # Compute NT-Xent (Normalized Temperature Cross Entropy) loss
+        # loss = F.cross_entropy(logits / self.T , labels)
         
         # Update queue with current spectra keys
         self._dequeue_and_enqueue(k)

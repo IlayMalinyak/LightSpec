@@ -17,7 +17,7 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
-from dataset.sampler import DistributedUniqueLightCurveSampler
+from dataset.sampler import DistributedUniqueLightCurveSampler, DistributedBalancedSampler, UniqueIDDistributedSampler
 
 mpl.rcParams['axes.linewidth'] = 4
 plt.rcParams.update({'font.size': 30, 'figure.figsize': (14,10), 'lines.linewidth': 4})
@@ -394,20 +394,25 @@ class LightSpecDataset(KeplerDataset):
             spectra, _, spec_info = self.spec_transforms(spectra, None, meta)
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
+        spectra = torch.nan_to_num(spectra, nan=0)
         info.update(spec_info)
-        return light.float(), spectra.float(), torch.zeros_like(light), torch.zeros_like(spectra), info, info
+        w = torch.tensor([info['Teff'], info['M'], info['logg']], dtype=torch.float32)
+        return light.float(), spectra.float(), w, torch.zeros_like(spectra), info, info
     
 
 
-def create_moco_loader(dataset, batch_size, num_workers=4, **kwargs):
+def create_unique_loader(dataset, batch_size, num_workers=4, **kwargs):
     """
     Create a distributed data loader with the custom sampler
     """
-    sampler = DistributedUniqueLightCurveSampler(
+    # sampler = DistributedUniqueLightCurveSampler(
+    #     dataset, 
+    #     batch_size=batch_size
+    # )
+    sampler = UniqueIDDistributedSampler(
         dataset, 
-        batch_size=batch_size
-    )
-    
+        )
+
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,

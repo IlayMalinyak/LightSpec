@@ -394,4 +394,18 @@ def giant_cond(x):
         thresh = 5.2 - (2.8 * 1e-4 * teff)
     return logg >= thresh
 
+def norm_col(df, col):
+    """
+    Normalize a column in a DataFrame.
+
+    Args:
+        df (pd.DataFrame): The DataFrame.
+        col (str): The column to normalize.
+
+    Returns:
+        pd.DataFrame: The normalized DataFrame.
+    """
+    df[col] = (df[col] - df[col].min()) / (df[col].max() - df[col].min())
+    return df
+
 

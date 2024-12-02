@@ -3,12 +3,18 @@ from tqdm import tqdm
 import torch
 import random
 from tqdm import tqdm
-from torch.utils.data import Sampler, Subset
+from torch.utils.data import Sampler, Subset, Dataset
+import torch.distributed as dist
 import matplotlib.pyplot as plt
+from random import shuffle
+from typing import List, Optional
+import math
+
 
 
 class DistributedUniqueLightCurveSampler(Sampler):
     def __init__(self, dataset, batch_size, num_replicas=None, rank=None):
+        # Ensure distributed setup
         if num_replicas is None:
             num_replicas = torch.distributed.get_world_size() if torch.distributed.is_available() else 1
         if rank is None:
@@ -30,22 +36,28 @@ class DistributedUniqueLightCurveSampler(Sampler):
         # Lazy initialization of light curve tracking
         self._light_curve_indices = None
         
+        # Distributed sampling calculations
+        total_size = len(self.original_indices)
+        per_replica_size = total_size // self.num_replicas
+        
+        # Ensure each replica gets an equal subset
+        self.indices_per_replica = self.original_indices[
+            self.rank * per_replica_size : (self.rank + 1) * per_replica_size
+        ]
+        
     def _build_light_curve_index(self):
         """
-        Efficiently build light curve index without loading entire dataset
-        Uses a generator approach to minimize memory usage
+        Efficiently build light curve index for this replica's subset
         """
-        # Handle both full dataset and subset
         if hasattr(self.base_dataset, 'df'):
             dataframe = self.base_dataset.df
         else:
             raise AttributeError("Could not find a dataframe for indexing")
         
-        # Use a dictionary with list comprehension for memory efficiency
         light_curve_mapping = {}
         
-        # Iterate through subset indices
-        for local_idx, original_idx in enumerate(self.original_indices):
+        print(f"Building light curve index for replica {self.rank}...")
+        for local_idx, original_idx in enumerate(self.indices_per_replica):
             row = dataframe.iloc[original_idx]
             light_curve_id = int(row['KID'])
             
@@ -59,78 +71,68 @@ class DistributedUniqueLightCurveSampler(Sampler):
     @property
     def light_curve_indices(self):
         """
-        Lazy-loaded light curve indices
+        Lazy-loaded light curve indices specific to this replica
         """
         if self._light_curve_indices is None:
             self._light_curve_indices = self._build_light_curve_index()
         return self._light_curve_indices
     
     def __iter__(self):
-        """
-        Generate batches with unique light curves and spectra
-        """
-        # Get light curve indices (lazy-loaded)
+        # Reset the generator for reproducibility
+        generator = torch.Generator()
+        generator.manual_seed(self.rank)  # Use rank for consistent shuffling
+
+        # Shuffle light curve IDs for randomness
         light_curve_ids = list(self.light_curve_indices.keys())
-        print("light_curve_ids: ", len(light_curve_ids), light_curve_ids[0])
-        
-        # Shuffle light curve IDs
-        random.shuffle(light_curve_ids)
-        
-        # Track used spectra
-        used_spectra = set()
-        batch_indices = []
-        
-        for light_curve_id in light_curve_ids:
-            # Get all spectra for this light curve not yet used
-            available_spectra = [
-                idx for idx in self.light_curve_indices[light_curve_id] 
-                if idx not in used_spectra
-            ]
-            
-            if not available_spectra:
-                continue
-            
-            # Select a random spectrum
-            selected_spectrum = random.choice(available_spectra)
-            
-            batch_indices.append(selected_spectrum)
-            used_spectra.add(selected_spectrum)
-            
-            # Stop when we have a full batch
-            if len(batch_indices) >= self.batch_size:
-                break
-        
-        # If batch is not full, cycle through again with remaining light curves
-        while len(batch_indices) < self.batch_size:
-            random.shuffle(light_curve_ids)
-            for light_curve_id in light_curve_ids:
-                available_spectra = [
-                    idx for idx in self.light_curve_indices[light_curve_id] 
-                    if idx not in used_spectra
-                ]
-                
-                if not available_spectra:
-                    continue
-                
-                selected_spectrum = random.choice(available_spectra)
-                batch_indices.append(selected_spectrum)
-                used_spectra.add(selected_spectrum)
-                
+        torch.manual_seed(self.rank)
+        shuffle(light_curve_ids)
+
+        batches = []
+        used_light_curves = set()
+
+        # Generate batches
+        for _ in range(len(self)):
+            batch_indices = []
+
+            while len(batch_indices) < self.batch_size:
+                for light_curve_id in light_curve_ids:
+                    if light_curve_id in used_light_curves:
+                        continue
+
+                    available_indices = self.light_curve_indices[light_curve_id]
+
+                    if available_indices:
+                        # Select a random index
+                        selected_idx = available_indices[
+                            torch.randint(len(available_indices), (1,), generator=generator).item()
+                        ]
+
+                        batch_indices.append(selected_idx)
+                        used_light_curves.add(light_curve_id)
+
+                    if len(batch_indices) >= self.batch_size:
+                        break
+
+                # If we can't fill the batch, break to prevent infinite loop
                 if len(batch_indices) >= self.batch_size:
                     break
-            
-            # Prevent infinite loop
-            if len(batch_indices) < self.batch_size:
-                break
-        
-        # Trim or pad to exact batch size
-        batch_indices = batch_indices[:self.batch_size]
-        
-        return iter(batch_indices)
-    
-    def __len__(self):
-        return len(self.light_curve_indices)
 
+            # Pad the batch if necessary
+            while len(batch_indices) < self.batch_size:
+                batch_indices.append(batch_indices[0])  # Repeat an existing index
+
+            batches.append(batch_indices)
+
+        # Yield each batch
+        for batch in batches:
+            yield batch
+
+    def __len__(self):
+        total_samples = len(self.indices_per_replica)
+        num_batches = total_samples // self.batch_size
+        print(f"Calculating __len__: Total samples {total_samples}, Batch size {self.batch_size}, Num batches {num_batches}")
+        return num_batches
+    
 class DistinctParameterSampler(Sampler):
     def __init__(self, dataset, batch_size, thresholds, num_replicas=1, rank=0):
         super().__init__(dataset)
@@ -186,3 +188,252 @@ class DistinctParameterSampler(Sampler):
     
     def __len__(self):
         return len(self.metadata) // (self.batch_size * self.num_replicas)
+
+class DistributedBalancedSampler(Sampler):
+    """
+    A distributed sampler that supports:
+    - Balanced sampling across different worker nodes
+    - Optional shuffling
+    - Handling datasets of different sizes
+    - Consistent sampling across epochs
+    """
+    def __init__(
+        self, 
+        dataset: Dataset, 
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 0,
+        drop_last: bool = False
+    ):
+        """
+        Args:
+            dataset (Dataset): Input dataset
+            num_replicas (int, optional): Number of processes participating in distributed training
+            rank (int, optional): Rank of the current process
+            shuffle (bool): Whether to shuffle the data
+            seed (int): Random seed for shuffling
+            drop_last (bool): If True, drop the last incomplete batch
+        """
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Torch distributed is not available. Cannot determine number of replicas.")
+            num_replicas = dist.get_world_size()
+        
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Torch distributed is not available. Cannot determine rank.")
+            rank = dist.get_rank()
+        
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        
+        # Determine samples per replica
+        if self.drop_last and len(self.dataset) % self.num_replicas != 0:
+            self.num_samples = math.ceil(
+                (len(self.dataset) - (self.num_replicas - 1)) / self.num_replicas
+            )
+        else:
+            self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)
+        
+        self.total_size = self.num_samples * self.num_replicas
+        
+        # Seed management
+        self.seed = seed
+    
+    def __iter__(self):
+        """
+        Generate indices for the current process
+        """
+        # Set the seed for reproducibility
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        
+        # Create indices
+        if self.shuffle:
+            indices = torch.randperm(len(self.dataset), generator=generator).tolist()
+        else:
+            indices = list(range(len(self.dataset)))
+        
+        # Pad indices to ensure even distribution
+        if not self.drop_last:
+            padding_size = self.total_size - len(indices)
+            if padding_size > 0:
+                indices += indices[:padding_size]
+        
+        # Ensure each process gets the same number of samples
+        assert len(indices) >= self.num_samples
+        
+        # Select indices for the current process
+        start_idx = self.rank * self.num_samples
+        end_idx = start_idx + self.num_samples
+        process_indices = indices[start_idx:end_idx]
+        
+        return iter(process_indices)
+    
+    def __len__(self):
+        """
+        Return the number of samples for this process
+        """
+        return self.num_samples
+    
+    def set_epoch(self, epoch: int):
+        """
+        Sets the epoch for shuffling
+        
+        Args:
+            epoch (int): Current epoch number
+        """
+        self.epoch = epoch
+
+class UniqueIDDistributedSampler(Sampler):
+    """
+    A distributed sampler that ensures:
+    - Unique samples per batch based on KID (Light Curve ID)
+    - Balanced sampling across distributed workers
+    - Consistent and reproducible sampling
+    """
+    def __init__(
+        self, 
+        dataset: Dataset, 
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 0,
+        drop_last: bool = False
+    ):
+        """
+        Args:
+            dataset (Dataset): Input dataset with a dataframe containing 'KID' column
+            num_replicas (int, optional): Number of processes participating in distributed training
+            rank (int, optional): Rank of the current process
+            shuffle (bool): Whether to shuffle the data
+            seed (int): Random seed for shuffling
+            drop_last (bool): If True, drop the last incomplete batch
+        """
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Torch distributed is not available. Cannot determine number of replicas.")
+            num_replicas = dist.get_world_size()
+        
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Torch distributed is not available. Cannot determine rank.")
+            rank = dist.get_rank()
+        
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+        self.seed = seed
+        if isinstance(dataset, Subset):
+            self.dataset = dataset.dataset
+        
+        print(self.dataset)
+
+        # Get the underlying dataframe
+        if hasattr(self.dataset, 'df'):
+            self.dataframe = self.dataset.df
+        else:
+            raise AttributeError("Could not find a dataframe with 'KID' column")
+        
+        # Build initial index mapping
+        self.indices = list(range(len(self.dataset)))
+        self._build_light_curve_index()
+        
+        # Determine samples per replica
+        if self.drop_last and len(self.indices) % self.num_replicas != 0:
+            self.num_samples = math.ceil(
+                (len(self.indices) - (self.num_replicas - 1)) / self.num_replicas
+            )
+        else:
+            self.num_samples = math.ceil(len(self.indices) / self.num_replicas)
+        
+        self.total_size = self.num_samples * self.num_replicas
+    
+    def _build_light_curve_index(self):
+        """
+        Build light curve index mapping KID to indices
+        """
+        # Reset mapping
+        self.light_curve_mapping = {}
+        
+        # Generator for reproducible randomness
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        
+        # Shuffle indices if required
+        if self.shuffle:
+            shuffled_indices = torch.randperm(len(self.indices), generator=generator).tolist()
+        else:
+            shuffled_indices = self.indices.copy()
+        
+        # Build mapping
+        for idx in shuffled_indices:
+            row = self.dataframe.iloc[idx]
+            light_curve_id = int(row['KID'])
+            
+            if light_curve_id not in self.light_curve_mapping:
+                self.light_curve_mapping[light_curve_id] = []
+            
+            self.light_curve_mapping[light_curve_id].append(idx)
+    
+    def __iter__(self):
+        """
+        Generate batch indices ensuring unique KID representation
+        """
+        # Rebuild index mapping for current epoch
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        
+        # Select one random index for each unique KID
+        batch_indices = []
+        for kid_indices in self.light_curve_mapping.values():
+            # Randomly select one index for this KID
+            selected_idx = kid_indices[torch.randint(len(kid_indices), size=(1,), generator=generator).item()]
+            batch_indices.append(selected_idx)
+        
+        # Pad if necessary to ensure even distribution
+        if not self.drop_last:
+            print("padding")
+            padding_size = self.total_size - len(batch_indices)
+            if padding_size > 0:
+                # Repeat random selections to pad
+                extra_indices = [
+                    list(self.light_curve_mapping.values())[
+                        torch.randint(len(self.light_curve_mapping), size=(1,), generator=generator).item()
+                    ][torch.randint(len(kid_indices), size=(1,), generator=generator).item()]
+                    for _ in range(padding_size)
+                ]
+                batch_indices.extend(extra_indices)
+        
+        # Distribute indices across replicas
+        start_idx = self.rank * self.num_samples
+        end_idx = start_idx + self.num_samples
+        
+        process_indices = batch_indices[start_idx:end_idx]
+        
+        return iter(process_indices)
+    
+    def __len__(self):
+        """
+        Return the number of samples for this process
+        """
+        return self.num_samples
+    
+    def set_epoch(self, epoch: int):
+        """
+        Sets the epoch for shuffling
+        
+        Args:
+            epoch (int): Current epoch number
+        """
+        self.epoch = epoch
+        # Rebuild index mapping when epoch changes
+        self._build_light_curve_index()

@@ -148,11 +148,11 @@ scaler = GradScaler()
 total_steps = int(data_args.num_epochs) * len(train_dataloader)
 scheduler = schedulers[optim_args.scheduler]
 if scheduler is not None:
-    scheduler = scheduler(optimizer, **optim_args.scheduler_args)
+    scheduler = scheduler(optimizer, **optim_args.scheduler_args[optim_args.scheduler])
     print("scheduler ", scheduler)
-
-fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
+if scheduler is not None:
+    fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
+    plt.savefig(f"{data_args.log_dir}/{datetime_dir}/{model_name}_lr_schedule_{checkpoint_num}.png")
 
 config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_{checkpoint_num}_complete_config.yaml"
 
