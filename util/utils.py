@@ -408,4 +408,12 @@ def norm_col(df, col):
     df[col] = (df[col] - df[col].min()) / (df[col].max() - df[col].min())
     return df
 
+def extract_date(p):
+    match = re.search(r'\d{4}-\d{2}-\d{2}', p)
+    if match:
+        date = match.group(0)
+        print(f"Extracted date: {date}")
+    else:
+        print("No date found in the path.")
+
 

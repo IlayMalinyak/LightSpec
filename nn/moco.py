@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import copy
 from nn.simsiam import projection_MLP
 import time
+import numpy as np
 
 
 
@@ -195,8 +196,6 @@ def concat_all_gather(tensor):
     return output
     
 
-
-
 class MultimodalMoCo(nn.Module):
     def __init__(
         self,
@@ -204,12 +203,14 @@ class MultimodalMoCo(nn.Module):
         lightcurve_encoder,  # pre-trained light curve encoder
         projection_dim=32,  # Final projection dimension
         hidden_dim=512,  # Hidden dimension of projection MLP
+        num_layers=2,
         K=65536,  # Queue size
         m=0.999,  # Momentum coefficient
         T=0.07,  # Temperature
         freeze_lightcurve=True,  # Whether to freeze light curve encoder
         freeze_spectra=True,  # Whether to freeze spectra encoder
-        bidirectional=True  # Whether to train in both directions
+        bidirectional=True,  # Whether to train in both directions
+        transformer=False
     ):
         super(MultimodalMoCo, self).__init__()
         
@@ -238,8 +239,12 @@ class MultimodalMoCo(nn.Module):
         # Projection heads for query encoders
         # self.spectra_proj_q = projection_MLP(spectra_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
         # self.lightcurve_proj_q = projection_MLP(lightcurve_out_dim, hidden_dim=hidden_dim, out_dim=projection_dim)
-        self.spectra_proj_q = self._build_projector(spectra_out_dim, projection_dim)
-        self.lightcurve_proj_q = self._build_projector(lightcurve_out_dim, projection_dim)
+        self.spectra_proj_q = self._build_projector(spectra_out_dim, hidden_dim,
+                                                     projection_dim, num_layers,
+                                                      transformer=transformer)
+        self.lightcurve_proj_q = self._build_projector(lightcurve_out_dim, hidden_dim,
+                                                         projection_dim, num_layers,
+                                                          transformer=transformer)
         
         # Key path: Create momentum encoders and projectors
         self.spectra_encoder_k = copy.deepcopy(spectra_encoder)
@@ -273,7 +278,10 @@ class MultimodalMoCo(nn.Module):
         
         # Compute L2 distance between sample properties
         # Assumes sample_properties is a tensor of shape (batch_size, n_features)
-        prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
+        if sample_properties is None:
+            prop_distances = torch.ones(logits.shape[0], logits.shape[0], device=logits.device)
+        else:
+            prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
         
         # Normalize distances to use as weights
         # You might want to adjust this normalization strategy
@@ -299,22 +307,38 @@ class MultimodalMoCo(nn.Module):
     def _freeze_encoder(self, encoder):
         """Freeze encoder parameters"""
         for name, param in encoder.named_parameters():
-            # print(name)
-            # if ('blocks.11' not in name):
             param.requires_grad = False
             
             
-    def _build_projector(self, in_dim, out_dim):
-        """Modified projector with layer normalization"""
-        return nn.Sequential(
-            nn.Linear(in_dim, in_dim),
-            nn.LayerNorm(in_dim),
-            nn.Dropout(0.2),
-            nn.ReLU(),
-            nn.Linear(in_dim, out_dim),
-            nn.LayerNorm(out_dim),
-            nn.Dropout(0.2),
-        )
+    def _build_projector(self, in_dim, hidden_dim, out_dim, num_layers, transformer=False):
+        """Modified projector with layer normalization and optional transformer architecture."""
+        if transformer:
+            return nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.TransformerEncoder(
+                    nn.TransformerEncoderLayer(
+                        d_model=hidden_dim,
+                        dim_feedforward=hidden_dim*4,
+                        nhead=8, 
+                        dropout=0.2,
+                    ),
+                    num_layers=num_layers,
+                ),
+                nn.Linear(hidden_dim, out_dim),
+            )
+        else:
+            return nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(in_dim),
+                nn.Dropout(0.2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(out_dim),
+                nn.Dropout(0.2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, out_dim)
+            )
     
     @torch.no_grad()
     def _momentum_update(self):
@@ -360,7 +384,7 @@ class MultimodalMoCo(nn.Module):
         queue_ptr[0] = ptr
         return queue, queue_ptr
     
-    def forward(self,lightcurves,  spectra, w=None):
+    def forward(self,lightcurves, spectra, w=None, w_threshold=0.5):
         """
         Forward pass computing contrastive loss in both directions
         Args:
@@ -417,17 +441,21 @@ class MultimodalMoCo(nn.Module):
         # enqueue_time = time.time()- start - logits_time
         # print("time taken for enqueue: ", enqueue_time)
 
-        loss_s, logits_s, labels = self.weighted_contrastive_loss(q_l, k_s, w)
+        loss_s, logits_s, labels = self.weighted_contrastive_loss(q_l, k_s, w)            
     
         if self.bidirectional:
             loss_l, logits_l, labels_l = self.weighted_contrastive_loss(q_s, k_l, w) 
             loss = (loss_s + loss_l) / 2
             logits = logits_s + logits_l
+            q = q_l + q_s
+            k = k_l + k_s
         else:
             loss = loss_s
             logits = logits_s
+            q = q_l
+            k = k_s
         
-        return {'loss': loss, 'logits': logits , 'labels': labels}
+        return {'loss': loss, 'logits': logits , 'labels': labels, 'q': q, 'k': k}
 
 class LightCurveSpectraMoCo(nn.Module):
     def __init__(self, 

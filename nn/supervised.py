@@ -1,31 +1,41 @@
 import torch
 import torch.nn as nn
+from nn.cnn import ConvBlock, CNNEncoder
+from nn.astroconf import Astroconformer
 
 class DualModel(nn.Module):
-    def __init__(self, spectra_encoder, lc_encoder,
-                 spectra_dims, lc_dims, output_dim,
-                  lc_only=False) -> None:
+    def __init__(self, lc_backbone, spectra_backbone,
+                 hidden_dim, output_dim, backbone_args, num_quantiles=5) -> None:                
         super().__init__()
-        self.spectra_encoder = spectra_encoder
-        self.lc_encoder = lc_encoder
-        self.lc_only = lc_only
-        hidden_dim = spectra_dims + lc_dims + 1 if not lc_only else lc_dims + 1
+        self.lc_backbone = lc_backbone
+        self.spectra_backbone = spectra_backbone
+        # self.freeze_backbone()
+        self.backbone = CNNEncoder(backbone_args)
+        # self.backbone = Astroconformer(backbone_args)
+        self.backbone.pred_layer = torch.nn.Identity()
         self.pred_layer = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.Linear(backbone_args.encoder_dims[-1], hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.SiLU(),
             nn.Dropout(p=0.3),
-            nn.Linear(hidden_dim//2, output_dim),
+            nn.Linear(hidden_dim, hidden_dim//2),
+            nn.BatchNorm1d(hidden_dim//2),
+            nn.SiLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(hidden_dim//2, output_dim*num_quantiles),
         )
+    
+    def freeze_backbone(self):
+        for param in self.lc_backbone.parameters():
+            param.requires_grad = False
+        for param in self.spectra_backbone.parameters():
+            param.requires_grad = False
         
-    def forward(self, spectra: torch.Tensor, lc: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
-        f_y = self.lc_encoder(lc)
-        p = p.unsqueeze(-1)
-        f_y = torch.cat([f_y, p], dim=-1)
-        if self.lc_only:
-            x = f_y
-        else:
-            f_x, _ = self.spectra_encoder(spectra)
-            x = torch.cat([f_x, f_y], dim=-1)
+    def forward(self,  lc: torch.Tensor, spectra: torch.Tensor) -> torch.Tensor:
+        out_lc = self.lc_backbone(lc)
+        out_spectra = self.spectra_backbone(spectra)
+        x = torch.cat([out_lc, out_spectra], dim=1)
+        x = self.backbone(x)
         x = self.pred_layer(x)
         return x
 

@@ -30,7 +30,8 @@ class Trainer(object):
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
                  scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None,
                   grad_clip=False, exp_num=None, log_path=None, exp_name=None, plot_every=None,
-                   cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False):
+                   cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False,
+                   update_func=lambda x: x):
         self.model = model
         self.optimizer = optimizer
         self.criterion = criterion
@@ -55,6 +56,7 @@ class Trainer(object):
         self.range_update = range_update
         self.accumulation_step = accumulation_step
         self.wandb = wandb_log
+        self.update_func = update_func
         # if log_path is not None:
         #     self.logger =SummaryWriter(f'{self.log_path}/exp{self.exp_num}')
         #     # print(f"logger path: {self.log_path}/exp{self.exp_num}")
@@ -89,7 +91,9 @@ class Trainer(object):
         print(f"Starting training for {num_epochs} epochs")
         print("is main process: ", main_proccess, flush=True)
         global_time = time.time()
+        self.epoch = 0
         for epoch in range(num_epochs):
+            self.epoch = epoch
             start_time = time.time()
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
             t_loss, t_acc = self.train_epoch(device, epoch=epoch)
@@ -212,7 +216,8 @@ class Trainer(object):
         all_accs = torch.zeros(self.output_dim, device=device)
         pbar = tqdm(self.train_dl)
         for i, batch in enumerate(pbar):
-            self.optimizer.zero_grad()
+            if self.optimizer is not None:
+                self.optimizer.zero_grad()
             loss, acc , y = self.train_batch(batch, i, device)
             train_loss.append(loss.item())
             all_accs = all_accs + acc
@@ -225,19 +230,26 @@ class Trainer(object):
     
     def train_batch(self, batch, batch_idx, device):
         lc,spec, y,_ = batch
+        b, _, _ = lc.shape
         spec = spec.to(device)
         lc = lc.to(device)
         y = y.to(device)
-        p, y = y[:,0], y[:,1:]
-        y_pred = self.model(spec.float(), lc.float(), p)
+        y_pred = self.model(spec.float(), lc.float())
+        y_pred = y_pred.reshape(b, -1, self.output_dim)
         if len(y.shape) == 1:
             y = y.unsqueeze(1)
-        loss = self.criterion(y_pred, y)
+        loss = 0
+        for i in range(self.output_dim):
+            y_pred_i = y_pred[:, :, i]
+            y_i = y[:, i]
+            loss += self.criterion(y_pred_i, y_i)
+        loss /= self.output_dim
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
-        diff = torch.abs(y_pred - y)
+        y_pred_mean = y_pred[:, y_pred.shape[1]//2, :]
+        diff = torch.abs(y_pred_mean - y)
         acc = (diff < (y/10)).sum(0)
         if self.wandb:
             wandb.log({"train_loss": loss.item(), "train_acc": acc})
@@ -267,12 +279,21 @@ class Trainer(object):
         lc,spec,y,_ = batch
         spec = spec.to(device)
         lc = lc.to(device)
+        b, _, _ = lc.shape
         y = y.to(device)
-        p, y = y[:,0], y[:,1:]
         with torch.no_grad():
-            y_pred= self.model(spec.float(), lc.float(), p)
-        loss = self.criterion(y_pred, y)      
-        diff = torch.abs(y_pred - y)
+            y_pred= self.model(spec.float(), lc.float())
+            y_pred = y_pred.reshape(b, -1, self.output_dim)
+        if len(y.shape) == 1:
+            y = y.unsqueeze(1)
+        loss = 0
+        for i in range(self.output_dim):
+            y_pred_i = y_pred[:, :, i]
+            y_i = y[:, i]
+            loss += self.criterion(y_pred_i, y_i)
+        loss /= self.output_dim
+        y_pred_mean = y_pred[:, y_pred.shape[1]//2, :]
+        diff = torch.abs(y_pred_mean - y)
         acc = (diff < (y/10)).sum(0)
         if self.wandb:
             wandb.log({"val_loss": loss.item(), "val_acc": acc})
@@ -378,11 +399,13 @@ class MaskedSSLTrainer(Trainer):
 
 
 class ContrastiveTrainer(Trainer):
-    def __init__(self, temperature=1, stack_pairs=False, use_w=False, **kwargs):
+    def __init__(self, temperature=1, stack_pairs=False, use_w=False,
+                   **kwargs):
         super().__init__(**kwargs)
         self.stack_pairs = stack_pairs
         self.temperature = temperature
         self.use_w = use_w
+        
         
     def train_batch(self,batch, batch_idx, device):
         start_time = time.time()
@@ -426,3 +449,273 @@ class ContrastiveTrainer(Trainer):
         if self.wandb:
             wandb.log({"val_loss": loss.item()}) 
         return loss, 0, x1
+
+class RegressorTrainer(Trainer):
+    def __init__(self, w_name, w_init_val, **kwargs):
+        super().__init__(**kwargs)
+        self.w_name = w_name
+        self.w_init_val = w_init_val
+    
+    def train_batch(self, batch, batch_idx, device):
+        const = self.w_init_val/(1+self.epoch)
+        x, _, y, _, info,_ = batch
+        x, y = x.to(device), y.to(device)
+        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        # w = 1 + (const * torch.log(w))
+        # w = torch.exp(w*const)
+        out = self.model(x)
+        loss = self.criterion(out, y)
+        # print('shapes: ', x.shape, y.shape, 'w: ', w.shape)
+        loss = (loss * w.unsqueeze(-1)).mean()
+        loss.backward()
+        self.optimizer.step()
+        if self.scheduler is not None:
+                    self.scheduler.step()
+        if self.wandb:
+            wandb.log({"train_loss": loss.item()})
+        acc = (torch.abs(out - y) < y * 0.1).sum(0)
+        return loss, acc, x
+
+    def eval_batch(self, batch, batch_idx, device):
+        const = self.w_init_val/(1+self.epoch)
+        x, _, y, _, info,_ = batch
+        x, y = x.to(device), y.to(device)
+        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        # w = 1 + (const * torch.log(w))
+        w = torch.exp(w*const)
+        with torch.no_grad():
+            out = self.model(x)
+        loss = self.criterion(out, y)
+        loss = (loss * w.unsqueeze(-1)).mean()
+        if self.wandb:
+            wandb.log({"val_loss": loss.item()}) 
+        acc = (torch.abs(out - y) < y * 0.1).sum(0)
+        return loss, acc, x
+
+class MaskedRegressorTrainer(Trainer):
+    def __init__(self, w_name, w_init_val, ssl_criterion, ssl_weight=0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.w_name = w_name
+        self.ssl_criterion = ssl_criterion
+        self.w_init_val = w_init_val
+        self.ssl_weight = ssl_weight  # Weight to balance between SSL and regression
+        
+    def train_batch(self, batch, batch_idx, device):
+        const = self.w_init_val/(1+self.epoch)
+        x_masked, x, y, mask, info, _ = batch
+        x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
+        
+        # Get proximity weights for regression
+        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        w = const * torch.exp(w*const)
+        
+        # Forward pass for both tasks
+        reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
+        
+        # Calculate SSL loss (masked filling)
+        ssl_loss = self.ssl_criterion(ssl_out, x)
+        ssl_acc = self.mask_accuracy(ssl_out, x, mask)
+
+        
+        # Calculate regression loss
+        reg_loss = self.criterion(reg_out, y)
+        reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
+        reg_acc = (torch.abs(reg_out - y) < y * 0.1).sum(0)
+        
+        # Combine losses
+        total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
+        
+        # Backward and optimize
+        total_loss.backward()
+        self.optimizer.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+            
+        # Log if using wandb
+        if self.wandb:
+            wandb.log({
+                "train_loss": total_loss.item(),
+                "ssl_loss": ssl_loss.item(),
+                "reg_loss": reg_loss.item(),
+                "ssl_acc": ssl_acc,
+                "reg_acc": reg_acc.mean().item()
+            })
+            
+        return total_loss, reg_acc, x
+
+    def eval_batch(self, batch, batch_idx, device):
+        const = self.w_init_val/(1+self.epoch)
+        x_masked, x, y, mask, info, _ = batch
+        x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
+        
+        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        w = const * torch.exp(w*const)
+        
+        with torch.no_grad():
+            reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
+            
+            ssl_loss = self.criterion(ssl_out, x)
+            ssl_acc = self.mask_accuracy(ssl_out, x, mask)
+            
+            reg_loss = self.criterion(reg_out, y)
+            reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
+            reg_acc = (torch.abs(reg_out - y) < y * 0.1).sum(0)
+            
+            total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
+        
+        if self.wandb:
+            wandb.log({
+                "val_loss": total_loss.item(),
+                "val_ssl_loss": ssl_loss.item(),
+                "val_reg_loss": reg_loss.item(),
+                "val_ssl_acc": ssl_acc,
+                "val_reg_acc": reg_acc.mean().item()
+            })
+            
+        return total_loss, reg_acc, x
+        
+    def mask_accuracy(self, result, target, inverse_token_mask, epsilon=1e-5):
+        r = result.masked_select(inverse_token_mask)
+        t = target.masked_select(inverse_token_mask)
+        s = (torch.abs(r - t) < epsilon).sum()
+        return s / inverse_token_mask.sum()
+
+class AdversarialTrainer(Trainer):
+    def __init__(
+        self, 
+        optimizer_gen,
+        optimizer_disc,
+        disc_steps=1,  # Number of discriminator steps per generator step
+        gen_steps=1,    # Number of generator steps per discriminator step
+        use_w=True,
+        **kwargs
+    ):
+        """
+        Adversarial trainer mimicking the ContrastiveTrainer interface
+        
+        Args:
+            model: Adversarial multimodal alignment model
+            optimizer_gen: Optimizer for generator
+            optimizer_disc: Optimizer for discriminator
+            scheduler_gen: Learning rate scheduler for generator (optional)
+            scheduler_disc: Learning rate scheduler for discriminator (optional)
+            wandb: Whether to log metrics to wandb
+            stack_pairs: Whether to stack input pairs
+            use_w: Whether to use proximity weights
+            temperature: Temperature parameter (placeholder, not used in adversarial training)
+            disc_steps: Number of discriminator optimization steps
+            gen_steps: Number of generator optimization steps
+        """
+        super().__init__(**kwargs)
+        
+        self.optimizer_gen = optimizer_gen
+        self.optimizer_disc = optimizer_disc
+        self.disc_steps = disc_steps
+        self.gen_steps = gen_steps
+        self.use_w = use_w
+
+    def train_batch(self, batch, batch_idx, device):
+        """
+        Training method with signature matching ContrastiveTrainer
+        
+        Args:
+            batch: Tuple containing (x1, x2, w, _, info1, info2)
+            batch_idx: Batch index
+            device: Training device
+        
+        Returns:
+            loss: Total loss
+            aux_loss: Auxiliary loss (set to 0)
+            x1: First input batch (for potential feature extraction)
+        """
+        start_time = time.time()
+        
+        # Unpack batch
+        x1, x2, w, _, info1, info2 = batch
+        x1, x2 = x1.to(device), x2.to(device)
+        
+        if w is None:
+            w = torch.ones(x1.size(0)) * 0.5
+        w = w.to(device)
+                
+        # Perform multiple discriminator and generator steps
+        disc_loss = 0
+        gen_loss = 0
+            
+        # Discriminator steps
+        for _ in range(self.disc_steps):
+            self.optimizer_disc.zero_grad()
+            
+            if self.use_w:
+                disc_loss = self.model.module.discriminator_loss(x1, x2, w)
+            else:
+                disc_loss = self.model.module.discriminator_loss(x1, x2, None)
+            
+            disc_loss.backward()
+            self.optimizer_disc.step()
+    
+        
+        # Generator steps
+        for _ in range(self.gen_steps):
+            self.optimizer_gen.zero_grad()
+            
+            if self.use_w:
+                gen_loss = self.model.module.generator_loss(x1, x2, w)
+            else:
+                gen_loss = self.model.module.generator_loss(x1, x2, None)
+            
+            gen_loss.backward()
+            self.optimizer_gen.step()
+            
+        
+        # Combine losses (total loss for logging)
+        loss = disc_loss + gen_loss
+        out = {'loss': loss, 'disc_loss': disc_loss, 'gen_loss': gen_loss}
+        
+        model_time = time.time() - start_time
+        
+        # Optional wandb logging
+        if self.wandb:
+            log_dict = {"train_loss": out['loss'].item()}
+            if 'disc_loss' in out:
+                log_dict["train_disc_loss"] = out['disc_loss'].item()
+            if 'gen_loss' in out:
+                log_dict["train_gen_loss"] = out['gen_loss'].item()
+            wandb.log(log_dict)
+        
+        return out['loss'], 0., x1
+
+    def eval_batch(self, batch, batch_idx, device):
+        """
+        Evaluation method with signature matching ContrastiveTrainer
+        Similar to train_batch but without gradient computation
+        """
+        x1, x2, w, _, info1, info2 = batch
+        x1, x2 = x1.to(device), x2.to(device)
+        
+        if w is None:
+            w = torch.ones(x1.size(0)) * 0.5
+        w = w.to(device)
+        
+        with torch.no_grad():
+            
+            if self.use_w:
+                disc_loss = self.model.discriminator_loss(x1, x2, w)
+                gen_loss = self.model.generator_loss(x1, x2, w)
+            else:
+                disc_loss = self.model.discriminator_loss(x1, x2, None)
+                gen_loss = self.model.generator_loss(x1, x2, None)
+            
+            loss = disc_loss + gen_loss
+            out = {'loss': loss, 'disc_loss': disc_loss, 'gen_loss': gen_loss}
+        
+        # Optional wandb logging
+        if self.wandb:
+            log_dict = {"val_loss": out['loss'].item()}
+            if 'disc_loss' in out:
+                log_dict["val_disc_loss"] = out['disc_loss'].item()
+            if 'gen_loss' in out:
+                log_dict["val_gen_loss"] = out['gen_loss'].item()
+            wandb.log(log_dict)
+        
+        return out['loss'], 0, x1

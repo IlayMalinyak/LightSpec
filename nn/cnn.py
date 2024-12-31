@@ -1,5 +1,8 @@
 import torch
 import torch.nn as nn
+from nn.Modules.conformer import ConformerEncoder, ConformerDecoder
+from nn.Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding
+
 
 class Sine(nn.Module):
     def __init__(self, w0=1.0):
@@ -35,7 +38,7 @@ class ConvBlock(nn.Module):
 class CNNEncoder(nn.Module):
     def __init__(self, args) -> None:
         super().__init__()
-        print("Using CNN encoder wit activation: ", args.activation)
+        print("Using CNN encoder wit activation: ", args.activation, 'args avg_output: ', args.avg_output)
         if args.activation == 'silu':
             self.activation = nn.SiLU()
         elif args.activation == 'sine':
@@ -137,12 +140,132 @@ class CNNEncoderDecoder(nn.Module):
         
         self.encoder = CNNEncoder(args)
         self.decoder = CNNDecoder(args)
-    
+        # create a transformer layers with hidden size as args.encoder_dims[-1]
+        if args.transformer_layers > 0:
+            self.transformer = nn.TransformerEncoder(
+                        nn.TransformerEncoderLayer(
+                            d_model=args.encoder_dims[-1],
+                            dim_feedforward=args.encoder_dims[-1]*4,
+                            nhead=8, 
+                            dropout=0.2,
+                        ),
+                        num_layers=args.transformer_layers,)
+        else:
+            self.transformer = None
+            
     def forward(self, x, y=None):
         # Encode the input
         encoded = self.encoder(x)
-        
+        if self.transformer is not None:
+            encoded = self.transformer(encoded.permute(0,2,1)).permute(0,2,1)
         # Decode the compressed representation
         reconstructed = self.decoder(encoded)
         
         return reconstructed
+
+
+class CNNRegressor(nn.Module):
+    def __init__(self, args, conformer_args):
+        super().__init__()
+        # self.encoder = MultiEncoder(args, conformer_args)
+        self.backbone = CNNEncoder(args)
+
+        self.head_size = conformer_args.encoder_dim // conformer_args.num_heads
+        self.rotary_ndims = int(self.head_size * 0.5)
+        self.pe = RotaryEmbedding(self.rotary_ndims)
+
+        self.encoder = ConformerEncoder(conformer_args)
+        self.output_dim = conformer_args.encoder_dim
+        
+    
+        
+        if args.activation == 'silu':
+            self.activation = nn.SiLU()
+        elif args.activation == 'sine':
+            self.activation = Sine(w0=args.sine_w0)
+        else:
+            self.activation = nn.ReLU()
+        
+        self.regressor = nn.Sequential(
+            nn.Linear(conformer_args.encoder_dim, conformer_args.encoder_dim//2),
+            self.activation,
+            nn.Linear(conformer_args.encoder_dim//2, args.output_dim)
+        )
+    
+    def forward(self, x):
+        # Encode the input
+        x = self.backbone(x)
+        x = x.unsqueeze(1)
+        # x = x.permute(0,2,1)
+        RoPE = self.pe(x, x.shape[1]) # RoPE: [2, B, L, encoder_dim], 2: sin, cos
+        x = self.encoder(x, RoPE).squeeze(1)
+
+        # x = self.transformer(x)
+        # x = x.sum(dim=1)
+        # x, _ = self.encoder(x)
+        output = self.regressor(x)
+        
+        return output
+
+
+class MultiTaskRegressor(nn.Module):
+    def __init__(self, args, conformer_args):
+        super().__init__()
+        self.encoder = MultiEncoder(args, conformer_args)
+        # self.backbone = CNNEncoder(args)
+        # self.head_size = conformer_args.encoder_dim // conformer_args.num_heads
+        # self.rotary_ndims = int(self.head_size * 0.5)
+        # self.pe = RotaryEmbedding(self.rotary_ndims)
+        # self.encoder = ConformerEncoder(conformer_args)
+        # self.output_dim = conformer_args.encoder_dim
+        self.decoder = CNNDecoder(args)
+        
+        if args.activation == 'silu':
+            self.activation = nn.SiLU()
+        elif args.activation == 'sine':
+            self.activation = Sine(w0=args.sine_w0)
+        else:
+            self.activation = nn.ReLU()
+        
+        self.regressor = nn.Sequential(
+            nn.Linear(conformer_args.encoder_dim, conformer_args.encoder_dim//2),
+            self.activation,
+            nn.Linear(conformer_args.encoder_dim//2, args.output_dim)
+        )
+    
+    def forward(self, x, y=None):
+        # Encode the input
+        # x = self.backbone(x)
+        # x_enc = x.clone()
+        # x_enc = x_enc.mean(dim=-1).unsqueeze(1)
+        # RoPE = self.pe(x_enc, x.shape[1]) # RoPE: [2, B, L, encoder_dim], 2: sin, cos
+        # x_enc = self.encoder(x_enc, RoPE).squeeze(1)
+        # # x_enc = self.encoder(x)
+        x_enc, x = self.encoder(x)
+        output_reg = self.regressor(x_enc)
+        output_dec = self.decoder(x)
+        
+        return output_reg, output_dec
+
+class MultiEncoder(nn.Module):
+    def __init__(self, args, conformer_args):
+        super().__init__()
+        self.backbone = CNNEncoder(args)
+        self.head_size = conformer_args.encoder_dim // conformer_args.num_heads
+        self.rotary_ndims = int(self.head_size * 0.5)
+        self.pe = RotaryEmbedding(self.rotary_ndims)
+        self.encoder = ConformerEncoder(conformer_args)
+        self.output_dim = conformer_args.encoder_dim
+        
+    def forward(self, x):
+        # Encode the input
+        x = self.backbone(x)
+        if len(x.shape)==2:
+            x_enc = x.unsqueeze(1)
+        else:
+            x_enc = x.permute(0,2,1)
+        RoPE = self.pe(x_enc, x_enc.shape[1]) # RoPE: [2, B, L, encoder_dim], 2: sin, cos
+        x_enc = self.encoder(x_enc, RoPE)
+        if len(x_enc.shape)==3:
+            x_enc = x_enc.sum(dim=1)
+        return x_enc, x

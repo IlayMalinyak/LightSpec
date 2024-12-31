@@ -33,22 +33,24 @@ from nn.cnn import CNNEncoder, CNNEncoderDecoder
 from nn.mlp import MLPEncoder
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
 from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
+from nn.advers import AdversarialAlignment
 from nn.simsiam import SimSiam, projection_MLP
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
-from nn.train import ContrastiveTrainer
+from nn.train import ContrastiveTrainer, AdversarialTrainer
 from tests.test_unique_sampler import run_sampler_tests
 from features import create_umap
 
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'kmag_abs']
 
-MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder,
+MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'AdversarialAlignment': AdversarialAlignment,
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
 torch.cuda.empty_cache()
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
-datetime_dir = f"lightspec_{current_date}"
+datetime_dir = f"test_{current_date}"
+
 
 def create_train_test_dfs(norm_cols=['Teff', 'logg', 'Mstar']):
     kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
@@ -83,7 +85,7 @@ def test_dataset(ds):
         axes[1].plot(spec[0].cpu().numpy())
         axes[0].set_title(f"Lightcurve: {info['KID']}")
         axes[1].set_title(f"Spectrum: {info['obsid']}")
-        plt.savefig(f'/data/lightSpec/images/lightspec_{i}.png')
+        plt.savefig(f'/data/test/images/lightspec_{i}.png')
         plt.close()
     print("average time taken per iteration: ", (time.time()-start)/100)
 
@@ -92,6 +94,8 @@ def test_dataset(ds):
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_lightspec_ssl.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
+all_args =  Container(**yaml.safe_load(open(args_dir, 'r')))
+print("args keys: ", all_args.get_dict().keys())
 exp_num = data_args.exp_num
 light_model_name = data_args.light_model_name
 spec_model_name = data_args.spec_model_name
@@ -102,6 +106,7 @@ spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[spec_model_nam
 sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['SimSiam'])
 backbone_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNBackbone'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
+advers_args = Container(**yaml.safe_load(open(args_dir, 'r'))['AdversarialAlignment'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
@@ -159,7 +164,8 @@ spec_model = MODELS[spec_model_name](spec_model_args)
 
 spec_model = init_model(spec_model, spec_model_args)
 
-model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+# model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+model = AdversarialAlignment(spec_model.encoder, light_model.backbone,  **advers_args.get_dict()).to(local_rank)
 
 if data_args.load_checkpoint:
     datetime_dir = os.path.basename(os.path.dirname(data_args.checkpoint_path))
@@ -184,13 +190,20 @@ if data_args.create_umap:
 
 loss_fn = torch.nn.CrossEntropyLoss()
 if optim_args.optimizer == 'sgd':
-    optimizer = torch.optim.SGD(model.parameters(),
+    optimizer_gen = torch.optim.SGD(model.parameters(),
+                                 lr=float(optim_args.max_lr),
+                                momentum=float(optim_args.momentum),
+                                weight_decay=float(optim_args.weight_decay),
+                                nesterov=optim_args.nesterov)
+    optimizer_disc = torch.optim.SGD(model.parameters(),
                                  lr=float(optim_args.max_lr),
                                 momentum=float(optim_args.momentum),
                                 weight_decay=float(optim_args.weight_decay),
                                 nesterov=optim_args.nesterov)
 else:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr),
+    optimizer_gen = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr),
+    weight_decay=float(optim_args.weight_decay))
+    optimizer_disc = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr),
     weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 
@@ -200,16 +213,18 @@ for name, param in model.named_parameters():
     if param.requires_grad:
         print(name, param.shape)
 
-trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+trainer = AdversarialTrainer(model=model, optimizer_gen=optimizer_gen,
+                              optimizer_disc=optimizer_disc, optimizer=None,
                         criterion=loss_fn, output_dim=1, scaler=None,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=True,
-                        exp_name=f"lightspec_{exp_num}") 
+                           exp_num=datetime_dir, log_path=data_args.log_dir,
+                             range_update=None, use_w=True,
+                           accumulation_step=1, max_iter=np.inf,
+                        exp_name=f"test_{exp_num}") 
 
 # save all containers in log directory
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/test_{exp_num}_complete_config.yaml"
 
 complete_config = {
     "data_args": data_args.__dict__,
@@ -233,9 +248,9 @@ print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/test_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lightspec_fit_{exp_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/test_fit_{exp_num}.png")
 plt.clf()

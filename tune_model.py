@@ -105,7 +105,7 @@ def setup_model(config, local_rank):
     
     moco_args = {'K': config.k,'m': config.m, 'T': config.T, 'hidden_dim': config.hidden_dim, \
      'projection_dim': config.output_dim, 'freeze_lightcurve': False, \
-      'freeze_spectra': False, 'bidirectional': config.biderctional}
+      'freeze_spectra': False, 'bidirectional': config.biderctional, 'transformer': True}
     model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args).to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     return model
@@ -290,26 +290,26 @@ def main():
         },
         'parameters': {
             'output_dim': {
-                'values': [64, 64, 512]
+                'values': [64, 512, 64]
             },
             'hidden_dim': {
-                'values': [512, 512, 2048]
+                'values': [128, 512, 128]
             },
             'k': {
-                'values': [512, 512, 4096]
+                'values': [512, 4096, 512]
             },
             'm': {
-                'values': [0.99, 0.001, 0.999]
+                'values': [0.99, 0.999, 0.001]
             },
             'T': {
-                'values': [0.05, 0.05, 1.0]
+                'values': [0.05, 1.0, 0.05]
             },
             'biderctional': {
                 'values': [True, False]
             },
             'lr': {
                 'distribution': 'log_uniform',
-                'min': np.log(1e-6),
+                'min': np.log(1e-5),
                 'max': np.log(1e-3)
             },
             'weight_decay': {
@@ -320,17 +320,6 @@ def main():
             # Optimizer selection and parameters
             'optimizer': {
                 'values': ['adamw', 'sgd']
-            },
-            # Common optimizer parameters
-            'lr': {
-                'distribution': 'log_uniform',
-                'min': np.log(1e-5),
-                'max': np.log(1e-3)
-            },
-            'weight_decay': {
-                'distribution': 'log_uniform',
-                'min': np.log(1e-6),
-                'max': np.log(1e-4)
             },
             # AdamW specific parameters
             'beta1': {
@@ -349,7 +338,7 @@ def main():
                 'values': [True, False]
             },
             'max_iterations': {
-                'value': 400
+                'value': 700
             },
             'freeze_lightcurve': {
                 'values': [True, False]

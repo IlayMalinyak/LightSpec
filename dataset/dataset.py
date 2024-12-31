@@ -29,21 +29,30 @@ plt.rcParams.update({'legend.fontsize': 22})
 class DualDataset(Dataset):
     def __init__(self, data_dir,
                     labels_path,
-                    range_dict,
                     labels_names=['Period', 'Inclination'],
                     lc_transforms=None,
+                    spec_seq_len=4096,
                     spectra_transforms=None,
+                    example_wv_path='/data/lamost/example_wv.npy'
                 ):
         self.data_dir = data_dir
         self.labels = pd.read_csv(labels_path)
-        self.range_dict = range_dict
         self.labels_names = labels_names
+        self.spec_seq_len = spec_seq_len
+        self.range_dict = dict()
+        self.update_range_dict()
         self.lc_dir = os.path.join(data_dir, 'lc')
         self.spectra_dir = os.path.join(data_dir, 'spectra')
         self.lc_transforms = lc_transforms
         self.spectra_transforms = spectra_transforms
         self.path_list = os.listdir(self.lc_dir)
+        self.example_wv = np.load(example_wv_path)
         
+    def update_range_dict(self):
+        for name in self.labels_names:
+            min_val = self.labels[name].min()
+            max_val = self.labels[name].max()
+            self.range_dict[name] = (min_val, max_val)
         
     def __len__(self):
         return len(self.path_list)
@@ -53,37 +62,53 @@ class DualDataset(Dataset):
         max_val = float(self.range_dict[key][1])
         return (x - min_val) / (max_val - min_val)
 
+    def get_rv(self, row):
+        r_km = row['radius'] * 6.96e5
+        p_sec = row['Period'] * 24 * 3600 
+        return np.sin(np.radians(row['Inclination'])) * (2*np.pi*r_km / p_sec)
+
     def __getitem__(self, idx):
         try:
             spec = pd.read_parquet(os.path.join(self.spectra_dir, f'{idx}.pqt')).values
             lc = pd.read_parquet(os.path.join(self.lc_dir, f'{idx}.pqt')).values
-        except FileNotFoundError as e:
+        except (FileNotFoundError, OSError) as e:
+            # print("Error reading file ", idx, e)
             lc = np.zeros((48000, 2))
             spec = np.zeros((3909, 1))
         spectra = spec[:,-1]
         flux = lc[:,-1]
         info_s = dict()
         info_lc = {'data_dir': self.data_dir}
+        label = self.labels.iloc[idx].to_dict()
+        info_s['RV'] = self.get_rv(label)
+        info_s['wavelength'] = self.example_wv
         if self.spectra_transforms:
             spectra, _,info_s = self.spectra_transforms(spectra, info=info_s)
         if self.lc_transforms:
             flux,_,info_lc = self.lc_transforms(flux, info=info_lc)
-        label = self.labels.iloc[idx].to_dict()
+        if spectra.shape[-1] < self.spec_seq_len:
+            spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
+        spectra = torch.nan_to_num(spectra, nan=0)
         info = {'spectra': info_s, 'lc': info_lc}
         y = torch.tensor([self._normalize(label[name], name) for name in self.labels_names], dtype=torch.float32)
-        return flux.squeeze().unsqueeze(0), spectra.squeeze().unsqueeze(0), y , info
+        return flux.squeeze().unsqueeze(0), spectra.squeeze().unsqueeze(0), y.squeeze() , info
 
 class SpectraDataset(Dataset):
-    def __init__(self, data_dir, transforms=None, max_len=3909):
+    def __init__(self, data_dir, transforms=None, df=None, max_len=3909):
         self.data_dir = data_dir
         self.transforms = transforms
-        files_names = os.listdir(data_dir)
-        self.path_list = [os.path.join(data_dir, k) for k in files_names]
+        self.df = df
+        if df is None:
+            print("creating files list...")
+            files_names = os.listdir(data_dir)
+            self.path_list = [os.path.join(data_dir, k) for k in files_names]
+        else:
+            self.path_list = None
         self.max_len = max_len
         self.mask_transform = RandomMasking()
         
     def __len__(self):
-        return len(self.path_list)
+        return len(self.path_list) if self.path_list else len(self.df)
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:
@@ -97,20 +122,40 @@ class SpectraDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        obsid = os.path.basename(self.path_list[idx])
+        if self.df is not None:
+            filepath = f"{self.data_dir}/{self.df.iloc[idx]['combined_obsid']}.fits"
+            target_size = 3
+        else: 
+            filepath = self.path_list[idx]
+            target_size = self.max_len    
+        obsid = os.path.basename(filepath)
         try:
-            spectra, meta = self.read_spectra(self.path_list[idx])
+            spectra, meta = self.read_spectra(filepath)
         except OSError:
-            print("Error reading file ", self.path_list[idx])
-            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(self.max_len, dtype=torch.bool),\
-            torch.zeros(self.max_len, dtype=torch.bool), {'obsid': obsid}, {'obsid': obsid}
+            # print("Error reading file ", filepath)
+            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(target_size),\
+            torch.zeros(self.max_len, dtype=torch.bool), {'obsid': obsid, 'snrg': 1e-3}, {'obsid': obsid, 'snrg': 1e-3}
         meta['obsid'] = obsid
-        # spectra = torch.tensor(spectra, dtype=torch.float32)
-        # wv = torch.tensor(wv, dtype=torch.float32).squeeze()
-        # mask = torch.zeros_like(spectra)
         if self.transforms:
             spectra, _, info = self.transforms(spectra, None, meta)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, meta)
+
+        # supervised case
+        if self.df is not None:
+            row = self.df.iloc[idx]
+            # row = self.df[self.df['combined_obsid'] == int(obsid)]
+            info['Teff'] = row['combined_teff']
+            info['rv2'] = row['combined_rv']
+            info['logg'] = row['combined_logg']
+            info['FeH'] = row['combined_feh']
+            info['snrg'] = row['combined_snrg'] / 1000
+            info['snri'] = row['combined_snri'] / 1000
+            info['snrr'] = row['combined_snrr'] / 1000
+            info['snrz'] = row['combined_snrz'] / 1000
+            target = torch.tensor([np.log10(info['Teff']),info['logg'], info['FeH']], dtype=torch.float32)
+        else:
+            target = torch.zeros_like(mask)
+        # ssl case
         if spectra_masked.shape[-1] < self.max_len:
             pad = torch.zeros(1, self.max_len - spectra_masked.shape[-1])
             spectra_masked = torch.cat([spectra_masked, pad], dim=-1)
@@ -121,7 +166,7 @@ class SpectraDataset(Dataset):
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
-         mask.squeeze(0),mask.squeeze(0), info, info)
+         target.float(),mask.squeeze(0), info, info)
 
 if __name__ == '__main__':
     s_transforms = Compose([MovingAvg(7), Normalize("minmax", axis=0), ])
@@ -231,9 +276,18 @@ class KeplerDataset():
             print(f"Error loading file for {row['KID']}: {str(e)}")
             x = np.zeros((self.seq_len, 1))
         if 'Teff' in row.keys():
-            meta = {'TEFF': row['Teff'], 'RADIUS': row['Rstar'], 'LOGG': row['logg'], 'M':row['Mstar'], 'KMAG': None}
+            meta = {'TEFF': row['Teff'],
+                     'RADIUS': row['Rstar'],
+                    'LOGG': row['logg'],
+                    'M':row['Mstar'],
+                    'FeH': row['FeH'],
+                    'KMAG': row['kmag_abs']}
         else:
-            meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'M': None, 'KMAG': None}
+            meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'M': None, 'FeH':None, 'KMAG': None}
+        
+        if 'predicted period' in row.keys():
+            meta['predicted period'] = row['predicted period']
+            meta['mean_period_confidence'] = row['mean_period_confidence']
         return x, meta, None, y_val
 
     try:
@@ -320,6 +374,9 @@ class KeplerDataset():
             print(f"Error in target transforms for index {idx}: {str(e)}")
             target = torch.zeros(1, self.seq_len)
             mask_y = torch.zeros_like(target)
+    elif 'predicted period' in meta.keys():
+        target = torch.tensor([np.log10(meta['predicted period'])])
+        mask_y = torch.zeros_like(target)
     else:
         target = x.clone()
         mask_y = torch.zeros_like(target)
@@ -327,10 +384,13 @@ class KeplerDataset():
       info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
       info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
       info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
-      info['kmag'] = meta['KMAG'] if meta['KMAG'] is not None else 0
-      info['M'] = meta['M'] if meta['M'] is not None else 0
-    # info['path'] = self.df.iloc[idx]['data_file_path'] 
-    info['KID'] = self.df.iloc[idx]['KID'] 
+      info['kmag_abs'] = meta['KMAG'] if meta['KMAG'] is not None else 0
+      info['FeH'] = meta['FeH'] if meta['FeH'] is not None else 0
+      info['Mstar'] = meta['M'] if meta['M'] is not None else 0
+    info['KID'] = self.df.iloc[idx]['KID']
+    if 'predicted period' in meta.keys():
+        info['predicted period'] = meta['predicted period']
+        info['mean_period_confidence'] = meta['mean_period_confidence']
     toc = time.time()
     info['time'] = toc - tic
     if mask is None:
@@ -341,7 +401,7 @@ class KeplerDataset():
     # Ensure info and info_y are always dictionaries
     info = info if isinstance(info, dict) else {}
     info_y = info_y if isinstance(info_y, dict) else {}
-    result = (x.float(), target.float(), mask, mask_y, info, info_y)
+    result = (x.float(), x.float(), target.float(), mask, info, info_y)
     if any(item is None for item in result):
         print(f"Warning: None value in result for index {idx}")
         print(f"x: {x.shape if x is not None else None}")
@@ -362,11 +422,13 @@ class LightSpecDataset(KeplerDataset):
                 spec_transforms:object=None,
                 light_seq_len:int=34560,
                 spec_seq_len:int=3909,
+                meta_columns = ['Teff', 'M', 'logg'],
                 ):
         super().__init__(df, prot_df, npy_path, light_transforms, light_seq_len)
         self.spec_path = spec_path
         self.spec_transforms = spec_transforms
         self.spec_seq_len = spec_seq_len
+        self.meta_columns = meta_columns
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:
@@ -396,7 +458,7 @@ class LightSpecDataset(KeplerDataset):
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
         spectra = torch.nan_to_num(spectra, nan=0)
         info.update(spec_info)
-        w = torch.tensor([info['Teff'], info['M'], info['logg']], dtype=torch.float32)
+        w = torch.tensor([info[c] for c in self.meta_columns], dtype=torch.float32)
         return light.float(), spectra.float(), w, torch.zeros_like(spectra), info, info
     
 

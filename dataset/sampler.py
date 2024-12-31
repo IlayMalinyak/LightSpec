@@ -401,7 +401,6 @@ class UniqueIDDistributedSampler(Sampler):
         
         # Pad if necessary to ensure even distribution
         if not self.drop_last:
-            print("padding")
             padding_size = self.total_size - len(batch_indices)
             if padding_size > 0:
                 # Repeat random selections to pad

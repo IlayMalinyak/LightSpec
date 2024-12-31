@@ -4,8 +4,8 @@ Data:
   # Data
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
-  model_name: CNNEncoderDecoder
-  batch_size: 32
+  model_name: MultiTaskRegressor
+  batch_size: 256
   num_epochs: 1000
   exp_num: 1
   max_len_spectra: 4096
@@ -46,50 +46,51 @@ CNNEncoderDecoder:
   avg_output: False
   output_dim: 2
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_path: '/data/lightSpec/logs/spec_2024-12-12/CNNEncoderDecoder_spectra_1.pth'
   checkpoint_num: 1
   activation: "silu"
 
-MambaSeq2Seq:
-  # Model
+CNNRegressor:
   in_channels: 1
-  num_layers: 8
+  num_layers: 4
   stride: 1
-  encoder_dim: 256
+  encoder_dims: [32,64,128,256,512]
+  transformer_layers: 4
   kernel_size: 3
   dropout_p: 0.3
-  output_dim: 2
+  avg_output: True
+  output_dim: 3
+  beta: 1
+  load_checkpoint: False
+  checkpoint_path: '/data/lightSpec/logs/spec_2024-12-12/CNNEncoderDecoder_spectra_1.pth'
+  checkpoint_num: 1
+  activation: "silu"
+
+MultiTaskRegressor:
+  in_channels: 1
+  num_layers: 4
+  stride: 1
+  encoder_dims: [32,64,128,256,512]
+  transformer_layers: 4
+  kernel_size: 3
+  dropout_p: 0.3
+  avg_output: False
+  output_dim: 3
   beta: 1
   load_checkpoint: False
   checkpoint_num: 1
-  d_state: 8  # SSM state expansion factor
-  d_conv: 4    # Local convolution width
-  expand: 2
+  activation: "silu"
 
-Optimization SSL:
-  # Optimization
-  max_lr: 1e-5
-  weight_decay: 1e-5
-  warmup_pct: 0.3
-  steps_per_epoch: 3500
-  scheduler: "none"
-  scheduler_args:
-    OneCycleLR: 
-      max_lr: 5e-5
-      epochs: 1000
-      steps_per_epoch: 3500  # This should match len(train_dataloader)*world_size
-      pct_start: 0.3
-      anneal_strategy: 'cos'
-      cycle_momentum: True
-      base_momentum: 0.85
-      max_momentum: 0.95
-      div_factor: 10.0
-      final_div_factor: 100.0
-    CosineAnnealingLR:
-      eta_min : 1e-6
-  # }
-
+Conformer:
+  encoder: ["mhsa_pro", "conv"]
+  timeshift: false
+  num_layers: 2
+  encoder_dim: 512
+  num_heads: 8
+  kernel_size: 3
+  dropout_p: 0.2
+  norm: "shortcut"
 
 Optimization:
   # Optimization

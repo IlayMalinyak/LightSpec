@@ -504,11 +504,12 @@ class LAMOSTSpectrumPreprocessor:
     "Estimating stellar parameters from LAMOST low-resolution spectra", X. Li, B. Lin.
     """
     def __init__(self, 
-                 blue_wavelength_range=(3841, 5699),
-                 red_wavelength_range=(5901, 8798),
+                 blue_wavelength_range=(3841, 5800),
+                 red_wavelength_range=(5800, 8798),
                  resample_step=0.0001,
                  median_filter_size=3,
                  polynomial_order=5,
+                 continuum_norm=True,
                  plot_steps=False):
         """
         Initialize preprocessing parameters.
@@ -525,7 +526,9 @@ class LAMOSTSpectrumPreprocessor:
         self.resample_step = resample_step
         self.median_filter_size = median_filter_size
         self.polynomial_order = polynomial_order
+        self.continuum_norm = continuum_norm
         self.plot_steps = plot_steps
+
 
     def __call__(self, spectrum, mask=None, info=dict()):
         """
@@ -550,13 +553,13 @@ class LAMOSTSpectrumPreprocessor:
             fig, ax = plt.subplots(6, 2, figsize=(60, 36), gridspec_kw={'height_ratios': [1, 1, 1, 1, 1, 1]})
 
             merged_ax = fig.add_subplot(611)  # Spans across both columns
-            print("wavelength shape: ", wavelength.shape, "spectrum shape: ", spectrum.shape)
             merged_ax.plot(wavelength.squeeze(), spectrum.squeeze())
             merged_ax.set_title("Original Spectrum")
         
         # 1. Wavelength Correction
         corrected_wavelength = self._wavelength_correction(wavelength, radial_velocity)
         info['corrected_wavelength'] = corrected_wavelength
+
         
         # Separate blue and red ends
         blue_mask = (corrected_wavelength >= self.blue_range[0]) & (corrected_wavelength <= self.blue_range[1])
@@ -566,9 +569,10 @@ class LAMOSTSpectrumPreprocessor:
         red_wavelength = corrected_wavelength[red_mask]
         info['blue_corrected_wavelength'] = blue_wavelength
         info['red_corrected_wavelength'] = red_wavelength
+
         
-        blue_spectrum = spectrum[blue_mask]
-        red_spectrum = spectrum[red_mask]
+        blue_spectrum = spectrum[blue_mask].squeeze()
+        red_spectrum = spectrum[red_mask].squeeze()
 
         if self.plot_steps:
             ax[1,0].plot(blue_wavelength, blue_spectrum, label='Blue Spectrum')
@@ -577,7 +581,6 @@ class LAMOSTSpectrumPreprocessor:
             ax[1, 1].set_title("WV Correction red", loc='center')
 
             
-        
         # 2. Linear Interpolation Resampling (Separately)
         blue_resampled = self._linear_interpolation_resample(blue_spectrum, blue_wavelength, is_blue=True)
         red_resampled = self._linear_interpolation_resample(red_spectrum, red_wavelength, is_blue=False)
@@ -599,15 +602,19 @@ class LAMOSTSpectrumPreprocessor:
             ax[3, 0].set_title("Median Filtering Denoising blue")
             ax[3, 1].set_title("Median Filtering Denoising red")
         
-        # 4. Continuum Normalization (Separately)
-        blue_normalized = self._continuum_normalization(blue_denoised, is_blue=True)
-        red_normalized = self._continuum_normalization(red_denoised, is_blue=False)
+        if self.continuum_norm:
+            # 4. Continuum Normalization (Separately)
+            blue_normalized = self._continuum_normalization(blue_denoised, is_blue=True)
+            red_normalized = self._continuum_normalization(red_denoised, is_blue=False)
+            if self.plot_steps:
+                ax[4,0].plot(np.arange(len(blue_normalized)), blue_normalized, label='Blue Normalized')
+                ax[4,1].plot(np.arange(len(red_normalized)), red_normalized, label='Red Normalized')
+                ax[4, 0].set_title("Continuum Normalization blue")
+                ax[4, 1].set_title("Continuum Normalization red")
+        else:
+            blue_normalized = blue_denoised
+            red_normalized = red_denoised
 
-        if self.plot_steps:
-            ax[4,0].plot(np.arange(len(blue_normalized)), blue_normalized, label='Blue Normalized')
-            ax[4,1].plot(np.arange(len(red_normalized)), red_normalized, label='Red Normalized')
-            ax[4, 0].set_title("Continuum Normalization blue")
-            ax[4, 1].set_title("Continuum Normalization red")
         
         # 5. Secondary Denoising and Normalization
         blue_final = self._secondary_normalization(blue_normalized)
