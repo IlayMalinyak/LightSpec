@@ -425,6 +425,8 @@ class ConformerBlock(nn.Module):
                 x = m(x, RoPE=RoPE, key_padding_mask=key_padding_mask)
             else:
                 x = m(x)
+            if torch.isnan(x).any():
+                print('nans in block', m)
         return x
 
 
@@ -530,6 +532,8 @@ class ConformerEncoder(nn.Module):
         """
         for block in self.blocks:
             x = block(x, RoPE=RoPE, key_padding_mask=key_padding_mask)
+            # if torch.isnan(x).any():
+            #     print('nans in block', block)
 
         return x
 
@@ -580,5 +584,6 @@ class ConformerDecoder(nn.Module):
         """
         for block in self.blocks:
             x = block(x, memory, RoPE=RoPE, key_padding_mask=key_padding_mask)
+          
 
         return x

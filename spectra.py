@@ -7,6 +7,7 @@ from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR
 from astropy.io import fits
+import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
@@ -26,7 +27,7 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
-from nn.cnn import CNNEncoderDecoder
+from nn.models import CNNEncoderDecoder
 # from nn.mamba import MambaSeq2Seq
 from nn.train import MaskedSSLTrainer
 from nn.utils import deepnorm_init, load_checkpoints_ddp, load_scheduler
@@ -48,8 +49,9 @@ datetime_dir = f"spec_{current_date}"
 def test_dataset(dataset, num_iters=10):
     start_time = time.time()
     for i in range(num_iters):
-        x_masked, x, mask, _, info, _ = dataset[i]
-        print(x_masked.shape, x.shape, mask.shape, info.keys())
+        x_masked, x, y, mask, info, _ = dataset[i]
+        if x_masked.shape != x.shape:
+            print('shapes in ', info['obsid'], ': ', x_masked.shape, x.shape, y.shape, mask.shape)
     print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.2f} seconds." \
         f"avg per iteration: {(time.time() - start_time)/num_iters:.2f} seconds")
 
@@ -82,6 +84,7 @@ model_name = data_args.model_name
 if data_args.test_run:
     datetime_dir = f"test_{current_date}"
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
+conformer_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
@@ -90,15 +93,21 @@ transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=True, plot_steps
                         ToTensor(),
                          ])
 
-train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, max_len=int(data_args.max_len_spectra))
+lamost_catalog = pd.read_csv('/data/lamost/lamost_afgkm_teff_3000_7500_catalog.csv', sep='|')
+lamost_catalog = lamost_catalog.drop_duplicates(subset=['combined_obsid'])
+lamost_catalog = lamost_catalog[lamost_catalog['combined_snrg'] > 0]
+
+train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, df=lamost_catalog,
+                                 max_len=int(data_args.max_len_spectra), use_cache=True)
+print("number of samples: ", len(train_dataset))
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
-# test_dataset(train_dataset, num_iters=10)
+test_dataset(train_dataset, num_iters=1000)
 
-model = models[model_name](model_args)
+model = models[model_name](model_args, conformer_args=conformer_args)
 model = model.to(local_rank)
 
 model_suffix = 0
@@ -111,8 +120,8 @@ if model_args.load_checkpoint:
     model = load_checkpoints_ddp(model, model_args.checkpoint_path)
     print("loaded checkpoint from: ", model_args.checkpoint_path)
     checkpoint_num = int(checkpoint_num) + 1
-else:
-    deepnorm_init(model)
+# else:
+#     deepnorm_init(model, conformer_args)
 print('datetime dir' , datetime_dir, 'checkpoint_num ', checkpoint_num)
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
@@ -157,6 +166,7 @@ complete_config = {
     "model_name": model_name,
     "data_args": data_args.__dict__,
     "model_args": model_args.__dict__,
+    "conformer_args": conformer_args.__dict__,
     "optim_args": optim_args.__dict__,
     "num_params": num_params,
     "model_structure": str(model),  # Add the model structure to the configuration

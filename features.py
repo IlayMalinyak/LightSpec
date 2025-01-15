@@ -5,6 +5,8 @@ import numpy as np
 import umap
 import pandas as pd
 from tqdm import tqdm
+import os
+import matplotlib.pyplot as plt
 
 def create_umap(model,
                 dl,
@@ -43,6 +45,8 @@ def create_umap(model,
         
         # Extract logits and apply UMAP
         logits = out['logits'] if dual else out
+        if isinstance(logits, tuple):
+            logits = logits[0]
         reduced_data = reducer.fit_transform(logits.cpu().numpy())
         
         # Aggregate metadata
@@ -68,3 +72,15 @@ def create_umap(model,
     df = pd.DataFrame(data_list)
     
     return df
+
+def draw_umap(log_path, color_col='Teff'):
+    umap_files = [os.path.join(log_path, f) for f in os.listdir(log_path) if 'umap' in f]
+    for umap_file in umap_files:
+        print(umap_file)
+        df = pd.read_csv(umap_file)
+        plt.scatter(df['umap_x'], df['umap_y'], c=df[color_col], cmap='viridis')
+        plt.xlabel('UMAP X')
+        plt.ylabel('UMAP Y')
+        plt.colorbar(label=color_col)
+        plt.savefig(f'figs/{os.path.basename(log_path).split(".")[0]}_umap_{color_col}.png')
+        plt.show()

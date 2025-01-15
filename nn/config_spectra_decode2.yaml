@@ -5,13 +5,15 @@ Data:
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
   model_name: MultiTaskRegressor
-  batch_size: 256
+  batch_size: 128
   num_epochs: 1000
   exp_num: 1
   max_len_spectra: 4096
+  continuum_norm: True
   max_days_lc: 720
   lc_freq: 0.0208
   test_run: False
+  create_umap: False
 
 AstroEncoderDecoder:
   # Model
@@ -71,26 +73,28 @@ MultiTaskRegressor:
   in_channels: 1
   num_layers: 4
   stride: 1
-  encoder_dims: [32,64,128,256,512]
+  encoder_dims: [64,128,256,512]
   transformer_layers: 4
   kernel_size: 3
-  dropout_p: 0.3
-  avg_output: False
+  dropout_p: 0.2
+  avg_output: True
   output_dim: 3
   beta: 1
-  load_checkpoint: False
+  load_checkpoint: True
   checkpoint_num: 1
   activation: "silu"
+  checkpoint_path: /data/lightSpec/logs/spec_decode2_2025-01-11/MultiTaskRegressor_spectra_decode_1.pth
+
 
 Conformer:
-  encoder: ["mhsa_pro", "conv"]
+  encoder: ["mhsa_pro", "conv", "ffn"]
   timeshift: false
-  num_layers: 2
+  num_layers: 8
   encoder_dim: 512
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.2
-  norm: "shortcut"
+  norm: "postnorm"
 
 Optimization:
   # Optimization

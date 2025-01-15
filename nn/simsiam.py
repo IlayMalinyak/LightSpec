@@ -245,7 +245,11 @@ class MultiModalSimSiam(nn.Module):
     
     def forward(self, lightcurve, spectra):
         x1 = self.lightcurve_backbone(lightcurve)
+        if isinstance(x1, tuple):
+            x1 = x1[0]
         x2 = self.spectra_backbone(spectra)
+        if isinstance(x2, tuple):
+            x2 = x2[0]
         f, h = self.encoder, self.predictor
         z1, z2 = f(x1), f(x2)
         p1, p2 = h(z1), h(z2)

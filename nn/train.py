@@ -10,7 +10,7 @@ from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
 import umap
-import wandb
+# import wandb
 
 
 def count_occurence(x,y):
@@ -30,7 +30,7 @@ class Trainer(object):
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
                  scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None,
                   grad_clip=False, exp_num=None, log_path=None, exp_name=None, plot_every=None,
-                   cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False,
+                   cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False, num_quantiles=1,
                    update_func=lambda x: x):
         self.model = model
         self.optimizer = optimizer
@@ -56,6 +56,7 @@ class Trainer(object):
         self.range_update = range_update
         self.accumulation_step = accumulation_step
         self.wandb = wandb_log
+        self.num_quantiles = num_quantiles
         self.update_func = update_func
         # if log_path is not None:
         #     self.logger =SummaryWriter(f'{self.log_path}/exp{self.exp_num}')
@@ -251,8 +252,8 @@ class Trainer(object):
         y_pred_mean = y_pred[:, y_pred.shape[1]//2, :]
         diff = torch.abs(y_pred_mean - y)
         acc = (diff < (y/10)).sum(0)
-        if self.wandb:
-            wandb.log({"train_loss": loss.item(), "train_acc": acc})
+        # if self.wandb:
+            # wandb.log({"train_loss": loss.item(), "train_acc": acc})
         return loss, acc, y
 
     def eval_epoch(self, device, epoch):
@@ -295,8 +296,8 @@ class Trainer(object):
         y_pred_mean = y_pred[:, y_pred.shape[1]//2, :]
         diff = torch.abs(y_pred_mean - y)
         acc = (diff < (y/10)).sum(0)
-        if self.wandb:
-            wandb.log({"val_loss": loss.item(), "val_acc": acc})
+        # if self.wandb:
+        #     wandb.log({"val_loss": loss.item(), "val_acc": acc})
         return loss, acc, y
 
     def predict(self, test_dataloader, device, load_best=True):
@@ -334,7 +335,7 @@ class MaskedSSLTrainer(Trainer):
         Trains the model for one batch.
         """
         # with autocast():
-        x, y, mask,_,info,_ = batch
+        x, y, _, mask, info,_ = batch
         y, mask, x = y.to(device), mask.to(device), x.to(device)
         out = self.model(x, y)
         if x.isnan().sum() > 0:
@@ -372,22 +373,22 @@ class MaskedSSLTrainer(Trainer):
                 if self.scheduler is not None:
                     self.scheduler.step()
         acc = self.mask_accuracy(out, y, mask)
-        if self.wandb:
-            wandb.log({"train_loss": loss.item(), "train_acc": acc})
+        # if self.wandb:
+        #     wandb.log({"train_loss": loss.item(), "train_acc": acc})
         return loss, acc, y
     
     def eval_batch(self, batch, batch_idx, device):
         """
         Evaluates the model for one batch.
         """
-        x, y, mask,_,info,_ = batch
+        x, y, _, mask,info,_ = batch
         y, mask, x = y.to(device), mask.to(device), x.to(device)
         with torch.no_grad():
             out = self.model(x, y)
         loss = self.criterion(out, y)
         acc = self.mask_accuracy(out, y, mask)
-        if self.wandb:
-            wandb.log({"val_loss": loss.item(), "val_acc": acc})
+        # if self.wandb:
+        #     wandb.log({"val_loss": loss.item(), "val_acc": acc})
         return loss, acc, y
     
     def mask_accuracy(self, result, target, inverse_token_mask, epsilon=1e-5):
@@ -421,15 +422,39 @@ class ContrastiveTrainer(Trainer):
             else:
                 out = self.model(x1, x2)
             model_time = time.time() - start_time
+        # print("nans: ", x1.isnan().sum(), x2.isnan().sum())
         loss = out['loss']
-        loss.backward()
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
+            if (batch_idx + 1) % self.accumulation_step == 0:
+                # Add gradient clipping before optimizer step
+                if self.grad_clip:
+                    self.scaler.unscale_(self.optimizer)
+                    self.check_gradients()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                self.scaler.update()
+        else:
+            loss.backward()
+            if (batch_idx + 1) % self.accumulation_step == 0:
+                # Add gradient clipping before optimizer step
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                if self.scheduler is not None:
+                    self.scheduler.step()
+        if torch.isnan(loss).sum() > 0:
+            print("nan in loss, idx: ", batch_idx)
+            exit()
         backward_time = time.time() - start_time - model_time
         self.optimizer.step()
         optimizer_time = time.time() - start_time - model_time - backward_time
         if self.scheduler is not None:
                     self.scheduler.step()
-        if self.wandb:
-            wandb.log({"train_loss": loss.item()})
+        # if self.wandb:
+        #     wandb.log({"train_loss": loss.item()})
         # print(f"model time: {model_time}, backward time: {backward_time}, optimizer time: {optimizer_time}")
         return loss, 0., x1
 
@@ -446,8 +471,8 @@ class ContrastiveTrainer(Trainer):
                 else:
                     out = self.model(x1, x2)
         loss = out['loss']
-        if self.wandb:
-            wandb.log({"val_loss": loss.item()}) 
+        # if self.wandb:
+        #     wandb.log({"val_loss": loss.item()}) 
         return loss, 0, x1
 
 class RegressorTrainer(Trainer):
@@ -460,36 +485,48 @@ class RegressorTrainer(Trainer):
         const = self.w_init_val/(1+self.epoch)
         x, _, y, _, info,_ = batch
         x, y = x.to(device), y.to(device)
-        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        b = x.shape[0]
+        if self.w_name is None:
+            w = torch.ones(x.size(0)).to(device)
+        else:
+            w = torch.tensor([i[self.w_name] for i in info]).to(device)
         # w = 1 + (const * torch.log(w))
         # w = torch.exp(w*const)
         out = self.model(x)
+        out = out.view(b, -1, self.num_quantiles)
         loss = self.criterion(out, y)
-        # print('shapes: ', x.shape, y.shape, 'w: ', w.shape)
-        loss = (loss * w.unsqueeze(-1)).mean()
+        # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape)
+        loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
-                    self.scheduler.step()
-        if self.wandb:
-            wandb.log({"train_loss": loss.item()})
-        acc = (torch.abs(out - y) < y * 0.1).sum(0)
+                self.scheduler.step()
+        # if self.wandb:
+        #     wandb.log({"train_loss": loss.item()})
+        out_median = out[..., out.shape[-1]//2]
+        acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         return loss, acc, x
 
     def eval_batch(self, batch, batch_idx, device):
         const = self.w_init_val/(1+self.epoch)
         x, _, y, _, info,_ = batch
         x, y = x.to(device), y.to(device)
-        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        b = x.shape[0]
+        if self.w_name is None:
+            w = torch.ones(x.size(0)).to(device)
+        else:
+            w = torch.tensor([i[self.w_name] for i in info]).to(device)
         # w = 1 + (const * torch.log(w))
-        w = torch.exp(w*const)
         with torch.no_grad():
             out = self.model(x)
+            out = out.view(b, -1, self.num_quantiles)
         loss = self.criterion(out, y)
-        loss = (loss * w.unsqueeze(-1)).mean()
-        if self.wandb:
-            wandb.log({"val_loss": loss.item()}) 
-        acc = (torch.abs(out - y) < y * 0.1).sum(0)
+        loss = (loss * w.unsqueeze(-1)).mean(0).sum()
+        # if self.wandb:
+        #     wandb.log({"val_loss": loss.item()})
+
+        out_median = out[..., out.shape[-1]//2]
+        acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         return loss, acc, x
 
 class MaskedRegressorTrainer(Trainer):
@@ -507,7 +544,7 @@ class MaskedRegressorTrainer(Trainer):
         
         # Get proximity weights for regression
         w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        w = const * torch.exp(w*const)
+        # w = const * torch.exp(w*const)
         
         # Forward pass for both tasks
         reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
@@ -532,14 +569,14 @@ class MaskedRegressorTrainer(Trainer):
             self.scheduler.step()
             
         # Log if using wandb
-        if self.wandb:
-            wandb.log({
-                "train_loss": total_loss.item(),
-                "ssl_loss": ssl_loss.item(),
-                "reg_loss": reg_loss.item(),
-                "ssl_acc": ssl_acc,
-                "reg_acc": reg_acc.mean().item()
-            })
+        # if self.wandb:
+        #     wandb.log({
+        #         "train_loss": total_loss.item(),
+        #         "ssl_loss": ssl_loss.item(),
+        #         "reg_loss": reg_loss.item(),
+        #         "ssl_acc": ssl_acc,
+        #         "reg_acc": reg_acc.mean().item()
+        #     })
             
         return total_loss, reg_acc, x
 
@@ -549,12 +586,12 @@ class MaskedRegressorTrainer(Trainer):
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         
         w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        w = const * torch.exp(w*const)
+        # w = const * torch.exp(w*const)
         
         with torch.no_grad():
             reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
             
-            ssl_loss = self.criterion(ssl_out, x)
+            ssl_loss = self.ssl_criterion(ssl_out, x)
             ssl_acc = self.mask_accuracy(ssl_out, x, mask)
             
             reg_loss = self.criterion(reg_out, y)
@@ -562,15 +599,16 @@ class MaskedRegressorTrainer(Trainer):
             reg_acc = (torch.abs(reg_out - y) < y * 0.1).sum(0)
             
             total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
+
         
-        if self.wandb:
-            wandb.log({
-                "val_loss": total_loss.item(),
-                "val_ssl_loss": ssl_loss.item(),
-                "val_reg_loss": reg_loss.item(),
-                "val_ssl_acc": ssl_acc,
-                "val_reg_acc": reg_acc.mean().item()
-            })
+        # if self.wandb:
+        #     wandb.log({
+        #         "val_loss": total_loss.item(),
+        #         "val_ssl_loss": ssl_loss.item(),
+        #         "val_reg_loss": reg_loss.item(),
+        #         "val_ssl_acc": ssl_acc,
+        #         "val_reg_acc": reg_acc.mean().item()
+        #     })
             
         return total_loss, reg_acc, x
         
@@ -675,13 +713,13 @@ class AdversarialTrainer(Trainer):
         model_time = time.time() - start_time
         
         # Optional wandb logging
-        if self.wandb:
-            log_dict = {"train_loss": out['loss'].item()}
-            if 'disc_loss' in out:
-                log_dict["train_disc_loss"] = out['disc_loss'].item()
-            if 'gen_loss' in out:
-                log_dict["train_gen_loss"] = out['gen_loss'].item()
-            wandb.log(log_dict)
+        # if self.wandb:
+        #     log_dict = {"train_loss": out['loss'].item()}
+        #     if 'disc_loss' in out:
+        #         log_dict["train_disc_loss"] = out['disc_loss'].item()
+        #     if 'gen_loss' in out:
+        #         log_dict["train_gen_loss"] = out['gen_loss'].item()
+        #     wandb.log(log_dict)
         
         return out['loss'], 0., x1
 
@@ -710,12 +748,12 @@ class AdversarialTrainer(Trainer):
             out = {'loss': loss, 'disc_loss': disc_loss, 'gen_loss': gen_loss}
         
         # Optional wandb logging
-        if self.wandb:
-            log_dict = {"val_loss": out['loss'].item()}
-            if 'disc_loss' in out:
-                log_dict["val_disc_loss"] = out['disc_loss'].item()
-            if 'gen_loss' in out:
-                log_dict["val_gen_loss"] = out['gen_loss'].item()
-            wandb.log(log_dict)
+        # if self.wandb:
+        #     log_dict = {"val_loss": out['loss'].item()}
+        #     if 'disc_loss' in out:
+        #         log_dict["val_disc_loss"] = out['disc_loss'].item()
+        #     if 'gen_loss' in out:
+        #         log_dict["val_gen_loss"] = out['gen_loss'].item()
+        #     wandb.log(log_dict)
         
         return out['loss'], 0, x1

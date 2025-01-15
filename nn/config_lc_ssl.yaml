@@ -4,35 +4,45 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  model_name: "CNNEncoder"
-  batch_size: 16
-  num_epochs: 120
-  exp_num: 10
-  max_len_spectra: 3909
-  max_days_lc: 720
+  model_name: "MultiEncoder"
+  batch_size: 32
+  num_epochs: 1000
+  exp_num: 2
+  max_len_spectra: 4096
+  max_days_lc: 270
   lc_freq: 0.0208
-  create_umap: True
+  create_umap: False
 
-Astroconformer:
+
+Conformer:
+  encoder: ["mhsa_pro", "conv", "ffn"]
+  timeshift: false
+  num_layers: 8
+  stride: 2
+  encoder_dim: 256
+  num_heads: 8
+  kernel_size: 3
+  dropout_p: 0.2
+  norm: "shortcut"
+
+
+MultiEncoder:
   # Model
   in_channels: 1
-  encoder: ["mhsa_pro", "conv", "mhsa_pro"]
-  decoder: ["mhsa_decoder",  "conv", "mhsa_decoder"]
-  timeshift: false
-  num_layers: 12
-  num_decoder_layers: 12
-  stride: 16
-  encoder_dim: 512
-  decoder_dim: 512
-  num_heads: 4
+  num_layers: 6
+  stride: 1
+  encoder_dims: [32,64,128,256]
   kernel_size: 3
   dropout_p: 0.3
-  output_dim: 3
-  norm: "postnorm"
-  load_checkpoint: True
-  checkpoint_path: '/data/lightSpec/logs/exp5/astroconf_lc_ssl.pth'
-  checkpoint_num: 1
+  output_dim: 2
   beta: 1
+  load_checkpoint: True
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+  avg_output: True
+  checkpoint_path: '/data/lightSpec/logs/light_2025-01-07/MultiEncoder_lc_2.pth'
+
 
 CNNEncoder:
   # Model

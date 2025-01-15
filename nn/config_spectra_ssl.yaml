@@ -5,7 +5,7 @@ Data:
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
   model_name: CNNEncoderDecoder
-  batch_size: 32
+  batch_size: 64
   num_epochs: 1000
   exp_num: 1
   max_len_spectra: 4096
@@ -46,10 +46,21 @@ CNNEncoderDecoder:
   avg_output: False
   output_dim: 2
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_path: '/data/lightSpec/logs/spec_2024-12-12/CNNEncoderDecoder_spectra_1.pth'
   checkpoint_num: 1
   activation: "silu"
+
+Conformer:
+  encoder: ["mhsa_pro", "conv", "ffn"]
+  timeshift: false
+  num_layers: 8
+  stride: 2
+  encoder_dim: 512
+  num_heads: 8
+  kernel_size: 3
+  dropout_p: 0.2
+  norm: "shortcut"
 
 MambaSeq2Seq:
   # Model

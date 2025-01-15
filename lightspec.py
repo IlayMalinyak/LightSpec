@@ -29,7 +29,7 @@ from transforms.transforms import *
 from dataset.dataset import LightSpecDataset, create_unique_loader
 from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
-from nn.cnn import CNNEncoder, CNNEncoderDecoder
+from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor
 from nn.mlp import MLPEncoder
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
 from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
@@ -42,10 +42,14 @@ from features import create_umap
 
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'kmag_abs']
 
-MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder,
+MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
 torch.cuda.empty_cache()
+
+torch.manual_seed(1234)
+np.random.seed(1234)
+
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"lightspec_{current_date}"
@@ -60,9 +64,9 @@ def create_train_test_dfs(norm_cols=['Teff', 'logg', 'Mstar']):
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
     lamost_kepler_df = lamost_kepler_df.merge(kepler_df[META_COLUMNS], on='KID', how='inner')
-
     lamost_kepler_df['main_seq'] = lamost_kepler_df.apply(giant_cond, axis=1)
     lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==True]
+    lamost_kepler_df = lamost_kepler_df.dropna(subset=norm_cols)
     for col in norm_cols:
         lamost_kepler_df[col] = (lamost_kepler_df[col] - lamost_kepler_df[col].min()) / \
         (lamost_kepler_df[col].max() - lamost_kepler_df[col].min()) 
@@ -70,11 +74,14 @@ def create_train_test_dfs(norm_cols=['Teff', 'logg', 'Mstar']):
     print("number of samples kepler: ", len(kepler_df),  " lamost-kepler :", len(lamost_kepler_df))
     return train_df, val_df 
 
-def test_dataset(ds):
+def test_dataset(ds, num_iters=10):
     start = time.time()
     no_founds = 0
-    for i in range(10):
+    for i in range(num_iters):
+        start = time.time()
         light, spec, w,_, info,_ = ds[i]
+        ds_time = time.time()-start
+        print("time taken for dataset: ", ds_time)
         if light.sum() == 0:
             no_founds += 1
         print(light.shape, spec.shape, w.shape, info.keys())
@@ -85,7 +92,7 @@ def test_dataset(ds):
         axes[1].set_title(f"Spectrum: {info['obsid']}")
         plt.savefig(f'/data/lightSpec/images/lightspec_{i}.png')
         plt.close()
-    print("average time taken per iteration: ", (time.time()-start)/100)
+    print("average time taken per iteration: ", (time.time()-start)/num_iters)
 
 
 
@@ -97,10 +104,14 @@ light_model_name = data_args.light_model_name
 spec_model_name = data_args.spec_model_name
 if data_args.test_run:
     datetime_dir = f"test_{current_date}"
-light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[light_model_name])
-spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[spec_model_name])
-sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['SimSiam'])
-backbone_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNBackbone'])
+light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{light_model_name}_lc'])
+spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{spec_model_name}_spec'])
+conformer_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_lc'])
+conformer_args_spec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_spec'])
+lightspec_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiEncoder_lightspec'])
+conformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_lightspec'])
+sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiModalSimSiam'])
+# backbone_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNBackbone'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
@@ -111,7 +122,7 @@ light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_fr
                             Normalize('std'),
                             ToTensor(),
                          ])
-spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=False, plot_steps=False),
+spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                             ToTensor()
                            ])
 
@@ -135,6 +146,9 @@ val_dataset = LightSpecDataset(df=val_df, light_transforms=light_transforms,
                                 meta_columns=data_args.meta_columns
                                 )
 
+# test_dataset(train_dataset, num_iters=10)
+
+
 train_dataloader = create_unique_loader(train_dataset,
                                       batch_size=int(data_args.batch_size), \
                                       num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
@@ -148,18 +162,22 @@ val_dataloader = create_unique_loader(val_dataset,
 
 print("len trian dataloader ", len(train_dataloader))
 
-light_backbone = MODELS[light_model_name](light_model_args)
+light_backbone = MODELS[light_model_name](light_model_args, conformer_args=conformer_args_lc)
 if light_model_name == 'Astroconformer':
     light_backbone.pred_layer = torch.nn.Identity()
 light_model = SimSiam(light_backbone)
 
 light_model = init_model(light_model, light_model_args)
 
-spec_model = MODELS[spec_model_name](spec_model_args)
+spec_model = MODELS[spec_model_name](spec_model_args, conformer_args=conformer_args_spec)
 
 spec_model = init_model(spec_model, spec_model_args)
 
-model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+
+backbone = MultiEncoder(lightspec_args, conformer_args=conformer_args_lightspec)
+
+# model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
 
 if data_args.load_checkpoint:
     datetime_dir = os.path.basename(os.path.dirname(data_args.checkpoint_path))
@@ -174,7 +192,6 @@ model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
 print("number of training samples: ", len(train_dataset), len(val_dataset))
-print("model: \n", model)
 
 if data_args.create_umap:
     umap_df = create_umap(model, val_dataloader, local_rank)
@@ -195,17 +212,17 @@ else:
 scaler = GradScaler()
 
 # print all the trainable layers in the model
-print("Trainable layers in the model: ")
-for name, param in model.named_parameters():
-    if param.requires_grad:
-        print(name, param.shape)
+# print("Trainable layers in the model: ")
+# for name, param in model.named_parameters():
+#     if param.requires_grad:
+#         print(name, param.shape)
 
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=1, scaler=None,
+                        criterion=loss_fn, output_dim=1, scaler=scaler, grad_clip=True,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=True,
+                           accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=False,
                         exp_name=f"lightspec_{exp_num}") 
 
 # save all containers in log directory
@@ -215,8 +232,8 @@ complete_config = {
     "data_args": data_args.__dict__,
     "light_model_args": light_model_args.__dict__,
     "spec_model_args": spec_model_args.__dict__,
-    "sims_args": sims_args.__dict__,
-    "backbone_args": backbone_args.__dict__,
+    "conformer_args_lc": conformer_args_lc.__dict__,
+    "conformer_args_spec": conformer_args_spec.__dict__,
     "moco_args": moco_args.__dict__,
     "optim_args": optim_args.__dict__,
     "num_params": num_params,

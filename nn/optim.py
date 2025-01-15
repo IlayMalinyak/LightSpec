@@ -40,6 +40,7 @@ class CQR(nn.Module):
     def __init__(self, quantiles, reduction='mean'):
         super().__init__()
         self.quantiles = quantiles
+        self.reduction = reduction
 
     def forward(self, preds, target):
         assert not target.requires_grad
@@ -48,16 +49,19 @@ class CQR(nn.Module):
             target = target.unsqueeze(-1)
         losses = []
         for i, q in enumerate(self.quantiles):
-            errors = target - preds[..., i]
+            p = preds[..., i]
+            if len(p.shape) == 2:
+                p = p.unsqueeze(-1)
+            errors = target - p
             losses.append(
                 torch.max(
                     (q - 1) * errors,
                     q * errors
                 ).unsqueeze(1))
-        loss = torch.sum(torch.cat(losses, dim=1), dim=1)
-        if reduction == 'mean':
+        loss = torch.sum(torch.cat(losses, dim=-1), dim=-1)
+        if self.reduction == 'mean':
             return torch.mean(loss)
-        elif reduction == 'sum':
+        elif self.reduction == 'sum':
             return torch.sum(loss)
         else:
             return loss

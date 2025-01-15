@@ -63,7 +63,7 @@ CNNRegressor:
   output_dim: 3
   beta: 1
   load_checkpoint: True
-  checkpoint_path: '/data/lightSpec/logs/spec_2024-12-12/CNNEncoderDecoder_spectra_1.pth'
+  checkpoint_path: '/data/lightSpec/logs/spec_2024-12-12/CNNRegressor_spectra_decode_1.pth'
   checkpoint_num: 1
   activation: "silu"
 

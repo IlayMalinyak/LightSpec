@@ -275,17 +275,23 @@ class MultimodalMoCo(nn.Module):
         
         # Compute similarity matrix
         logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
+
+        if torch.isnan(logits).sum() > 0:
+            print("nans in logits: ", torch.isnan(logits).sum())
         
         # Compute L2 distance between sample properties
         # Assumes sample_properties is a tensor of shape (batch_size, n_features)
         if sample_properties is None:
-            prop_distances = torch.ones(logits.shape[0], logits.shape[0], device=logits.device)
+            distance_weights = torch.zeros(logits.shape[0], logits.shape[0], device=logits.device)
         else:
             prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
+            distance_weights = (prop_distances - prop_distances.min()) / (prop_distances.max() - prop_distances.min())
         
         # Normalize distances to use as weights
         # You might want to adjust this normalization strategy
-        distance_weights = (prop_distances - prop_distances.min()) / (prop_distances.max() - prop_distances.min())
+        
+        if torch.isnan(distance_weights).sum() > 0:
+            print("nans in distance weights: ", torch.isnan(distance_weights).sum())
         
         # Create a mask for negative pairs (non-diagonal elements)
         N = logits.shape[0]
@@ -298,9 +304,18 @@ class MultimodalMoCo(nn.Module):
         
         # Prepare labels (positive pair on diagonal)
         labels = torch.arange(N, dtype=torch.long, device=logits.device)
+
+        if torch.isnan(labels).sum() > 0:
+            print("nans in labels: ", torch.isnan(labels).sum())
+        
+        if torch.isnan(weighted_logits).sum() > 0:
+            print("nans in weighted logits: ", torch.isnan(weighted_logits).sum())
         
         # Compute cross-entropy loss
         loss = F.cross_entropy(weighted_logits, labels)
+
+        if torch.isnan(loss).sum() > 0:
+            print("nans in loss: ", torch.isnan(loss).sum())
         
         return loss, logits, labels
 
@@ -393,8 +408,6 @@ class MultimodalMoCo(nn.Module):
         Returns:
             losses and logits for both directions
         """
-        # Compute query features
-        # print("spectra shape: ", spectra.shape)
         start = time.time()
         spectra = self.spectra_encoder_q(spectra)
         if isinstance(spectra, tuple):
@@ -402,12 +415,29 @@ class MultimodalMoCo(nn.Module):
         lightcurves = self.lightcurve_encoder_q(lightcurves)
         if isinstance(lightcurves, tuple):
             lightcurves = lightcurves[0]
+
+
+        if torch.isnan(spectra).sum() > 0:
+            print("nans in spectra: ", torch.isnan(spectra).sum())
+        if torch.isnan(lightcurves).sum() > 0:
+            print("nans in lightcurves: ", torch.isnan(lightcurves).sum())
+
         q_s = self.spectra_proj_q(spectra)
         q_l = self.lightcurve_proj_q(lightcurves)
+
+        if torch.isnan(q_s).sum() > 0:
+            print("nans in q_s: ", torch.isnan(q_s).sum())
+        if torch.isnan(q_l).sum() > 0:
+            print("nans in q_l: ", torch.isnan(q_l).sum())
         
         # Normalize features
         q_s = F.normalize(q_s, dim=1)
         q_l = F.normalize(q_l, dim=1)
+
+        if torch.isnan(q_s).sum() > 0:
+            print("nans in q_s after norm: ", torch.isnan(q_s).sum())
+        if torch.isnan(q_l).sum() > 0:
+            print("nans in q_l after norm: ", torch.isnan(q_l).sum())
         
         # Compute key features
 
@@ -457,262 +487,3 @@ class MultimodalMoCo(nn.Module):
         
         return {'loss': loss, 'logits': logits , 'labels': labels, 'q': q, 'k': k}
 
-class LightCurveSpectraMoCo(nn.Module):
-    def __init__(self, 
-                 spectra_encoder, 
-                 lightcurve_encoder, 
-                 hidden_dim=512,
-                 projection_dim=256,  # Final projection dimension
-                 K=2048, 
-                 m=0.999,
-                 T=0.07,
-                 freeze_lightcurve=True,
-                 freeze_spectra=True,
-                 bidirectional=False):
-        """
-        Modified MoCo model for aligning light curves and spectra
-        
-        Args:
-            light_curve_encoder (nn.Module): Encoder for light curve data
-            spectra_encoder (nn.Module): Encoder for spectra data
-            feature_dim (int): Dimension of the feature representation
-            queue_size (int): Size of the memory queue
-            momentum (float): Momentum coefficient for key encoder update
-        """
-        super().__init__()
-        
-        # Encoders
-        self.light_curve_encoder = lightcurve_encoder
-        # self.light_curve_key_encoder = self._copy_encoder(lightcurve_encoder)
-        self.spectra_encoder = spectra_encoder
-        if freeze_lightcurve:
-            self._freeze_encoder(self.light_curve_encoder)
-        if freeze_spectra:
-            self._freeze_encoder(self.spectra_encoder)
-        spectra_out_dim = spectra_encoder.output_dim
-        lightcurve_out_dim = lightcurve_encoder.output_dim
-        
-        
-        # Projection heads
-
-        self.light_curve_projector = self._build_projector(lightcurve_out_dim, hidden_dim, projection_dim)
-        
-        self.spectra_projector = self._build_projector(spectra_out_dim, hidden_dim, projection_dim)
-
-
-        self._freeze_projector(self.light_curve_projector, self.spectra_projector)
-        
-        # Register queue for spectra keys
-        # self.register_buffer("spectra_queue", torch.randn(projection_dim, K))
-        # self.spectra_queue = F.normalize(self.spectra_queue, dim=0)
-
-        self.register_buffer("queue", torch.randn(projection_dim, K))
-        self.queue = F.normalize(self.queue, dim=0)
-        
-        # Queue pointer
-        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-        
-        # Hyperparameters
-        # self.feature_dim = feature_dim
-        self.queue_size = K
-        self.m = m
-        self.T = T
-
-    def weighted_contrastive_loss(self, q, k, sample_properties):
-        # Normalize query and key vectors
-        q = F.normalize(q, dim=1)
-        k = F.normalize(k, dim=1)
-        
-        # Compute similarity matrix
-        logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
-        
-        # Compute L2 distance between sample properties
-        # Assumes sample_properties is a tensor of shape (batch_size, n_features)
-        prop_distances = torch.cdist(sample_properties, sample_properties, p=2.0)
-        
-        # Normalize distances to use as weights
-        # You might want to adjust this normalization strategy
-        distance_weights = (prop_distances - prop_distances.min()) / (prop_distances.max() - prop_distances.min())
-        
-        # Create a mask for negative pairs (non-diagonal elements)
-        N = logits.shape[0]
-        positive_mask = torch.eye(N, dtype=torch.bool, device=logits.device)
-        negative_mask = ~positive_mask
-        
-        # Apply weights to negative pairs
-        weighted_logits = logits.clone()
-        weighted_logits[negative_mask] *= (1 + distance_weights[negative_mask])
-        
-        # Prepare labels (positive pair on diagonal)
-        labels = torch.arange(N, dtype=torch.long, device=logits.device)
-        
-        # Compute cross-entropy loss
-        loss = F.cross_entropy(weighted_logits, labels)
-        
-        return loss, logits, labels
-
-    def _freeze_encoder(self, encoder):
-        """Freeze encoder parameters"""
-        for name, param in encoder.named_parameters():
-            param.requires_grad = False
-        
-    def _freeze_projector(self, k_projector, q_projector):
-        """Freeze projector parameters"""
-        for param_k, param_q in zip(k_projector.parameters(), q_projector.parameters()):
-            if param_k.shape == param_q.shape:
-                param_k.requires_grad = False
-                param_k.data = param_q.data
-    
-    def _build_projector(self, in_dim, hidden_dim, out_dim):
-        """Modified projector with layer normalization"""
-        return nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(0.2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(0.2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, out_dim),
-        )
-    
-    @torch.no_grad()
-    def _batch_shuffle_ddp(self, x):
-        """
-        Batch shuffle, for making use of BatchNorm.
-        *** Only support DistributedDataParallel (DDP) model. ***
-        """
-        # gather from all gpus
-        batch_size_this = x.shape[0]
-        x_gather = concat_all_gather(x)
-        batch_size_all = x_gather.shape[0]
-
-        num_gpus = batch_size_all // batch_size_this
-
-        # random shuffle index
-        idx_shuffle = torch.randperm(batch_size_all).cuda()
-
-        # broadcast to all gpus
-        torch.distributed.broadcast(idx_shuffle, src=0)
-
-        # index for restoring
-        idx_unshuffle = torch.argsort(idx_shuffle)
-
-        # shuffled index for this gpu
-        gpu_idx = torch.distributed.get_rank()
-        idx_this = idx_shuffle.view(num_gpus, -1)[gpu_idx]
-
-        return x_gather[idx_this], idx_unshuffle
-
-    @torch.no_grad()
-    def _batch_unshuffle_ddp(self, x, idx_unshuffle):
-        """
-        Undo batch shuffle.
-        *** Only support DistributedDataParallel (DDP) model. ***
-        """
-        # gather from all gpus
-        batch_size_this = x.shape[0]
-        x_gather = concat_all_gather(x)
-        batch_size_all = x_gather.shape[0]
-
-        num_gpus = batch_size_all // batch_size_this
-
-        # restored index for this gpu
-        gpu_idx = torch.distributed.get_rank()
-        idx_this = idx_unshuffle.view(num_gpus, -1)[gpu_idx]
-
-        return x_gather[idx_this]
-    
-    def _update_key_encoder(self):
-        """
-        Update key encoder parameters using momentum update
-        """
-        for param_q, param_k in zip(
-            self.light_curve_query_encoder.parameters(), 
-            self.light_curve_key_encoder.parameters()
-        ):
-            param_k.data = param_k.data * self.momentum + param_q.data * (1. - self.momentum)
-    
-    def _dequeue_and_enqueue(self, keys):
-        """
-        Dequeue the oldest batch and enqueue the new batch of keys
-        
-        Args:
-            keys (torch.Tensor): New keys to enqueue
-        """
-        # Gather keys across all GPUs
-        keys = keys.detach()
-        
-        batch_size = keys.shape[0]
-        ptr = int(self.queue_ptr)
-        
-        # Replace the keys at ptr
-        if ptr + batch_size > self.queue_size:
-            # Wrap around
-            self.queue[:, ptr:] = keys[:self.queue_size - ptr].T
-            self.queue[:, :ptr + batch_size - self.queue_size] = keys[self.queue_size - ptr:].T
-        else:
-            self.queue[:, ptr:ptr + batch_size] = keys.T
-        
-        # Move pointer
-        ptr = (ptr + batch_size) % self.queue_size
-        self.queue_ptr[0] = ptr
-    
-    def _momentum_update_key_encoder(self, query_encoder, key_encoder):
-        """
-        Momentum update where key_encoder is updated based on query_encoder
-        only for the parameters that are shared between the two encoders
-        
-        Args:
-            query_encoder (nn.Module): The encoder being trained
-            key_encoder (nn.Module): The momentum-updated encoder
-        """
-        for param_q,  param_k in zip(
-            query_encoder.parameters(), 
-            key_encoder.parameters()
-        ):
-            if param_k.shape == param_q.shape:
-                param_k.data = param_k.data * self.m + param_q.data * (1. - self.m)
-    
-    def forward(self, light_curves, spectra, w):
-        # Query features from light curves
-        q = self.spectra_encoder(spectra)
-        if isinstance(q, tuple):
-            q = q[0]
-        q = self.spectra_projector(q)
-        q = F.normalize(q, dim=1)
-
-        
-        # Key features from spectra with momentum update
-        with torch.no_grad():
-            # Momentum update of spectra (key) encoder
-            self._momentum_update_key_encoder(
-                self.spectra_projector,        # Key encoder
-                self.light_curve_projector  # Query encoder
-            )
-            # k, idx_unshuffle = self._batch_shuffle_ddp(self.light_curve_encoder(light_curves)[0])
-            k = self.light_curve_encoder(light_curves)
-            if isinstance(k, tuple):
-                k = k[0]
-            # Compute key features using momentum-updated encoder
-            k = self.light_curve_projector(k)
-            k = F.normalize(k, dim=1)
-            # k = self._batch_unshuffle_ddp(k, idx_unshuffle)
-        # print(q[0,:10], k[0,:10])
-        # Contrastive learning logic
-        loss, logits, labels = self.weighted_contrastive_loss(q, k, w)
-
-        # l_pos = torch.einsum('nc,nc->n', [q, k]).unsqueeze(-1)
-        # l_neg = torch.einsum('nc,ck->nk', [q, self.queue.clone().detach()])
-        
-        # logits = torch.cat([l_pos, l_neg], dim=1)
-        # labels = torch.zeros(logits.shape[0], dtype=torch.long, device=logits.device)
-        
-        # # Compute NT-Xent (Normalized Temperature Cross Entropy) loss
-        # loss = F.cross_entropy(logits / self.T , labels)
-        
-        # Update queue with current spectra keys
-        self._dequeue_and_enqueue(k)
-        
-        return {'loss': loss, 'logits': logits , 'labels': labels}

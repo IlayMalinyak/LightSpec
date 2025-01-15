@@ -4,7 +4,7 @@ from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR
 from collections import OrderedDict
 from .Modules.mhsa_pro import MHA_rotary
 from .Modules.cnn import ConvBlock
-from nn.cnn import CNNEncoderDecoder, CNNEncoder
+from nn.models import CNNEncoderDecoder, CNNEncoder
 from nn.moco import MultimodalMoCo, LightCurveSpectraMoCo
 from nn.simsiam import SimCLR, SimSiam, MultiModalSimSiam
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
@@ -19,29 +19,35 @@ models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'SimCLR': 
 schedulers = {'WarmupScheduler': WarmupScheduler, 'OneCycleLR': OneCycleLR,
  'CosineAnnealingLR': CosineAnnealingLR, 'none': None}
 
-def load_checkpoints_ddp(model, checkpoint_path, add_prefix=False):
+def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False):
   print(f"****Loading  checkpoint - {checkpoint_path}****")
   state_dict = torch.load(f'{checkpoint_path}', map_location=torch.device('cpu'))
   new_state_dict = OrderedDict()
   for key, value in state_dict.items():
-      while key.startswith('module.'):
-          key = key[7:]
-      if add_prefix:
-        if key.startswith('backbone.') or key.startswith('pe.') or key.startswith('encoder.'):
-            key = key = 'encoder.' + key
-      new_state_dict[key] = value
+    while key.startswith('module.'):
+        key = key[7:]
+    if load_backbone:
+        if key.startswith('backbone.'):
+            key = key[9:]
+        else:
+            continue
+    key = prefix + key
+    # print(key)
+    new_state_dict[key] = value
   state_dict = new_state_dict
   missing, unexpected = model.load_state_dict(state_dict, strict=False)
   print("number of keys in state dict and model: ", len(state_dict), len(model.state_dict()))
   print("number of missing keys: ", len(missing))
   print("number of unexpected keys: ", len(unexpected))
-  print("missing keys: ", missing)
-  print("unexpected keys: ", unexpected)
+#   print("missing keys: ", missing)
+#   print("unexpected keys: ", unexpected)
+#   print("state dict: ", state_dict.keys())
+#   print("model dict: ", model.state_dict().keys())
   return model
 
-def init_model(model, model_args):
+def init_model(model, model_args, prefix='', load_backbone=False):
   if model_args.load_checkpoint:
-      model = load_checkpoints_ddp(model, model_args.checkpoint_path)
+      model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix=prefix, load_backbone=load_backbone)
   else:
       print("****deepnorm init****")
       deepnorm_init(model, model_args)

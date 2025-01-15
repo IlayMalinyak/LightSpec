@@ -26,12 +26,14 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
-from nn.cnn import CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor
+from nn.models import CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor
 # from nn.mamba import MambaSeq2Seq
 from nn.train import *
 from nn.utils import deepnorm_init, load_checkpoints_ddp, load_scheduler
 from nn.scheduler import WarmupScheduler
 from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn
+from features import create_umap
+
 
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
@@ -89,7 +91,7 @@ optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
-transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=False, plot_steps=False),
+transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                         ToTensor(),
                          ])
 
@@ -101,8 +103,8 @@ print(lamost_catalog['combined_snrg'].describe())
 plt.hist(lamost_catalog['combined_snrg'] / 1000, bins=100)
 plt.savefig(f"/data/lightSpec/images/lamost_snrg_hist.png")
 plt.close()
-print("number of samples: ", len(lamost_catalog), lamost_catalog.head)
-train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, df=lamost_catalog,
+print("number of samples: ", len(lamost_catalog))
+train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, df=lamost_catalog, 
                                  max_len=int(data_args.max_len_spectra))
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
@@ -137,7 +139,7 @@ if model_args.load_checkpoint:
     checkpoint_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
     print(datetime_dir)
     print("loading checkpoint from: ", model_args.checkpoint_path)
-    model = load_checkpoints_ddp(model, model_args.checkpoint_path, add_prefix=True)
+    model = load_checkpoints_ddp(model, model_args.checkpoint_path)
     print("loaded checkpoint from: ", model_args.checkpoint_path)
 else:
     deepnorm_init(model, model_args)
@@ -146,6 +148,13 @@ model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
+
+if data_args.create_umap:
+    umap_df = create_umap(model.module.encoder, val_dataloader, local_rank, use_w=False, dual=False, max_iter=100)
+    print("umap created: ", umap_df.shape)
+    umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
+    print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
+    exit()
 
 loss_fn = torch.nn.L1Loss(reduction='none')
 ssl_loss_fn = torch.nn.MSELoss()
@@ -157,6 +166,7 @@ complete_config = {
     "model_name": model_name,
     "data_args": data_args.__dict__,
     "model_args": model_args.__dict__,
+    "conformer_args": conformer_args.__dict__,
     "optim_args": optim_args.__dict__,
     "num_params": num_params,
     "model_structure": str(model),  # Add the model structure to the configuration
@@ -177,7 +187,7 @@ trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
                            accumulation_step=1, max_iter=np.inf, w_name='snrg',
                            w_init_val=1,  exp_name=f"{model_name}_spectra_decode_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=40, only_p=False, best='acc', conf=True) 
+                        early_stopping=40, only_p=False, best='loss', conf=True) 
 output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)

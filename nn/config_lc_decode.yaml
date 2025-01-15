@@ -7,7 +7,7 @@ Data:
   model_name: "CNNRegressor"
   batch_size: 16
   num_epochs: 2000
-  exp_num: 100
+  exp_num: 1
   max_days_lc: 720
   lc_freq: 0.0208
   create_umap: False
@@ -54,28 +54,30 @@ CNNEncoderDecoder:
 
 CNNRegressor:
 # Model
+  # Model
   in_channels: 1
   num_layers: 8
   stride: 1
-  encoder_dims: [32,64,128,256,512]
+  encoder_dims: [32,64,128,256,512,2048]
   kernel_size: 3
-  transformer_layers: 1
   dropout_p: 0.3
-  output_dim: 1
+  output_dim: 2
+  num_quantiles: 5
   beta: 1
   load_checkpoint: True
+  freeze_encoder: True
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
   avg_output: True
-  checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
+  checkpoint_path: '/data/lightSpec/logs/light_2025-01-06/MultiEncoder_lc_1.pth'
 
 Conformer:
-  encoder: ["mhsa_pro", "conv"]
+  encoder: ["mhsa_pro", "conv", 'ffn']
   timeshift: false
-  num_layers: 2
+  num_layers: 6
   stride: 2
-  encoder_dim: 512
+  encoder_dim: 2048
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.2
@@ -121,3 +123,4 @@ Optimization:
   weight_decay: 5e-6
   warmup_pct: 0.3
   steps_per_epoch: 3500
+  quantiles: [0.05, 0.16, 0.5, 0.84, 0.95]

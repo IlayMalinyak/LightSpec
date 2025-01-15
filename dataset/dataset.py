@@ -4,11 +4,14 @@ from torch.utils.data import Dataset
 from astropy.io import fits
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 import matplotlib as mpl
 import pandas as pd
 from typing import List
 import copy
-
+from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 import sys
 from os import path
@@ -24,6 +27,8 @@ plt.rcParams.update({'font.size': 30, 'figure.figsize': (14,10), 'lines.linewidt
 mpl.rcParams['axes.prop_cycle'] = mpl.cycler(color=["gray", "r", "c", 'm', 'brown'])
 plt.rcParams.update({'xtick.labelsize': 22, 'ytick.labelsize': 22})
 plt.rcParams.update({'legend.fontsize': 22})
+
+T_sun = 5778
 
 
 class DualDataset(Dataset):
@@ -94,21 +99,50 @@ class DualDataset(Dataset):
         return flux.squeeze().unsqueeze(0), spectra.squeeze().unsqueeze(0), y.squeeze() , info
 
 class SpectraDataset(Dataset):
-    def __init__(self, data_dir, transforms=None, df=None, max_len=3909):
-        self.data_dir = data_dir
+    def __init__(self, data_dir, transforms=None, df=None, max_len=3909, use_cache=True):
+        self.data_dir = Path(data_dir)
         self.transforms = transforms
         self.df = df
         if df is None:
-            print("creating files list...")
-            files_names = os.listdir(data_dir)
-            self.path_list = [os.path.join(data_dir, k) for k in files_names]
+            cache_file = os.path.join(self.data_dir, '.path_cache.txt')
+            
+            if use_cache and os.path.exists(cache_file):
+                print("Loading cached file paths...")
+                with open(cache_file, 'r') as f:
+                    self.path_list = np.array([line.strip() for line in f])
+            else:
+                print("Creating files list...")
+                self.path_list = self._file_listing()
+                if use_cache:
+                    with open(cache_file, 'w') as f:
+                        f.write('\n'.join(self.path_list))
         else:
             self.path_list = None
         self.max_len = max_len
         self.mask_transform = RandomMasking()
+    
+    def _file_listing(self):
+        # Method 1: Using scandir (faster than listdir)
+        # entries = list(os.scandir(self.data_dir))
+        # paths = [entry.path for entry in entries if entry.is_file()]
+        def process_chunk(file_names):
+            return [self.data_dir / name for name in file_names]
+        
+        file_names = os.listdir(self.data_dir)
+        chunk_size = 100000  # Adjust based on your system
+        chunks = [file_names[i:i + chunk_size] for i in range(0, len(file_names), chunk_size)]
+        
+        with ThreadPoolExecutor() as executor:
+            paths = []
+            for chunk_paths in executor.map(process_chunk, chunks):
+                paths.extend(chunk_paths)
+        
+        return np.array(paths)
         
     def __len__(self):
-        return len(self.path_list) if self.path_list else len(self.df)
+        if self.df is not None:
+            return len(self.df)
+        return len(self.path_list) if self.path_list is not None else 0
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:
@@ -152,7 +186,7 @@ class SpectraDataset(Dataset):
             info['snri'] = row['combined_snri'] / 1000
             info['snrr'] = row['combined_snrr'] / 1000
             info['snrz'] = row['combined_snrz'] / 1000
-            target = torch.tensor([np.log10(info['Teff']),info['logg'], info['FeH']], dtype=torch.float32)
+            target = torch.tensor([info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
         else:
             target = torch.zeros_like(mask)
         # ssl case
@@ -166,7 +200,7 @@ class SpectraDataset(Dataset):
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
-         target.float(),mask.squeeze(0), info, info)
+         target.float(), mask.squeeze(0), info, info)
 
 if __name__ == '__main__':
     s_transforms = Compose([MovingAvg(7), Normalize("minmax", axis=0), ])
@@ -226,8 +260,6 @@ class KeplerDataset():
     if df is not None and 'predicted period' not in df.columns:
       if prot_df is not None:
         self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
-      else:
-        self.df['predicted period'] = np.nan
       
 
   def __len__(self):
@@ -259,7 +291,7 @@ class KeplerDataset():
     elif 'Prot' in row.keys():
         y_val = row['Prot']
     else:
-        y_val = row['predicted period']
+        y_val = np.nan
 
     if self.npy_path is not None:
         try:
@@ -288,6 +320,9 @@ class KeplerDataset():
         if 'predicted period' in row.keys():
             meta['predicted period'] = row['predicted period']
             meta['mean_period_confidence'] = row['mean_period_confidence']
+        if 'Pmax' in row.keys() and 'Pmin' in row.keys():
+            meta['Pmax'] = row['Pmax']
+            meta['Pmin'] = row['Pmin']
         return x, meta, None, y_val
 
     try:
@@ -377,6 +412,9 @@ class KeplerDataset():
     elif 'predicted period' in meta.keys():
         target = torch.tensor([np.log10(meta['predicted period'])])
         mask_y = torch.zeros_like(target)
+    elif 'Pmax' in meta.keys():
+        target = torch.tensor([np.log10(meta['Pmax']), np.log10(meta['Pmin'])])
+        mask_y = torch.zeros_like(target)
     else:
         target = x.clone()
         mask_y = torch.zeros_like(target)
@@ -391,6 +429,9 @@ class KeplerDataset():
     if 'predicted period' in meta.keys():
         info['predicted period'] = meta['predicted period']
         info['mean_period_confidence'] = meta['mean_period_confidence']
+    if 'Pmax' in meta.keys():
+        info['Pmax'] = meta['Pmax']
+        info['Pmin'] = meta['Pmin']
     toc = time.time()
     info['time'] = toc - tic
     if mask is None:
@@ -441,25 +482,30 @@ class LightSpecDataset(KeplerDataset):
         return x, meta
 
     def __getitem__(self, idx):
+        start = time.time()
         light, _, _, _, info, _ = super().__getitem__(idx)
+        light_time = time.time() - start
         kid = int(info['KID'])
         obsid = int(self.df.iloc[idx]['ObsID'])
         info['obsid'] = obsid
         spectra_filename = os.path.join(self.spec_path, f'{obsid}.fits')
         try:
             spectra, meta = self.read_spectra(spectra_filename)
+            spec_time = time.time() - start
         except OSError as e:
             print("Error reading file ", obsid, e)
             spectra = np.zeros((1, self.spec_seq_len))
             meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
         if self.spec_transforms:
             spectra, _, spec_info = self.spec_transforms(spectra, None, meta)
+            spec_transform_time = time.time() - start
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
         spectra = torch.nan_to_num(spectra, nan=0)
         info.update(spec_info)
         w = torch.tensor([info[c] for c in self.meta_columns], dtype=torch.float32)
-        return light.float(), spectra.float(), w, torch.zeros_like(spectra), info, info
+        # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
+        return light.float().squeeze(0), spectra.float().squeeze(0), w, torch.zeros_like(spectra), info, info
     
 
 

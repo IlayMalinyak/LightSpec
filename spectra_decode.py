@@ -26,7 +26,7 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
-from nn.cnn import CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor
+from nn.models import CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor
 # from nn.mamba import MambaSeq2Seq
 from nn.train import *
 from nn.utils import deepnorm_init, load_checkpoints_ddp, load_scheduler
@@ -173,7 +173,7 @@ trainer = RegressorTrainer(model=model, optimizer=optimizer,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf, w_name='snrg',
-                           w_init_val=10,  exp_name=f"{model_name}_spectra_decode_{checkpoint_num}") 
+                           w_init_val=1,  exp_name=f"{model_name}_spectra_decode_{checkpoint_num}") 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
 output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{checkpoint_num}.json'

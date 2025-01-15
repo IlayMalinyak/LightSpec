@@ -120,6 +120,7 @@ class MHA_rotary(nn.Module):
 
         x = self.output(x)
 
+
         if self.collect_attention_map:
             self.attention_map = att
         
