@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: 1
+  exp_num: 2
   light_model_name: "MultiEncoder"
   spec_model_name: "MultiTaskRegressor"
   # Data
@@ -14,7 +14,7 @@ Data:
   max_days_lc: 270
   lc_freq: 0.0208
   continuum_norm: True
-  meta_columns: ['Teff']
+  meta_columns: ['Teff', 'Mstar']
   test_run: False
   create_umap: False
   load_checkpoint: False
@@ -187,8 +187,8 @@ MoCo:
   hidden_dim: 512
   projection_dim: 512
   num_layers: 6
-  freeze_lightcurve: True
-  freeze_spectra: True
+  freeze_lightcurve: False
+  freeze_spectra: False
   bidirectional: True
   transformer: True
 
@@ -234,11 +234,11 @@ conv_args:
   
 Optimization SSL:
   # Optimization
-  max_lr:  1e-4
-  weight_decay: 5e-5
+  max_lr:  5e-5
+  weight_decay: 1e-6
   warmup_pct: 0.15
   steps_per_epoch: 3500
-  momentum: 0.85
+  momentum: 0.95
   nesterov: true
   optimizer: "sgd"
 

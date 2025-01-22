@@ -4,20 +4,22 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  model_name: "MultiEncoder"
+  model_name: "CNNEncoderDecoder"
   batch_size: 32
   num_epochs: 1000
   exp_num: 2
   max_len_spectra: 4096
   max_days_lc: 270
+  max_len_lc: 13056
   lc_freq: 0.0208
   create_umap: False
+  masked_transform: True
 
 
 Conformer:
   encoder: ["mhsa_pro", "conv", "ffn"]
   timeshift: false
-  num_layers: 8
+  num_layers: 4
   stride: 2
   encoder_dim: 256
   num_heads: 8
@@ -60,6 +62,23 @@ CNNEncoder:
   sine_w0: 1.0
   avg_output: True
   checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
+
+
+CNNEncoderDecoder:
+  # Model
+  in_channels: 1
+  num_layers: 8
+  stride: 1
+  encoder_dims: [32,64,128,256]
+  kernel_size: 3
+  dropout_p: 0.3
+  output_dim: 2
+  beta: 1
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+  avg_output: False
 
 Mamba:
   # Model

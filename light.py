@@ -26,10 +26,10 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import KeplerDataset
 from nn.astroconf import Astroconformer
-from nn.models import CNNEncoder, MultiEncoder
+from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder
 # from nn.mamba import MambaEncoder
 from nn.simsiam import SimSiam
-from nn.train import ContrastiveTrainer
+from nn.train import ContrastiveTrainer, MaskedSSLTrainer
 from nn.utils import deepnorm_init, load_checkpoints_ddp
 from util.utils import *
 from features import create_umap
@@ -37,7 +37,8 @@ from features import create_umap
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
-models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder}
+models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder,
+            "CNNEncoderDecoder": CNNEncoderDecoder}
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"light_{current_date}"
@@ -56,7 +57,7 @@ if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
 transforms = Compose([ RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                     #   FillNans(interpolate=True),
                         MovingAvg(13),
-                        RandomMasking(mask_prob=0.2),
+                        # RandomMasking(mask_prob=0.2),
                         # RandomTransform([AddGaussianNoise(sigma=0.0001),
                         #                 RandomMasking(mask_prob=0.05),
                         #                 Shuffle(segment_len=270/data_args.lc_freq),
@@ -70,7 +71,8 @@ print("number of samples: ", len(kepler_df))
 train_dataset = KeplerDataset(df=kepler_df, transforms=transforms,
                                 target_transforms=transforms,
                                 npy_path = '/data/lightPred/data/npy',
-                                seq_len=int(data_args.max_days_lc/data_args.lc_freq)
+                                seq_len=int(data_args.max_len_lc),
+                                masked_transforms = data_args.masked_transform
                                 )
 start = time.time()
 for i in range(100):
@@ -104,8 +106,8 @@ val_dataloader = DataLoader(val_subset,
 # backbone.pred_layer = torch.nn.Identity()
 # backbone = CNNEncoder(model_args)
 # backbone = MambaEncoder(model_args)
-backbone = models[model_name](model_args, conformer_args=conformer_args)
-model = SimSiam(backbone)
+model = models[model_name](model_args, conformer_args=conformer_args)
+# model = SimSiam(backbone)
 model = model.to(local_rank)
 
 model_suffix = 0
@@ -119,7 +121,7 @@ if model_args.load_checkpoint:
 else:
     deepnorm_init(model, model_args)
 
-model = DDP(model, device_ids=[local_rank])
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
@@ -153,7 +155,26 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
 #         final_div_factor=100.0
 #     )
 
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.yaml"
+# Save the complete configuration to a YAML file
+
+
+if data_args.masked_transform:
+    trainer = MaskedSSLTrainer(model=model, optimizer=optimizer,
+                        criterion=loss_fn, output_dim=1, scaler=scaler,
+                       scheduler=scheduler, train_dataloader=train_dataloader,
+                       val_dataloader=val_dataloader, device=local_rank,
+                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                           accumulation_step=1, max_iter=np.inf,
+                        exp_name=f"{model_name}_lc_{exp_num}")  
+else:
+    trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+                            criterion=loss_fn, output_dim=1, scaler=scaler,
+                        scheduler=scheduler, train_dataloader=train_dataloader,
+                        val_dataloader=val_dataloader, device=local_rank,
+                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                            accumulation_step=1, max_iter=np.inf,
+                            exp_name=f"{model_name}_lc_{exp_num}") 
+
 
 complete_config = {
     "model_name": model_name,
@@ -163,23 +184,16 @@ complete_config = {
     "optim_args": optim_args.__dict__,
     "num_params": num_params,
     "model_structure": str(model),  # Add the model structure to the configuration
-    "transforms": str(transforms)
+    "transforms": str(transforms),
+    'trainer': trainer.__dict__
 }
-
-# Save the complete configuration to a YAML file
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.yaml"
 with open(config_save_path, "w") as config_file:
     yaml.dump(complete_config, config_file, default_flow_style=False)
-
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
 plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
-trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=1, scaler=scaler,
-                       scheduler=scheduler, train_dataloader=train_dataloader,
-                       val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf,
-                        exp_name=f"{model_name}_lc_{exp_num}") 
+
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
 output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}.json'

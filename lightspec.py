@@ -32,7 +32,7 @@ from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor
 from nn.mlp import MLPEncoder
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
-from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
+from nn.moco import MoCo, MultimodalMoCo
 from nn.simsiam import SimSiam, projection_MLP
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
@@ -176,8 +176,8 @@ spec_model = init_model(spec_model, spec_model_args)
 
 backbone = MultiEncoder(lightspec_args, conformer_args=conformer_args_lightspec)
 
-# model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
-model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
+model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+# model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
 
 if data_args.load_checkpoint:
     datetime_dir = os.path.basename(os.path.dirname(data_args.checkpoint_path))
@@ -222,7 +222,7 @@ trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=False,
+                           accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=True,
                         exp_name=f"lightspec_{exp_num}") 
 
 # save all containers in log directory

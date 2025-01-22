@@ -29,6 +29,7 @@ plt.rcParams.update({'xtick.labelsize': 22, 'ytick.labelsize': 22})
 plt.rcParams.update({'legend.fontsize': 22})
 
 T_sun = 5778
+VSINI_MAX = 100
 
 
 class DualDataset(Dataset):
@@ -153,12 +154,33 @@ class SpectraDataset(Dataset):
         rv = header['HELIO_RV']
         meta = {'RV': rv, 'wavelength': wv}
         return x, meta
+    
+    def create_lamost_target(self, row, info):
+        info['Teff'] = row['combined_teff']
+        info['rv2'] = row['combined_rv']
+        info['logg'] = row['combined_logg']
+        info['FeH'] = row['combined_feh']
+        info['snrg'] = row['combined_snrg'] / 1000
+        info['snri'] = row['combined_snri'] / 1000
+        info['snrr'] = row['combined_snrr'] / 1000
+        info['snrz'] = row['combined_snrz'] / 1000
+        target = torch.tensor([-999, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
+        return target, info
+    
+    def create_apogee_target(self, row, info):
+        info['Teff'] = row['APOGEE_TEFF']
+        info['logg'] = row['APOGEE_LOGG']
+        info['FeH'] = row['APOGEE_FE_H']
+        info['snrg'] = row['APOGEE_SNR'] / 1000
+        info['vsini'] = row['APOGEE_VSINI']
+        target = torch.tensor([info['vsini'] / VSINI_MAX, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
+        return target, info
 
 
     def __getitem__(self, idx):
         if self.df is not None:
             filepath = f"{self.data_dir}/{self.df.iloc[idx]['combined_obsid']}.fits"
-            target_size = 3
+            target_size = 4
         else: 
             filepath = self.path_list[idx]
             target_size = self.max_len    
@@ -177,16 +199,10 @@ class SpectraDataset(Dataset):
         # supervised case
         if self.df is not None:
             row = self.df.iloc[idx]
-            # row = self.df[self.df['combined_obsid'] == int(obsid)]
-            info['Teff'] = row['combined_teff']
-            info['rv2'] = row['combined_rv']
-            info['logg'] = row['combined_logg']
-            info['FeH'] = row['combined_feh']
-            info['snrg'] = row['combined_snrg'] / 1000
-            info['snri'] = row['combined_snri'] / 1000
-            info['snrr'] = row['combined_snrr'] / 1000
-            info['snrz'] = row['combined_snrz'] / 1000
-            target = torch.tensor([info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
+            if 'APOGEE_TEFF' in row.keys():
+                target, info = self.create_apogee_target(row, meta)
+            else:
+                target, info = self.create_lamost_target(row, meta)
         else:
             target = torch.zeros_like(mask)
         # ssl case
@@ -202,27 +218,6 @@ class SpectraDataset(Dataset):
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
          target.float(), mask.squeeze(0), info, info)
 
-if __name__ == '__main__':
-    s_transforms = Compose([MovingAvg(7), Normalize("minmax", axis=0), ])
-    lc_transforms = Compose([MovingAvg(13), Normalize("minmax", axis=0)])
-    data_root = '/data/simulations/dataset'
-    ds = DualDataset(data_root, os.path.join(data_root, 'simulation_properties.csv'),
-     lc_transforms=lc_transforms, spectra_transforms=s_transforms)
-    print(len(ds))
-    for i, data in enumerate(ds): 
-        flux, spectra, label = data
-        time = np.linspace(0, flux.shape[0]/48, flux.shape[0])
-        wv = np.load('/data/lamost/example_wv.npy')
-        fig, ax = plt.subplots(2,1)
-        ax[0].plot(time, flux)
-        ax[1].plot(wv, spectra)
-        fig.suptitle(f"Period: {label['Period']}, Inclination: {label['Inclination']}")
-        plt.savefig(f'/data/lightSpec/images/dual_{i}.png')
-        if i > 10:
-            break
-    # plt.plot(wv.squeeze(), spectra.squeeze())
-    # plt.savefig('/data/lightSpec/images/transformed.png')
-
 
 class KeplerDataset():
   """
@@ -235,6 +230,7 @@ class KeplerDataset():
                 transforms:object=None,
                 seq_len:int=34560,
                 target_transforms:object=None,
+                masked_transforms:bool=False,
                 ):
     """
     dataset for Kepler data
@@ -260,6 +256,7 @@ class KeplerDataset():
     if df is not None and 'predicted period' not in df.columns:
       if prot_df is not None:
         self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
+    self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
       
 
   def __len__(self):
@@ -394,6 +391,9 @@ class KeplerDataset():
             mask = torch.zeros_like(x)
     else:
        x = torch.tensor(x)
+
+    if self.mask_transform is not None:
+        masked_x, mask, _ = self.mask_transform(x, None, info)
     if self.target_transforms is not None:
         try:
             target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
@@ -442,7 +442,10 @@ class KeplerDataset():
     # Ensure info and info_y are always dictionaries
     info = info if isinstance(info, dict) else {}
     info_y = info_y if isinstance(info_y, dict) else {}
-    result = (x.float(), x.float(), target.float(), mask, info, info_y)
+    if self.mask_transform is not None:
+        result = (masked_x.float(), x.float(), target.float(), mask, info, info_y)
+    else:
+        result = (x.float(), x.float(), target.float(), mask, info, info_y)
     if any(item is None for item in result):
         print(f"Warning: None value in result for index {idx}")
         print(f"x: {x.shape if x is not None else None}")

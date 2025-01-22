@@ -5,7 +5,7 @@ from collections import OrderedDict
 from .Modules.mhsa_pro import MHA_rotary
 from .Modules.cnn import ConvBlock
 from nn.models import CNNEncoderDecoder, CNNEncoder
-from nn.moco import MultimodalMoCo, LightCurveSpectraMoCo
+from nn.moco import MultimodalMoCo
 from nn.simsiam import SimCLR, SimSiam, MultiModalSimSiam
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.scheduler import WarmupScheduler
@@ -13,7 +13,7 @@ from nn.scheduler import WarmupScheduler
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'SimCLR': SimCLR, 'SimSiam': SimSiam,
            'MultiModalSimSiam': MultiModalSimSiam, 'MultimodalMoCo': MultimodalMoCo,
-             'LightCurveSpectraMoCo': LightCurveSpectraMoCo, 'AstroEncoderDecoder': AstroEncoderDecoder,
+             'AstroEncoderDecoder': AstroEncoderDecoder,
                'CNNEncoderDecoder': CNNEncoderDecoder,}
 
 schedulers = {'WarmupScheduler': WarmupScheduler, 'OneCycleLR': OneCycleLR,

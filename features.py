@@ -15,6 +15,7 @@ def create_umap(model,
                 temperature=1,
                 use_w=True,
                 dual=True,
+                return_predictions=False,
                 max_iter=np.inf):
     # Initialize UMAP reducer
     reducer = umap.UMAP(n_components=2)
@@ -22,6 +23,7 @@ def create_umap(model,
     # Lists to collect data
     data_list = []
     metadata_list = []
+    
     print('Extracting UMAP coordinates...')
     for i, batch in enumerate(tqdm(dl)):
         if i >= max_iter:

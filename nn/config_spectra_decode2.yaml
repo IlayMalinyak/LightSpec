@@ -79,8 +79,9 @@ MultiTaskRegressor:
   dropout_p: 0.2
   avg_output: True
   output_dim: 3
+  num_quantiles: 5
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "silu"
   checkpoint_path: /data/lightSpec/logs/spec_decode2_2025-01-11/MultiTaskRegressor_spectra_decode_1.pth
@@ -102,3 +103,5 @@ Optimization:
   weight_decay: 5e-6
   warmup_pct: 0.3
   steps_per_epoch: 3500
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+

@@ -222,9 +222,9 @@ class MultimodalMoCo(nn.Module):
         
         # Freeze pre-trained encoders (optional, can be fine-tuned)
         if freeze_lightcurve:
-            self._freeze_encoder(spectra_encoder)
-        if freeze_spectra:
             self._freeze_encoder(lightcurve_encoder)
+        if freeze_spectra:
+            self._freeze_encoder(spectra_encoder)
         
         # Query path: Add projection heads to pre-trained encoders
         self.spectra_encoder_q = spectra_encoder
@@ -267,6 +267,7 @@ class MultimodalMoCo(nn.Module):
             self.register_buffer("spectra_queue", torch.randn(projection_dim, K))
             self.spectra_queue = F.normalize(self.spectra_queue, dim=0)
             self.register_buffer("spectra_queue_ptr", torch.zeros(1, dtype=torch.long))
+
 
     def weighted_contrastive_loss(self, q, k, sample_properties):
         # Normalize query and key vectors
@@ -471,19 +472,20 @@ class MultimodalMoCo(nn.Module):
         # enqueue_time = time.time()- start - logits_time
         # print("time taken for enqueue: ", enqueue_time)
 
-        loss_s, logits_s, labels = self.weighted_contrastive_loss(q_l, k_s, w)            
+        loss_s, logits_s, labels = self.weighted_contrastive_loss(q_s, k_l, w)            
     
         if self.bidirectional:
-            loss_l, logits_l, labels_l = self.weighted_contrastive_loss(q_s, k_l, w) 
+            loss_l, logits_l, labels_l = self.weighted_contrastive_loss(q_l, k_s, w) 
             loss = (loss_s + loss_l) / 2
             logits = logits_s + logits_l
             q = q_l + q_s
             k = k_l + k_s
         else:
             loss = loss_s
+            loss_l = None
             logits = logits_s
             q = q_l
             k = k_s
         
-        return {'loss': loss, 'logits': logits , 'labels': labels, 'q': q, 'k': k}
+        return {'loss': loss, 'logits': logits , 'loss_s': loss_s, 'loss_l': loss_l, 'labels': labels, 'q': q, 'k': k}
 

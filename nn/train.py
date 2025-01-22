@@ -372,7 +372,7 @@ class MaskedSSLTrainer(Trainer):
                 self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
-        acc = self.mask_accuracy(out, y, mask)
+        acc = self.mask_accuracy(out, y.squeeze(), mask.squeeze())
         # if self.wandb:
         #     wandb.log({"train_loss": loss.item(), "train_acc": acc})
         return loss, acc, y
@@ -386,7 +386,7 @@ class MaskedSSLTrainer(Trainer):
         with torch.no_grad():
             out = self.model(x, y)
         loss = self.criterion(out, y)
-        acc = self.mask_accuracy(out, y, mask)
+        acc = self.mask_accuracy(out, y.squeeze(), mask.squeeze())
         # if self.wandb:
         #     wandb.log({"val_loss": loss.item(), "val_acc": acc})
         return loss, acc, y
@@ -430,7 +430,7 @@ class ContrastiveTrainer(Trainer):
                 # Add gradient clipping before optimizer step
                 if self.grad_clip:
                     self.scaler.unscale_(self.optimizer)
-                    self.check_gradients()
+                    # self.check_gradients()
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 if self.scheduler is not None:
@@ -536,11 +536,13 @@ class MaskedRegressorTrainer(Trainer):
         self.ssl_criterion = ssl_criterion
         self.w_init_val = w_init_val
         self.ssl_weight = ssl_weight  # Weight to balance between SSL and regression
+        self.drop_first_y = False
         
     def train_batch(self, batch, batch_idx, device):
         const = self.w_init_val/(1+self.epoch)
         x_masked, x, y, mask, info, _ = batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
+        b = x_masked.shape[0]
         
         # Get proximity weights for regression
         w = torch.tensor([i[self.w_name] for i in info]).to(device)
@@ -548,6 +550,7 @@ class MaskedRegressorTrainer(Trainer):
         
         # Forward pass for both tasks
         reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
+
         
         # Calculate SSL loss (masked filling)
         ssl_loss = self.ssl_criterion(ssl_out, x)
@@ -555,9 +558,17 @@ class MaskedRegressorTrainer(Trainer):
 
         
         # Calculate regression loss
+        reg_out = reg_out.view(b, -1, self.num_quantiles)
+        out_diff = int(y.shape[1] - reg_out.shape[1])
+        y = y[:, out_diff:]
+        if self.drop_first_y:
+            reg_out = reg_out[:, 1:]
+            y = y[:, 1:]
+        # print("out ", reg_out[0],  "y ", y[0])
         reg_loss = self.criterion(reg_out, y)
         reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
-        reg_acc = (torch.abs(reg_out - y) < y * 0.1).sum(0)
+        out_median = reg_out[..., reg_out.shape[-1]//2]
+        reg_acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         
         # Combine losses
         total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
@@ -568,15 +579,6 @@ class MaskedRegressorTrainer(Trainer):
         if self.scheduler is not None:
             self.scheduler.step()
             
-        # Log if using wandb
-        # if self.wandb:
-        #     wandb.log({
-        #         "train_loss": total_loss.item(),
-        #         "ssl_loss": ssl_loss.item(),
-        #         "reg_loss": reg_loss.item(),
-        #         "ssl_acc": ssl_acc,
-        #         "reg_acc": reg_acc.mean().item()
-        #     })
             
         return total_loss, reg_acc, x
 
@@ -584,6 +586,7 @@ class MaskedRegressorTrainer(Trainer):
         const = self.w_init_val/(1+self.epoch)
         x_masked, x, y, mask, info, _ = batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
+        b = x_masked.shape[0]
         
         w = torch.tensor([i[self.w_name] for i in info]).to(device)
         # w = const * torch.exp(w*const)
@@ -593,22 +596,20 @@ class MaskedRegressorTrainer(Trainer):
             
             ssl_loss = self.ssl_criterion(ssl_out, x)
             ssl_acc = self.mask_accuracy(ssl_out, x, mask)
-            
+
+            reg_out = reg_out.view(b, -1, self.num_quantiles)
+            reg_out = reg_out.view(b, -1, self.num_quantiles)
+            out_diff = int(y.shape[1] - reg_out.shape[1])
+            y = y[:, out_diff:]
+            if self.drop_first_y:
+                reg_out = reg_out[:, 1:]
+                y = y[:, 1:]
             reg_loss = self.criterion(reg_out, y)
             reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
-            reg_acc = (torch.abs(reg_out - y) < y * 0.1).sum(0)
+            out_median = reg_out[..., reg_out.shape[-1]//2]
+            reg_acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
             
             total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
-
-        
-        # if self.wandb:
-        #     wandb.log({
-        #         "val_loss": total_loss.item(),
-        #         "val_ssl_loss": ssl_loss.item(),
-        #         "val_reg_loss": reg_loss.item(),
-        #         "val_ssl_acc": ssl_acc,
-        #         "val_reg_acc": reg_acc.mean().item()
-        #     })
             
         return total_loss, reg_acc, x
         
@@ -618,142 +619,118 @@ class MaskedRegressorTrainer(Trainer):
         s = (torch.abs(r - t) < epsilon).sum()
         return s / inverse_token_mask.sum()
 
-class AdversarialTrainer(Trainer):
-    def __init__(
-        self, 
-        optimizer_gen,
-        optimizer_disc,
-        disc_steps=1,  # Number of discriminator steps per generator step
-        gen_steps=1,    # Number of generator steps per discriminator step
-        use_w=True,
-        **kwargs
-    ):
+    def predict(self, test_dataloader, device):
         """
-        Adversarial trainer mimicking the ContrastiveTrainer interface
+        Returns the predictions of the model on the given dataset.
+        """
+        self.model.eval()
+        preds = np.zeros((0, self.output_dim))
+        targets = np.zeros((0, self.output_dim))
+        tot_kic = []
+        tot_teff = []
+        aggregated_info = {}
+        pbar = tqdm(test_dataloader)
+
+        for i,(x_masked, x, y, mask, info, _) in enumerate(pbar):
+            x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
+
+            for item in info:
+                for key, value in item.items():
+                    # Check if value is a scalar (not an array/tensor)
+                    if np.isscalar(value):
+                        if key not in aggregated_info:
+                            aggregated_info[key] = []
+                        aggregated_info[key].append(value)
+
+            with torch.no_grad():
+                y_pred, _ = self.model(x_masked, x)
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+            if i > self.max_iter:
+                break
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, aggregated_info
         
-        Args:
-            model: Adversarial multimodal alignment model
-            optimizer_gen: Optimizer for generator
-            optimizer_disc: Optimizer for discriminator
-            scheduler_gen: Learning rate scheduler for generator (optional)
-            scheduler_disc: Learning rate scheduler for discriminator (optional)
-            wandb: Whether to log metrics to wandb
-            stack_pairs: Whether to stack input pairs
-            use_w: Whether to use proximity weights
-            temperature: Temperature parameter (placeholder, not used in adversarial training)
-            disc_steps: Number of discriminator optimization steps
-            gen_steps: Number of generator optimization steps
-        """
+
+class MultiResolutionTrainer(MaskedRegressorTrainer):
+    def __init__(self, high_res_train, high_res_val, lambda_high_res=1, **kwargs):
         super().__init__(**kwargs)
-        
-        self.optimizer_gen = optimizer_gen
-        self.optimizer_disc = optimizer_disc
-        self.disc_steps = disc_steps
-        self.gen_steps = gen_steps
-        self.use_w = use_w
-
-    def train_batch(self, batch, batch_idx, device):
-        """
-        Training method with signature matching ContrastiveTrainer
-        
-        Args:
-            batch: Tuple containing (x1, x2, w, _, info1, info2)
-            batch_idx: Batch index
-            device: Training device
-        
-        Returns:
-            loss: Total loss
-            aux_loss: Auxiliary loss (set to 0)
-            x1: First input batch (for potential feature extraction)
-        """
-        start_time = time.time()
-        
-        # Unpack batch
-        x1, x2, w, _, info1, info2 = batch
-        x1, x2 = x1.to(device), x2.to(device)
-        
-        if w is None:
-            w = torch.ones(x1.size(0)) * 0.5
-        w = w.to(device)
-                
-        # Perform multiple discriminator and generator steps
-        disc_loss = 0
-        gen_loss = 0
-            
-        # Discriminator steps
-        for _ in range(self.disc_steps):
-            self.optimizer_disc.zero_grad()
-            
-            if self.use_w:
-                disc_loss = self.model.module.discriminator_loss(x1, x2, w)
-            else:
-                disc_loss = self.model.module.discriminator_loss(x1, x2, None)
-            
-            disc_loss.backward()
-            self.optimizer_disc.step()
+        self.high_res_train = high_res_train
+        self.high_res_val = high_res_val
+        self.lambda_high_res = lambda_high_res
     
+    def train_epoch(self, device, epoch):
+        self.epoch = epoch  # Make sure epoch is set
+        if self.train_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
         
-        # Generator steps
-        for _ in range(self.gen_steps):
-            self.optimizer_gen.zero_grad()
-            
-            if self.use_w:
-                gen_loss = self.model.module.generator_loss(x1, x2, w)
-            else:
-                gen_loss = self.model.module.generator_loss(x1, x2, None)
-            
-            gen_loss.backward()
-            self.optimizer_gen.step()
-            
+        self.model.train()
+        train_losses = []
+        train_losses_high = []
+        all_accs = 0
+        all_accs_high = []
         
-        # Combine losses (total loss for logging)
-        loss = disc_loss + gen_loss
-        out = {'loss': loss, 'disc_loss': disc_loss, 'gen_loss': gen_loss}
-        
-        model_time = time.time() - start_time
-        
-        # Optional wandb logging
-        # if self.wandb:
-        #     log_dict = {"train_loss": out['loss'].item()}
-        #     if 'disc_loss' in out:
-        #         log_dict["train_disc_loss"] = out['disc_loss'].item()
-        #     if 'gen_loss' in out:
-        #         log_dict["train_gen_loss"] = out['gen_loss'].item()
-        #     wandb.log(log_dict)
-        
-        return out['loss'], 0., x1
+        high_res_iterator = iter(self.high_res_train)
+        total_samples = 0
 
-    def eval_batch(self, batch, batch_idx, device):
+        pbar = tqdm(self.train_dl)
+        for i, batch in enumerate(pbar):
+            # Get high-res batch
+            try:
+                high_res_batch = next(high_res_iterator)
+            except StopIteration:
+                high_res_iterator = iter(self.high_res_train)
+                high_res_batch = next(high_res_iterator)
+            if self.optimizer is not None:
+                self.optimizer.zero_grad()
+            self.drop_first_y = True
+            loss, acc , y = self.train_batch(batch, i, device)
+            self.drop_first_y = False
+            loss_high, acc_high, y_high = self.train_batch(high_res_batch, i, device)
+            train_losses.append((loss.item() + loss_high.item()) / 2)
+             #  add virtual vsini accuracy for low res
+            acc = torch.cat((torch.tensor([acc_high[0]], device=acc_high.device) * len(y) / len(y_high), acc))  
+            all_accs = all_accs + ( acc / len(y) + acc_high / len(y_high)) / 2
+            pbar.set_description(f"train_loss:  {loss.item():.3f}, train_loss_high: {loss_high.item():.3f} "
+                                f"train_acc: {acc}, train_acc_high: {acc_high},")      
+            if i > self.max_iter:
+                break
+        return train_losses, all_accs / i
+    
+    def eval_epoch(self, device, epoch):
         """
-        Evaluation method with signature matching ContrastiveTrainer
-        Similar to train_batch but without gradient computation
+        Evaluates the model for one epoch.
         """
-        x1, x2, w, _, info1, info2 = batch
-        x1, x2 = x1.to(device), x2.to(device)
-        
-        if w is None:
-            w = torch.ones(x1.size(0)) * 0.5
-        w = w.to(device)
-        
-        with torch.no_grad():
-            
-            if self.use_w:
-                disc_loss = self.model.discriminator_loss(x1, x2, w)
-                gen_loss = self.model.generator_loss(x1, x2, w)
-            else:
-                disc_loss = self.model.discriminator_loss(x1, x2, None)
-                gen_loss = self.model.generator_loss(x1, x2, None)
-            
-            loss = disc_loss + gen_loss
-            out = {'loss': loss, 'disc_loss': disc_loss, 'gen_loss': gen_loss}
-        
-        # Optional wandb logging
-        # if self.wandb:
-        #     log_dict = {"val_loss": out['loss'].item()}
-        #     if 'disc_loss' in out:
-        #         log_dict["val_disc_loss"] = out['disc_loss'].item()
-        #     if 'gen_loss' in out:
-        #         log_dict["val_gen_loss"] = out['gen_loss'].item()
-        #     wandb.log(log_dict)
-        
-        return out['loss'], 0, x1
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        total = 0
+        all_accs = torch.zeros(self.output_dim, device=device)
+        high_res_iterator = iter(self.high_res_train)
+        total_samples = 0
+
+        pbar = tqdm(self.train_dl)
+        for i, batch in enumerate(pbar):
+            # Get high-res batch
+            try:
+                high_res_batch = next(high_res_iterator)
+            except StopIteration:
+                high_res_iterator = iter(self.high_res_train)
+                high_res_batch = next(high_res_iterator)
+            self.drop_first_y = True
+            loss, acc, y = self.eval_batch(batch, i, device)
+            self.drop_first_y = False
+            loss_high, acc_high, y_high = self.eval_batch(high_res_batch, i, device)
+            val_loss.append((loss.item() + loss_high.item()) / 2)
+            #  add virtual vsini accuracy for low res
+            acc = torch.cat((torch.tensor([acc_high[0]], device=acc_high.device) * len(y) / len(y_high), acc))    
+            all_accs = all_accs + ( acc / len(y) + acc_high / len(y_high)) / 2
+            pbar.set_description(f"val_loss:  {loss.item():.3f}, val_loss_high: {loss_high.item():.3f} "
+                                f"val_acc: {acc}, val_acc_high: {acc_high},")
+            if i > self.max_iter:
+                break
+        return val_loss, all_accs / i
+    
