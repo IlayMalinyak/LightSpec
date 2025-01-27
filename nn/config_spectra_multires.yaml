@@ -5,7 +5,7 @@ Data:
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
   model_name: MultiTaskRegressor
-  batch_size: 128
+  batch_size: 64
   num_epochs: 1000
   exp_num: 1
   max_len_spectra: 4096
@@ -81,10 +81,10 @@ MultiTaskRegressor:
   output_dim: 4
   num_quantiles: 5
   beta: 1
-  load_checkpoint: False
+  load_checkpoint: True
   checkpoint_num: 1
   activation: "silu"
-  checkpoint_path: /data/lightSpec/logs/spec_decode2_2025-01-11/MultiTaskRegressor_spectra_decode_1.pth
+  checkpoint_path: '/data/lightSpec/logs/spec_decode_multires_2025-01-24/MultiTaskRegressor_spectra_decode_multires_1.pth'
 
 
 Conformer:

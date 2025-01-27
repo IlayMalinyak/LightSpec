@@ -272,14 +272,15 @@ class Normalize:
         if self.scheme == 'std':
             mean = np.mean(x_masked, axis=self.axis, keepdims=True)
             std = np.std(x_masked, axis=self.axis, keepdims=True)
-            return (x - mean) / (std + 1e-8), mask, info
+            info['norm_x'] =  (x - mean) / (std + 1e-8)
         elif self.scheme == 'minmax':
             min_val = np.min(x_masked, axis=self.axis, keepdims=True)
             max_val = np.max(x_masked, axis=self.axis, keepdims=True)
-            return (x - min_val) / (max_val - min_val + 1e-8), mask, info
+            info['norm_x'] =  (x - min_val) / (max_val - min_val + 1e-8)
         elif self.scheme == 'median':
             median = np.median(x_masked, axis=self.axis, keepdims=True)
-            return x / median, mask, info
+            info['norm_x'] =  x / median
+        return x, mask, info
 
     def _normalize_torch(self, x, mask=None, info=dict()):
         if mask is None:
@@ -288,14 +289,15 @@ class Normalize:
         if self.scheme == 'std':
             mean = torch.mean(x_masked, dim=self.axis, keepdim=True)
             std = torch.std(x_masked, dim=self.axis, keepdim=True)
-            return (x - mean) / (std + 1e-8), mask, info
+            info['norm_x'] =  (x - mean) / (std + 1e-8)
         elif self.scheme == 'minmax':
             min_val = torch.min(x_masked, dim=self.axis, keepdim=True)[0]
             max_val = torch.max(x_masked, dim=self.axis, keepdim=True)[0]
-            return (x - min_val) / (max_val - min_val + 1e-8), mask, info
+            info['norm_x'] =  (x - min_val) / (max_val - min_val + 1e-8)
         elif self.scheme == 'median':
             median = torch.median(x, dim=self.axis, keepdim=True)[0]
-            return x / median, mask, info
+            info['norm_x'] x / median
+        return x, mask, info
 
     def __repr__(self):
         return f"Normalize(scheme='{self.scheme}', axis={self.axis})"
@@ -606,6 +608,10 @@ class LAMOSTSpectrumPreprocessor:
             # 4. Continuum Normalization (Separately)
             blue_normalized = self._continuum_normalization(blue_denoised, is_blue=True)
             red_normalized = self._continuum_normalization(red_denoised, is_blue=False)
+            # blue_final_norm = self._secondary_normalization(blue_normalized)
+            # red_final_norm = self._secondary_normalization(red_normalized)
+            # final_norm = np.concatenate([blue_final, red_final])[None,:]
+            # info['x_norm'] = final_norm
             if self.plot_steps:
                 ax[4,0].plot(np.arange(len(blue_normalized)), blue_normalized, label='Blue Normalized')
                 ax[4,1].plot(np.arange(len(red_normalized)), red_normalized, label='Red Normalized')

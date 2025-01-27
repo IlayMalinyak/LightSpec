@@ -10,6 +10,8 @@ from collections import OrderedDict
 from tqdm import tqdm
 import torch.distributed as dist
 import umap
+from torch.profiler import profile, record_function, ProfilerActivity
+
 # import wandb
 
 
@@ -578,8 +580,8 @@ class MaskedRegressorTrainer(Trainer):
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
-            
-            
+                
+                
         return total_loss, reg_acc, x
 
     def eval_batch(self, batch, batch_idx, device):
@@ -677,6 +679,7 @@ class MultiResolutionTrainer(MaskedRegressorTrainer):
         total_samples = 0
 
         pbar = tqdm(self.train_dl)
+        
         for i, batch in enumerate(pbar):
             # Get high-res batch
             try:
@@ -730,6 +733,98 @@ class MultiResolutionTrainer(MaskedRegressorTrainer):
             all_accs = all_accs + ( acc / len(y) + acc_high / len(y_high)) / 2
             pbar.set_description(f"val_loss:  {loss.item():.3f}, val_loss_high: {loss_high.item():.3f} "
                                 f"val_acc: {acc}, val_acc_high: {acc_high},")
+            if i > self.max_iter:
+                break
+        return val_loss, all_accs / i
+
+class DualTrainer(Trainer):
+    def __init__(self, trainer_lc, trainer_spec, lambda_dual,
+                    high_res_lc=False, high_res_spec=True, **kwargs):
+        super().__init__(**kwargs)
+        self.trainer_lc = trainer_lc
+        self.trainer_spec = trainer_spec
+        self.lambda_dual = lambda_dual
+        self.high_res_lc = high_res_lc
+        self.high_res_spec = high_res_spec
+
+    def high_res_batch(self, trainer, high_res_iterator, batch, i, device):
+        try:
+            hr_batch = next(high_res_iterator)
+        except StopIteration:
+            high_res_iterator = iter(trainer.high_res_train)
+            hr_batch = next(high_res_iterator)
+        trainer.drop_first_y = True
+        loss, acc , y = trainer.train_batch(batch, i, device)
+        trainer.drop_first_y = False
+        loss_high, acc_high, y_high = trainer.train_batch(hr_batch, i, device)
+        loss = (loss.item() + loss_high.item()) / 2
+            #  add virtual vsini accuracy for low res
+        acc = torch.cat((torch.tensor([acc_high[0]], device=acc_high.device) * len(y) / len(y_high), acc))
+        return loss, acc, y 
+        
+    def train_epoch(self, device, epoch):
+        self.epoch = epoch  # Make sure epoch is set
+        if self.train_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
+        
+        if self.high_res_lc:
+            high_res_lc_iterator = iter(self.trainer_lc.high_res_train)
+        if self.high_res_spec:
+            high_res_spec_iterator = iter(self.trainer_spec.high_res_train)
+        self.model.train()
+        train_losses = []
+        all_accs = 0
+        total_samples = 0
+        pbar = tqdm(self.train_dl)
+        for i, batch in enumerate(pbar):
+            if self.trainer_lc.optimizer is not None:
+                self.trainer_lc.optimizer.zero_grad()
+            if self.high_res_lc:
+                loss_lc, acc_lc, y_lc = self.high_res_batch(self.trainer_lc, high_res_lc_iterator, batch, i, device)
+            else:
+                loss_lc, acc_lc, y_lc = self.trainer_lc.train_batch(batch, i, device)
+            if self.trainer_spec.optimizer is not None:
+                self.trainer_spec.optimizer.zero_grad()
+            if self.high_res_spec:
+                loss_spec, acc_spec, y_spec = self.high_res_batch(self.trainer_spec, high_res_spec_iterator, batch, i, device)
+            else:
+                loss_spec, acc_spec, y_spec = self.trainer_spec.train_batch(batch, i, device)
+            loss = loss_lc + loss_spec
+            loss_dual, acc_dual, y_dual = self.train_batch(batch, i, device)
+            total_loss = loss_lc + loss_spec + self.lambda_dual * loss_dual
+            train_losses.append(total_loss.item())
+            all_accs = all_accs + (acc_lc + acc_spec + acc_dual) / 3
+            pbar.set_description(f"train_loss_lc:  {loss_lc.item():.3f},  train_loss_spec:  {loss_spec.item():.3f}"
+                                f"train_loss_dual: {loss_dual.item()}, train_acc_lc: {acc_lc}, train_acc_spec: {acc_spec},"
+                                f"train_acc_dual: {acc_dual},")      
+            if i > self.max_iter:
+                break
+        return train_losses, all_accs / i
+    
+    def eval_epoch(self, device, epoch):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        total = 0
+        all_accs = torch.zeros(self.output_dim, device=device)
+        pbar = tqdm(self.val_dl)
+        for i, batch in enumerate(pbar):
+            loss_lc, acc_lc, y_lc = self.trainer_lc.eval_batch(batch, i, device)
+            loss_spec, acc_spec, y_spec = self.trainer_spec.eval_batch(batch, i, device)
+            loss = loss_lc + loss_spec
+            loss_dual, acc_dual, y_dual = self.eval_batch(batch, i, device)
+            total_loss = loss_lc + loss_spec + self.lambda_dual * loss_dual
+            val_loss.append(total_loss.item())
+            all_accs = all_accs + (acc_lc + acc_spec + acc_dual) / 3
+            pbar.set_description(f"val_loss_lc:  {loss_lc.item():.3f},  val_loss_spec:  {loss_spec.item():.3f}"
+                                f"val_loss_dual: {loss_dual.item()}, val_acc_lc: {acc_lc}, val_acc_spec: {acc_spec},"
+                                f"val_acc_dual: {acc_dual},")      
             if i > self.max_iter:
                 break
         return val_loss, all_accs / i

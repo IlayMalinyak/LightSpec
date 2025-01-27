@@ -194,7 +194,7 @@ class SpectraDataset(Dataset):
         meta['obsid'] = obsid
         if self.transforms:
             spectra, _, info = self.transforms(spectra, None, meta)
-        spectra_masked, mask, _ = self.mask_transform(spectra, None, meta)
+        spectra_masked, mask, _ = self.mask_transform(spectra, None, info)
 
         # supervised case
         if self.df is not None:
@@ -377,7 +377,9 @@ class KeplerDataset():
     if self.transforms is not None:
         try:
             x, mask, info = self.transforms(x, mask=None, info=info)
-            if self.seq_len > x.shape[0]:
+            if 'x_norm' in info.keys():
+                x = torch.cat([x, info['x_norm']], dim=0)
+            if self.seq_len > x.shape[-1]:
                 x = F.pad(x, ((0, 0,0, self.seq_len - x.shape[-1],)), "constant", value=0)
                 if mask is not None:
                     mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
@@ -397,7 +399,9 @@ class KeplerDataset():
     if self.target_transforms is not None:
         try:
             target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
-            if self.seq_len > target.shape[0]:
+            if 'x_norm' in info_y.keys():
+                target = torch.cat([target, info_y['x_norm']], dim=0)
+            if self.seq_len > target.shape[-1]:
                 target = F.pad(target, ((0, 0,0, self.seq_len - target.shape[-1],)), "constant", value=0)
                 if mask_y is not None:
                   mask_y = F.pad(mask_y, ((0, 0,0, self.seq_len - mask_y.shape[-1],)), "constant", value=0)
@@ -445,7 +449,7 @@ class KeplerDataset():
     if self.mask_transform is not None:
         result = (masked_x.float(), x.float(), target.float(), mask, info, info_y)
     else:
-        result = (x.float(), x.float(), target.float(), mask, info, info_y)
+        result = (x.float(), target.float(), target.float(), mask, info, info_y)
     if any(item is None for item in result):
         print(f"Warning: None value in result for index {idx}")
         print(f"x: {x.shape if x is not None else None}")

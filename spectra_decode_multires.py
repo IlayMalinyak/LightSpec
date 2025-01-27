@@ -179,12 +179,16 @@ print("model: ", model)
 
 checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
-    datetime_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
-    checkpoint_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
-    print(datetime_dir)
-    print("loading checkpoint from: ", model_args.checkpoint_path)
-    model = load_checkpoints_ddp(model, model_args.checkpoint_path)
-    print("loaded checkpoint from: ", model_args.checkpoint_path)
+    try:
+        datetime_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
+        checkpoint_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
+        print(datetime_dir)
+        print("loading checkpoint from: ", model_args.checkpoint_path)
+        model = load_checkpoints_ddp(model, model_args.checkpoint_path)
+        print("loaded checkpoint from: ", model_args.checkpoint_path)
+    except Exception as e:
+        print("error loading checkpoint: ", e)
+        deepnorm_init(model, model_args)
 else:
     deepnorm_init(model, model_args)
 
@@ -235,11 +239,11 @@ trainer = MultiResolutionTrainer(model=model, optimizer=optimizer,
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{checkpoint_num}.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra__decode_{checkpoint_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_{checkpoint_num}.png")
 plt.clf()
 
 preds, targets, info = trainer.predict(test_dl_hr, device=local_rank)
