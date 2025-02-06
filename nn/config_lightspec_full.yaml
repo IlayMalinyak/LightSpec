@@ -8,11 +8,13 @@ Data:
   dataset: "LightSpecDataset"
   data_dir: '/data/lightPred/data'
   spectra_dir: '/data/lamost/data'
-  batch_size: 32
+  batch_size: 8
   num_epochs: 1000
   max_len_spectra: 4096
   max_days_lc: 270
+  max_len_lc: 13056
   lc_freq: 0.0208
+  masked_transform: False
   continuum_norm: True
   meta_columns: ['Teff', 'Mstar']
   test_run: False
@@ -80,9 +82,9 @@ MultiEncoder_lc:
 Conformer_lc:
   encoder: ["mhsa_pro", "conv", "ffn"]
   timeshift: false
-  num_layers: 8
+  num_layers: 4
   stride: 2
-  encoder_dim: 512
+  encoder_dim: 256
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.2
@@ -161,7 +163,6 @@ CNNEncoder:
   checkpoint_num: 2
   activation: "sine"
   sine_w0: 1.0
-  load_checkpoint: True
   checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
 
 CNNEncoderDecoder:
@@ -246,8 +247,11 @@ Optimization SSL:
 
 Optimization:
   # Optimization
-  max_lr: 1e-5
-  weight_decay: 5e-6
-  warmup_pct: 0.3
+  max_lr:  5e-5
+  weight_decay: 1e-6
+  warmup_pct: 0.15
   steps_per_epoch: 3500
+  momentum: 0.95
+  nesterov: true
+  optimizer: "sgd"
   quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]

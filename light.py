@@ -62,7 +62,7 @@ transforms = Compose([ RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                         #                 RandomMasking(mask_prob=0.05),
                         #                 Shuffle(segment_len=270/data_args.lc_freq),
                         #                 Identity()]),
-                        Normalize('std'),
+                        # Normalize('std'),
                         ToTensor(), ])
 
 
@@ -127,7 +127,7 @@ num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
 
 if data_args.create_umap:
-    umap_df = create_umap(model.module.backbone, val_dataloader, local_rank, use_w=False, dual=False)
+    umap_df = create_umap(model.module.encoder, val_dataloader, local_rank, use_w=False, dual=False)
     print("umap created: ", umap_df.shape)
     umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
     print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")

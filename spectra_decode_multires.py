@@ -26,13 +26,13 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import SpectraDataset
 from nn.astroconf import AstroEncoderDecoder
-from nn.models import CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor, MultiResRegressor
+from nn.models import CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor, MultiResRegressor, Transformer
 from nn.optim import QuantileLoss, CQR
 # from nn.mamba import MambaSeq2Seq
 from nn.train import *
 from nn.utils import deepnorm_init, load_checkpoints_ddp, load_scheduler
 from nn.scheduler import WarmupScheduler
-from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn
+from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn, save_predictions_to_dataframe
 from features import create_umap
 
 
@@ -41,7 +41,7 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
 models = {'CNNEncoderDecoder': CNNEncoderDecoder, 'AstroEncoderDecoder': AstroEncoderDecoder,
-            'CNNRegressor': CNNRegressor, 'MultiTaskRegressor': MultiTaskRegressor,
+            'CNNRegressor': CNNRegressor, 'MultiTaskRegressor': MultiTaskRegressor, 'Transformer': Transformer,
             'MultiResRegressor': MultiResRegressor}
 
 prediction_labels = ['vsini', 'teff', 'logg', 'feh']
@@ -57,8 +57,10 @@ def test_dataset(dataset, num_iters=10):
     start_time = time.time()
     for i in range(num_iters):
         x_masked, x, mask, _, info, _ = dataset[i]
-        if 'vsini' in info.keys():
-            vsinis.append(info['vsini'])
+        print(x.shape, info.keys())
+        plt.clf()
+
+        
     print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.2f} seconds." \
         f"avg per iteration: {(time.time() - start_time)/num_iters:.2f} seconds")
     plt.hist(vsinis, bins=40)
@@ -66,9 +68,13 @@ def test_dataset(dataset, num_iters=10):
     plt.savefig('/data/lightSpec/images/apogee_lamost_vsini_hist.png')
 
 
-def create_datasets(catalog):
-    train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, df=catalog, 
+def create_datasets(catalog, transforms, data_args, hr=False):
+    if not hr:
+        train_dataset = SpectraDataset(data_args.data_dir, transforms=transforms, df=catalog, 
                                     max_len=int(data_args.max_len_spectra))
+    else:
+        train_dataset = SpectraDataset(data_args.data_dir_hr, transforms=transforms, df=catalog, 
+                                    max_len=int(data_args.max_len_spectra_hr),id='APOGEE_ID')
     indices = list(range(len(train_dataset)))
     train_indices, val_indices = train_test_split(indices, test_size=0.1, random_state=42)
     val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
@@ -134,6 +140,7 @@ if data_args.test_run:
     datetime_dir = f"test_{current_date}"
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 conformer_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer'])
+transformer_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
 model_args.num_quantiles = len(optim_args.quantiles)
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
@@ -148,31 +155,63 @@ lamost_catalog = lamost_catalog.drop_duplicates(subset=['combined_obsid'])
 lamost_catalog = lamost_catalog[lamost_catalog['combined_snrg'] > 0]
 lamost_catalog = lamost_catalog.dropna(subset=['combined_teff', 'combined_logg', 'combined_feh'])
 
-ds_full, train_subset, val_subset, test_subset = create_datasets(lamost_catalog)
+ds_full, train_subset, val_subset, test_subset = create_datasets(lamost_catalog, transforms, data_args)
 
 print("number of samples: ", len(lamost_catalog))
 print("train samples: ", len(train_subset))
 print("val samples: ", len(val_subset))
 print("test samples: ", len(test_subset))
 
-lamost_apogee = pd.read_csv('/data/lamost/crossmatched_catalog.csv')
-lamost_apogee = lamost_apogee[lamost_apogee['APOGEE_SNR'] > 0]
-lamost_apogee = lamost_apogee.dropna(subset=['APOGEE_VSINI','APOGEE_TEFF', 'APOGEE_LOGG', 'APOGEE_FE_H'])
-ds_full_hr, train_subset_hr, val_subset_hr, test_subset_hr = create_datasets(lamost_apogee)
+# lamost_apogee = pd.read_csv('/data/lamost/crossmatched_catalog.csv')
+# lamost_apogee = lamost_apogee[lamost_apogee['APOGEE_SNR'] > 0]
+# lamost_apogee = lamost_apogee.dropna(subset=['APOGEE_VSINI','APOGEE_TEFF', 'APOGEE_LOGG', 'APOGEE_FE_H'])
+# ds_full_hr, train_subset_hr, val_subset_hr, test_subset_hr = create_datasets(lamost_apogee)
+
+transforms_hr = Compose([ToTensor()])
+
+apogee = pd.read_csv('/data/apogee/allStar-dr17-synspec_rev1.csv')
+apogee['APOGEE_ID'] = apogee['APOGEE_ID'].apply(lambda x: x.lstrip('b')[1:-1]
+ if isinstance(x, str) else x)
+apogee = apogee[apogee['SNR'] > 0]
+apogee = apogee.dropna(subset=['VSINI','TEFF', 'LOGG', 'FE_H'])
+ds_full_hr, train_subset_hr, val_subset_hr, test_subset_hr = create_datasets(apogee,
+                                                 transforms_hr, data_args, hr=True)
+# test_dataset(train_subset_hr, num_iters=10)
+# exit()
 
 ds_ratio = len(ds_full_hr) / len(ds_full)
 
 train_dl, val_dl, test_dl = create_dataloaders(train_subset, val_subset, test_subset)
 train_dl_hr, val_dl_hr, test_dl_hr = create_dataloaders(train_subset_hr, val_subset_hr, test_subset_hr)
 
-print("dataframe lengths: ", len(lamost_catalog), len(lamost_apogee))
+print("dataframe lengths: ", len(lamost_catalog), len(apogee))
 print("lamost dataset: ", len(train_subset), len(val_subset), len(test_subset))
-print("lamost apogee dataset: ", len(train_subset_hr), len(val_subset_hr), len(test_subset_hr))
+print("apogee dataset: ", len(train_subset_hr), len(val_subset_hr), len(test_subset_hr))
 
+# start_time = time.time()
+# for i, batch in enumerate(train_dl):
+#     print(i)
+#     # print(batch[0].shape, batch[1].shape, batch[2].shape)
+#     if i == 100:
+#         break
+# print(f"Time taken for 100 iterations: {time.time() - start_time:.2f} seconds." \
+#     f"avg per iteration: {(time.time() - start_time)/100:.2f} seconds")
+
+# start_time = time.time()
+# for i, batch in enumerate(train_dl_hr):
+#     print(i)
+#     # print(batch[0].shape, batch[1].shape, batch[2].shape)
+#     if i == 100:
+#         break
+# print(f"Time taken for 100 iterations high resoltion: {time.time() - start_time:.2f} seconds." \
+#     f"avg per iteration: {(time.time() - start_time)/100:.2f} seconds")
+
+# exit()
 # test_dataset(train_subset, num_iters=100)
 # test_dataset(train_subset_hr, num_iters=1000)
 
 model = models[model_name](model_args, conformer_args=conformer_args)
+# model =Transformer(transformer_args)
 model = model.to(local_rank)
 
 print("model: ", model)
@@ -237,33 +276,36 @@ trainer = MultiResolutionTrainer(model=model, optimizer=optimizer,
                            accumulation_step=1, max_iter=np.inf, w_name='snrg',
                            w_init_val=1,  exp_name=f"{model_name}_spectra_decode_multires_{checkpoint_num}") 
 
+
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_{checkpoint_num}.json'
+                        early_stopping=10, only_p=False, best='loss', conf=True) 
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_multires_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_{checkpoint_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_multires_{checkpoint_num}.png")
 plt.clf()
 
+preds_val, targets_val, info = trainer.predict(val_dl_hr, device=local_rank)
+preds_val = np.swapaxes(preds_val, 1, 2)
+cqr_errs = loss_fn.calibrate(preds_val, targets_val)
+
 preds, targets, info = trainer.predict(test_dl_hr, device=local_rank)
+preds = np.swapaxes(preds, 1, 2)
+print(targets.shape, preds.shape)
+preds = loss_fn.predict(preds, cqr_errs)
+preds = np.swapaxes(preds, 1, 2)
+print('calibrated preds: ', preds.shape)
+
+df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
+df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_multires_{checkpoint_num}_predictions_low_res.csv", index=False)
+
+preds, targets, info = trainer.predict(test_dl, device=local_rank)
+preds = np.swapaxes(preds, 1, 2)
 print(targets.shape, preds.shape)
 print(len(info['Teff']))
+preds = loss_fn.predict(preds, cqr_errs)
+preds = np.swapaxes(preds, 1, 2)
 
-try:
-    df_dict = {
-            **{f'target_{label}': targets[:, i] for i,label in enumerate(prediction_labels)},
-            **{f'pred_{label}': preds[:, i] for i,label in enumerate(prediction_labels)},
-            **info
-        }
-
-    df = pd.DataFrame(df_dict).to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_spectra_decode_{checkpoint_num}.csv",
-     index=False)
-except Exception as e:
-    df_dict = {
-            **{f'target_{label}': targets[:, i] for i,label in enumerate(prediction_labels)},
-            **{f'pred_{label}': preds[:, i] for i,label in enumerate(prediction_labels)},
-            'obsid': info['obsid']
-        }
-    df = pd.DataFrame(df_dict).to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_spectra_decode_{checkpoint_num}.csv",
-        index=False)
+df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
+df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_multires_{checkpoint_num}_predictions_low_res.csv", index=False)

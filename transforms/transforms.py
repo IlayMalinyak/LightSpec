@@ -296,7 +296,7 @@ class Normalize:
             info['norm_x'] =  (x - min_val) / (max_val - min_val + 1e-8)
         elif self.scheme == 'median':
             median = torch.median(x, dim=self.axis, keepdim=True)[0]
-            info['norm_x'] x / median
+            info['norm_x']  = x / median
         return x, mask, info
 
     def __repr__(self):

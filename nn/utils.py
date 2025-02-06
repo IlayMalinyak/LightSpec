@@ -39,8 +39,8 @@ def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False)
   print("number of keys in state dict and model: ", len(state_dict), len(model.state_dict()))
   print("number of missing keys: ", len(missing))
   print("number of unexpected keys: ", len(unexpected))
-#   print("missing keys: ", missing)
-#   print("unexpected keys: ", unexpected)
+  print("missing keys: ", missing)
+  print("unexpected keys: ", unexpected)
 #   print("state dict: ", state_dict.keys())
 #   print("model dict: ", model.state_dict().keys())
   return model
@@ -157,3 +157,4 @@ def load_scheduler(optimizer, train_dataloader, world_size, optim_args, data_arg
     except Exception as e:
         print(f"Error initializing scheduler {optim_args.scheduler}: {e}")
         return None
+

@@ -1,8 +1,82 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from nn.Modules.conformer import ConformerEncoder, ConformerDecoder
 from nn.Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding
+from nn.Modules.flash_mhsa import ParallelMHA as Flash_Mha
+from nn.Modules.mlp import ParallelMLP as MLP
 
+import numbers
+import torch.nn.init as init
+from typing import Union, List, Optional, Tuple
+from torch import Size, Tensor
+
+
+class MLPEncoder(nn.Module):
+    def __init__(self, args):
+        """
+        Initialize an MLP with hidden layers, BatchNorm, and Dropout.
+
+        Args:
+            input_dim (int): Dimension of the input features.
+            hidden_dims (list of int): List of dimensions for hidden layers.
+            output_dim (int): Dimension of the output.
+            dropout (float): Dropout probability (default: 0.0).
+        """
+        super(MLPEncoder, self).__init__()
+        
+        layers = []
+        prev_dim = args.input_dim
+        
+        # Add hidden layers
+        for hidden_dim in args.hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.LayerNorm(hidden_dim)) 
+            layers.append(nn.SiLU())  
+            if args.dropout > 0.0:
+                layers.append(nn.Dropout(args.dropout))  
+            prev_dim = hidden_dim
+        self.model = nn.Sequential(*layers)
+        self.output_dim = hidden_dim
+        
+    
+    def forward(self, x, y):
+        if x.dim() == 2:
+            x = x.unsqueeze(-1)
+        x = self.model(x)
+        x = x.mean(-1)
+        return x
+
+class RMSNorm(nn.Module):
+    def __init__(self, normalized_shape: Union[int, List[int], Size], eps: float = 1e-5, bias: bool = False) -> None:
+        super().__init__()
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = tuple(normalized_shape)
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(self.normalized_shape))
+        if bias:
+            self.bias = nn.Parameter(torch.empty(self.normalized_shape))
+        else:
+            self.register_parameter('bias', None)
+
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        init.ones_(self.weight)
+        if self.bias is not None:
+            init.zeros_(self.bias)
+
+    def forward(self, input: Tensor) -> Tensor:
+        var = input.pow(2).mean(dim=-1, keepdim=True) + self.eps
+        input_norm = input * torch.rsqrt(var)
+
+        rmsnorm = self.weight * input_norm
+        
+        if self.bias is not None:
+            rmsnorm = rmsnorm + self.bias
+
+        return rmsnorm
 
 class Sine(nn.Module):
     def __init__(self, w0=1.0):
@@ -63,7 +137,7 @@ class CNNEncoder(nn.Module):
             x = x.unsqueeze(1)
         if len(x.shape)==3 and x.shape[-1]==1:
             x = x.permute(0,2,1)
-        x = self.embedding(x)
+        x = self.embedding(x.float())
         for m in self.layers:
             x = m(x)
             if x.shape[-1] > self.min_seq_len:
@@ -126,6 +200,7 @@ class CNNDecoder(nn.Module):
         # x = x.unsqueeze(-1)  # Add sequence dimension
         
         # Apply transposed convolution layers
+        x = x.float()
         for layer in self.layers:
             x = layer(x)
         
@@ -288,3 +363,67 @@ class MultiEncoder(nn.Module):
                 
         # Return x_enc and the original backbone output
         return x_enc, backbone_out
+
+
+class Block(nn.Module):
+    """
+    Transformer block combining attention and feed-forward layers.
+
+    Attributes:
+        attn (nn.Module): Attention layer (MLA).
+        ffn (nn.Module): Feed-forward network (MLP or MoE).
+        attn_norm (nn.Module): Layer normalization for attention.
+        ffn_norm (nn.Module): Layer normalization for feed-forward network.
+    """
+    def __init__(self, args):
+        """
+        Initializes the Transformer block.
+
+        Args:
+            layer_id (int): Layer index in the transformer.
+            args (ModelArgs): Model arguments containing block parameters.
+        """
+        super().__init__()
+        self.attn = Flash_Mha(embed_dim=args.encoder_dim, num_heads=args.num_heads, dropout=args.dropout)
+        self.ffn = MLP(in_features=args.encoder_dim)
+        self.attn_norm = RMSNorm(args.encoder_dim)
+        self.ffn_norm = RMSNorm(args.encoder_dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for the Transformer block.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+            start_pos (int): Starting position in the sequence.
+            freqs_cis (torch.Tensor): Precomputed complex exponential values for rotary embeddings.
+            mask (Optional[torch.Tensor]): Mask tensor to exclude certain positions from attention.
+
+        Returns:
+            torch.Tensor: Output tensor after block computation.
+        """
+        x = x + self.attn(self.attn_norm(x))
+        x = x + self.ffn(self.ffn_norm(x))
+        return x
+
+class Transformer(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.encoder = nn.Linear(args.in_channels, args.encoder_dim)
+        self.layers = torch.nn.ModuleList()
+        for layer_id in range(args.num_layers):
+            self.layers.append(Block(args))
+        self.norm = RMSNorm(args.encoder_dim)
+        self.head = MLP(args.encoder_dim, out_features=args.output_dim*args.num_quantiles, dtype=torch.get_default_dtype())
+    
+    def forward(self, x, y=None):
+        if len(x.shape)==2:
+            x = x.unsqueeze(-1)
+        elif len(x.shape)==3 and x.shape[1]==1:
+            x = x.permute(0,2,1)
+        h = self.encoder(x)
+        for layer in self.layers:
+            h = layer(h)
+        h = self.norm(h)[:, -1]
+        output = self.head(h)        
+        return output, y

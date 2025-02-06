@@ -626,7 +626,7 @@ class MaskedRegressorTrainer(Trainer):
         Returns the predictions of the model on the given dataset.
         """
         self.model.eval()
-        preds = np.zeros((0, self.output_dim))
+        preds = np.zeros((0, self.output_dim, self.num_quantiles))
         targets = np.zeros((0, self.output_dim))
         tot_kic = []
         tot_teff = []
@@ -635,7 +635,7 @@ class MaskedRegressorTrainer(Trainer):
 
         for i,(x_masked, x, y, mask, info, _) in enumerate(pbar):
             x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
-
+            b = x_masked.shape[0]
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
@@ -646,6 +646,7 @@ class MaskedRegressorTrainer(Trainer):
 
             with torch.no_grad():
                 y_pred, _ = self.model(x_masked, x)
+                y_pred = y_pred.view(b, -1, self.num_quantiles)
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
             if i > self.max_iter:

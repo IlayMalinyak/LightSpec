@@ -27,7 +27,7 @@ print("running from ", ROOT_DIR)
 
 from transforms.transforms import *
 from util.utils import *
-from dataset.dataset import LightSpecDataset, create_unique_loader
+from dataset.dataset import LightSpecDataset, create_unique_loader, SpectraDataset, KeplerDataset
 from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor
@@ -37,7 +37,7 @@ from nn.moco import MoCo, MultimodalMoCo
 from nn.simsiam import SimSiam, projection_MLP
 from nn.optim import QuantileLoss, CQR
 from nn.utils import init_model, load_checkpoints_ddp
-from nn.train import ContrastiveTrainer
+from nn.train import ContrastiveTrainer, MultiResolutionTrainer, DualTrainer
 from tests.test_unique_sampler import run_sampler_tests
 from features import create_umap
 
@@ -59,10 +59,10 @@ def create_single_datasets(dataset, test_size=0.2):
     indices = list(range(len(dataset)))
     train_indices, val_indices = train_test_split(indices, test_size=test_size, random_state=42)
     val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
-    train_subset = Subset(train_dataset, train_indices)
-    val_subset = Subset(train_dataset, val_indices)
-    test_subset = Subset(train_dataset, test_indices)
-    return train_dataset, train_subset, val_subset, test_subset
+    train_subset = Subset(dataset, train_indices)
+    val_subset = Subset(dataset, val_indices)
+    test_subset = Subset(dataset, test_indices)
+    return train_subset, train_subset, val_subset, test_subset
 
 def create_single_dataloaders(train_subset, val_subset, test_subset, b_size=None):
 
@@ -141,7 +141,7 @@ def create_kepler_data(data_args, transforms):
 
 
 
-def create_lightspec_data(norm_cols=['Teff', 'logg', 'Mstar'], spec_transforms, light_transforms):
+def create_lightspec_data(data_args, spec_transforms, light_transforms, norm_cols=['Teff', 'logg', 'Mstar']):
     kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
     kepler_meta = pd.read_csv('/data/lightPred/tables/berger_catalog.csv')
     kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
@@ -212,7 +212,7 @@ def test_dataset(ds, num_iters=10):
 
 
 local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/config_lightspec_ssl.yaml'
+args_dir = '/data/lightSpec/nn/config_lightspec_full.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
 light_model_name = data_args.light_model_name
@@ -228,7 +228,7 @@ conformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conf
 sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiModalSimSiam'])
 # backbone_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNBackbone'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
-optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
@@ -242,14 +242,14 @@ lc_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)
                             ToTensor(),
                          ])
 
-train_dl_spec, val_dl_spec, test_dl_spec, train_dl_spec_hr,
+train_dl_spec, val_dl_spec, test_dl_spec, train_dl_spec_hr, \
 val_dl_spec_hr, test_dl_spec_hr, ds_ratio = create_lamost_data(data_args, transforms=spec_transforms)
 train_dl_lc, val_dl_lc, test_dl_lc = create_kepler_data(data_args, transforms=lc_transforms)
 
 norm_cols = data_args.meta_columns if not data_args.create_umap else []
  
-train_ds, val_ds, train_dl, val_dl = create_lightspec_data(norm_cols=norm_cols, 
-                                            spec_transforms=spec_transforms, light_transforms=lc_transforms)
+train_ds, val_ds, train_dl, val_dl = create_lightspec_data(data_args,  spec_transforms=spec_transforms,
+                                 light_transforms=lc_transforms, norm_cols=norm_cols )
 
 print("len train dataloader ", len(train_dl), len(val_dl))
 
@@ -281,10 +281,10 @@ model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of parameters: {num_params}")
-print("number of training samples: ", len(train_dataset), len(val_dataset))
+print("number of training samples: ", len(train_ds), len(val_ds))
 
 if data_args.create_umap:
-    umap_df = create_umap(model, val_dataloader, local_rank)
+    umap_df = create_umap(model, val_dl, local_rank)
     print("umap created: ", umap_df.shape)
     umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}.csv", index=False)
     exit()
@@ -294,13 +294,13 @@ loss_spec_ssl = torch.nn.MSELoss()
 optimizer_spec = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 
 spec_trainer = MultiResolutionTrainer(model=spec_model, optimizer=optimizer_spec,
-                        criterion=loss_spec, ssl_criterion=loss_spec_ssl, output_dim=model_args.output_dim, scaler=None,
+                        criterion=loss_spec, ssl_criterion=loss_spec_ssl, output_dim=spec_model_args.output_dim, scaler=None,
                        scheduler=None, train_dataloader=train_dl_spec, high_res_train=train_dl_spec_hr,
                         num_quantiles=spec_model_args.num_quantiles,
                        val_dataloader=val_dl_spec, high_res_val=val_dl_spec_hr, lambda_high_res=1.5, device=local_rank,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf, w_name='snrg',
-                           w_init_val=1,  exp_name=f"{model_name}_spectra_decode_multires_{checkpoint_num}") 
+                           w_init_val=1,  exp_name=f"{spec_model_name}_spectra_decode_multires_{exp_num}") 
 
 loss_lc = torch.nn.MSELoss()
 optimizer_lc = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
@@ -312,7 +312,7 @@ light_trainer  = ContrastiveTrainer(model=light_model, optimizer=optimizer_lc,
                         val_dataloader=val_dl_lc, device=local_rank,
                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                             accumulation_step=1, max_iter=np.inf,
-                            exp_name=f"{model_name}_lc_{exp_num}")
+                            exp_name=f"{light_model_name}_lc_{exp_num}")
 
 loss_fn = torch.nn.CrossEntropyLoss()
 if optim_args.optimizer == 'sgd':
@@ -334,9 +334,9 @@ else:
 trainer = DualTrainer(model=model, trainer_lc=light_trainer, trainer_spec=spec_trainer, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=scaler, grad_clip=True,
                        scheduler=None, train_dataloader=train_dl,
-                       val_dataloader=val_dl, device=local_rank,
+                       val_dataloader=val_dl, device=local_rank, lambda_dual=1,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=True,
+                           accumulation_step=1, max_iter=np.inf, 
                         exp_name=f"lightspec_{exp_num}") 
 
 # save all containers in log directory
@@ -352,7 +352,7 @@ complete_config = {
     "optim_args": optim_args.__dict__,
     "num_params": num_params,
     "model_structure": str(model),
-    "light_transforms": str(light_transforms),
+    "light_transforms": str(lc_transforms),
     "spec_transforms": str(spec_transforms),
     "spec_trainer": spec_trainer.__dict__,
     "light_trainer": light_trainer.__dict__,

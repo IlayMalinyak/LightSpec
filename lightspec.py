@@ -38,7 +38,7 @@ from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
 from nn.train import ContrastiveTrainer
 from tests.test_unique_sampler import run_sampler_tests
-from features import create_umap
+from features import multimodal_umap
 
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'kmag_abs']
 
@@ -84,7 +84,7 @@ def test_dataset(ds, num_iters=10):
         print("time taken for dataset: ", ds_time)
         if light.sum() == 0:
             no_founds += 1
-        print(light.shape, spec.shape, w.shape, info.keys())
+        # print(light.shape, spec.shape, w.shape, info.keys())
         fig, axes = plt.subplots(1,2, figsize=(24,14))
         axes[0].plot(light[0].cpu().numpy())
         axes[1].plot(spec[0].cpu().numpy())
@@ -110,6 +110,7 @@ conformer_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_l
 conformer_args_spec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_spec'])
 lightspec_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiEncoder_lightspec'])
 conformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_lightspec'])
+transformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer_lightspec'])
 sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiModalSimSiam'])
 # backbone_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNBackbone'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
@@ -127,13 +128,14 @@ spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.c
                            ])
 
 norm_cols = data_args.meta_columns if not data_args.create_umap else []
-train_df, val_df = create_train_test_dfs(norm_cols=norm_cols) 
+train_df, val_df = create_train_test_dfs(norm_cols=norm_cols)
+val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42) 
 
 train_dataset = LightSpecDataset(df=train_df, light_transforms=light_transforms,
                                 spec_transforms=spec_transforms,
                                 npy_path = '/data/lightPred/data/npy',
                                 spec_path = data_args.spectra_dir,
-                                light_seq_len=int(data_args.max_days_lc/data_args.lc_freq),
+                                light_seq_len=int(data_args.max_len_lc),
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 meta_columns=data_args.meta_columns
                                 )
@@ -141,12 +143,20 @@ val_dataset = LightSpecDataset(df=val_df, light_transforms=light_transforms,
                                 spec_transforms=spec_transforms,
                                 npy_path = '/data/lightPred/data/npy',
                                 spec_path = data_args.spectra_dir,
-                                light_seq_len=int(data_args.max_days_lc/data_args.lc_freq),
+                                light_seq_len=int(data_args.max_len_lc),
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 meta_columns=data_args.meta_columns
                                 )
 
-# test_dataset(train_dataset, num_iters=10)
+test_dataset = LightSpecDataset(df=test_df, light_transforms=light_transforms,
+                                spec_transforms=spec_transforms,
+                                npy_path = '/data/lightPred/data/npy',
+                                spec_path = data_args.spectra_dir,
+                                light_seq_len=int(data_args.max_len_lc),
+                                spec_seq_len=int(data_args.max_len_spectra),
+                                meta_columns=data_args.meta_columns
+                                )
+# test_dataset(train_dataset, num_iters=100)
 
 
 train_dataloader = create_unique_loader(train_dataset,
@@ -160,12 +170,19 @@ val_dataloader = create_unique_loader(val_dataset,
                                     collate_fn=kepler_collate_fn,
                                     )
 
-print("len trian dataloader ", len(train_dataloader))
+test_dataloader = create_unique_loader(test_dataset,
+                                    batch_size=int(data_args.batch_size),
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                    collate_fn=kepler_collate_fn,
+                                    )
+
+print("len train dataloader ", len(train_dataloader))
 
 light_backbone = MODELS[light_model_name](light_model_args, conformer_args=conformer_args_lc)
 if light_model_name == 'Astroconformer':
     light_backbone.pred_layer = torch.nn.Identity()
 light_model = SimSiam(light_backbone)
+# light_model = light_backbone
 
 light_model = init_model(light_model, light_model_args)
 
@@ -173,10 +190,9 @@ spec_model = MODELS[spec_model_name](spec_model_args, conformer_args=conformer_a
 
 spec_model = init_model(spec_model, spec_model_args)
 
-
 backbone = MultiEncoder(lightspec_args, conformer_args=conformer_args_lightspec)
 
-model = MultimodalMoCo(spec_model.encoder, light_model.backbone,  **moco_args.get_dict()).to(local_rank)
+model = MultimodalMoCo(spec_model.encoder, light_model.backbone, transformer_args_lightspec,  **moco_args.get_dict()).to(local_rank)
 # model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
 
 if data_args.load_checkpoint:
@@ -194,9 +210,16 @@ print(f"Number of parameters: {num_params}")
 print("number of training samples: ", len(train_dataset), len(val_dataset))
 
 if data_args.create_umap:
-    umap_df = create_umap(model, val_dataloader, local_rank)
-    print("umap created: ", umap_df.shape)
-    umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}.csv", index=False)
+    umap_lightspec, umap_lc, umap_spec = multimodal_umap(model,
+                                                         test_dataloader,
+                                                         light_model.backbone,
+                                                          spec_model.encoder, 
+                                                          local_rank,
+                                                          )
+    print("umaps created: ", umap_lightspec.shape, umap_lc.shape, umap_spec.shape)
+    umap_lightspec.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_lightspec.csv", index=False)
+    umap_lc.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_lc.csv", index=False)
+    umap_spec.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_spec.csv", index=False)
     exit()
 
 loss_fn = torch.nn.CrossEntropyLoss()
@@ -234,6 +257,7 @@ complete_config = {
     "spec_model_args": spec_model_args.__dict__,
     "conformer_args_lc": conformer_args_lc.__dict__,
     "conformer_args_spec": conformer_args_spec.__dict__,
+    "transformer_args_lightspec": transformer_args_lightspec.__dict__,
     "moco_args": moco_args.__dict__,
     "optim_args": optim_args.__dict__,
     "num_params": num_params,

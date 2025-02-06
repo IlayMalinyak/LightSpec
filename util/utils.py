@@ -417,3 +417,99 @@ def extract_date(p):
         print("No date found in the path.")
 
 
+def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quantiles, 
+                                save_path=None, verbose=True):
+    """
+    Save model predictions, including quantile predictions, to a DataFrame and optionally to CSV.
+    
+    Args:
+        preds (np.ndarray): Predictions array of shape (batch_size, n_labels, n_quantiles)
+        targets (np.ndarray): Target values array of shape (batch_size, n_labels)
+        info (dict): Dictionary containing additional information about the predictions
+        prediction_labels (list): List of label names
+        quantiles (list): List of quantile values used in prediction
+        save_path (str, optional): Path to save CSV file. If None, only returns DataFrame
+        verbose (bool): Whether to print shape information
+    
+    Returns:
+        pd.DataFrame: DataFrame containing predictions and targets
+    
+    Raises:
+        ValueError: If input shapes are inconsistent
+    """
+    # Input validation
+    if not isinstance(targets, np.ndarray) or not isinstance(preds, np.ndarray):
+        raise ValueError("targets and preds must be numpy arrays")
+    
+    if targets.shape[0] != preds.shape[0]:
+        raise ValueError(f"Batch size mismatch: targets {targets.shape[0]} vs preds {preds.shape[0]}")
+    
+    if targets.shape[1] != preds.shape[1]:
+        raise ValueError(f"Number of labels mismatch: targets {targets.shape[1]} vs preds {preds.shape[1]}")
+    
+    if preds.shape[2] != len(quantiles):
+        raise ValueError(f"Number of quantiles mismatch: preds {preds.shape[2]} vs quantiles {len(quantiles)}")
+    
+    if verbose:
+        print(f"Targets shape: {targets.shape}, Predictions shape: {preds.shape}")
+        print(f"Number of samples: {len(info['Teff'])}")
+
+    try:
+        # Create dictionary for targets and predictions
+        df_dict = {
+            # Add target values - use numpy array indexing
+            **{f'target_{label}': targets[:, i] for i, label in enumerate(prediction_labels)},
+            # Add predictions for each quantile - use numpy array indexing
+            **{
+                f'pred_{label}_q{quantile:.3f}': preds[:, i, q_idx] 
+                for i, label in enumerate(prediction_labels)
+                for q_idx, quantile in enumerate(quantiles)
+            },
+            'obsid': info['obsid'],
+            'snrg': info['snrg'],
+            'Teff': info['Teff']
+            # Add info dictionary
+            # **info
+        }
+        for key, value in df_dict.items():
+            print(key, end=': ')
+            if isinstance(value, np.ndarray):
+                print(value.shape)
+            elif isinstance(value, list):
+                print(len(value))
+
+    except Exception as e:
+        print(f"Falling back to simplified format due to error: {e}")
+        # Simplified version with essential columns
+        df_dict = {
+            # Add target values - use numpy array indexing
+            **{f'target_{label}': targets[:, i] for i, label in enumerate(prediction_labels)},
+            # Add predictions for each quantile - use numpy array indexing
+            **{
+                f'pred_{label}_q{quantile:.3f}': preds[:, i, q_idx] 
+                for i, label in enumerate(prediction_labels)
+                for q_idx, quantile in enumerate(quantiles)
+            },
+            'obsid': info['obsid'],
+            'snrg': info['snrg'],
+            'Teff': info['Teff']
+        }
+        for key, value in df_dict.items():
+            if isinstance(value, np.ndarray):
+                print(value.shape)
+            elif isinstance(value, list):
+                print(len(value))
+
+
+    
+    # Create DataFrame
+    df = pd.DataFrame(df_dict)
+    
+    # Save to CSV if path is provided
+    if save_path is not None:
+        df.to_csv(save_path, index=False)
+        if verbose:
+            print(f"Saved predictions to: {save_path}")
+    
+    return df
+

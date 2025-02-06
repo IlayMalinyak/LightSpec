@@ -100,10 +100,26 @@ class DualDataset(Dataset):
         return flux.squeeze().unsqueeze(0), spectra.squeeze().unsqueeze(0), y.squeeze() , info
 
 class SpectraDataset(Dataset):
-    def __init__(self, data_dir, transforms=None, df=None, max_len=3909, use_cache=True):
+    """
+    dataset for spectra data
+    Args:
+        data_dir: path to the data directory
+        transforms: transformations to apply to the data
+        df: dataframe containing the data paths
+        max_len: maximum length of the spectra
+        use_cache: whether to use a cache file
+        id: column name for the observation id
+    """
+    def __init__(self, data_dir,
+                     transforms=None,
+                     df=None,
+                    max_len=3909,
+                    use_cache=True,
+                    id='combined_obsid'):
         self.data_dir = Path(data_dir)
         self.transforms = transforms
         self.df = df
+        self.id = id
         if df is None:
             cache_file = os.path.join(self.data_dir, '.path_cache.txt')
             
@@ -123,14 +139,12 @@ class SpectraDataset(Dataset):
         self.mask_transform = RandomMasking()
     
     def _file_listing(self):
-        # Method 1: Using scandir (faster than listdir)
-        # entries = list(os.scandir(self.data_dir))
-        # paths = [entry.path for entry in entries if entry.is_file()]
+        
         def process_chunk(file_names):
             return [self.data_dir / name for name in file_names]
         
         file_names = os.listdir(self.data_dir)
-        chunk_size = 100000  # Adjust based on your system
+        chunk_size = 100000  
         chunks = [file_names[i:i + chunk_size] for i in range(0, len(file_names), chunk_size)]
         
         with ThreadPoolExecutor() as executor:
@@ -145,7 +159,7 @@ class SpectraDataset(Dataset):
             return len(self.df)
         return len(self.path_list) if self.path_list is not None else 0
 
-    def read_spectra(self, filename):
+    def read_lamost_spectra(self, filename):
         with fits.open(filename) as hdulist:
           binaryext = hdulist[1].data
           header = hdulist[0].header
@@ -154,6 +168,12 @@ class SpectraDataset(Dataset):
         rv = header['HELIO_RV']
         meta = {'RV': rv, 'wavelength': wv}
         return x, meta
+    
+    def read_apogee_spectra(self, filename):
+        with fits.open(filename) as hdul:
+            data = hdul[1].data.astype(np.float32).squeeze()[None]
+        meta = {}
+        return data, meta
     
     def create_lamost_target(self, row, info):
         info['Teff'] = row['combined_teff']
@@ -168,44 +188,67 @@ class SpectraDataset(Dataset):
         return target, info
     
     def create_apogee_target(self, row, info):
-        info['Teff'] = row['APOGEE_TEFF']
-        info['logg'] = row['APOGEE_LOGG']
-        info['FeH'] = row['APOGEE_FE_H']
-        info['snrg'] = row['APOGEE_SNR'] / 1000
-        info['vsini'] = row['APOGEE_VSINI']
+        info['Teff'] = row['TEFF']
+        info['logg'] = row['LOGG']
+        info['FeH'] = row['FE_H']
+        info['snrg'] = row['SNR'] / 1000
+        info['snri'] = row['SNR'] / 1000
+        info['snrr'] = row['SNR'] / 1000
+        info['snrz'] = row['SNR'] / 1000
+        info['vsini'] = row['VSINI']
         target = torch.tensor([info['vsini'] / VSINI_MAX, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
         return target, info
 
+    def create_empty_info(self, info):
+        info['Teff'] = np.nan
+        info['logg'] = np.nan
+        info['FeH'] = np.nan
+        info['snrg'] = 1e-4
+        info['snri'] = 1e-4
+        info['snrr'] = 1e-4
+        info['snrz'] = 1e-4
+        info['vsini'] = np.nan
+        return info
 
     def __getitem__(self, idx):
         if self.df is not None:
-            filepath = f"{self.data_dir}/{self.df.iloc[idx]['combined_obsid']}.fits"
+            if 'APOGEE' in self.id:     
+                filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
+            else:
+                filepath = f"{self.data_dir}/{self.df.iloc[idx][self.id]}.fits"
             target_size = 4
         else: 
             filepath = self.path_list[idx]
             target_size = self.max_len    
         obsid = os.path.basename(filepath)
         try:
-            spectra, meta = self.read_spectra(filepath)
-        except OSError:
-            # print("Error reading file ", filepath)
-            return torch.zeros(self.max_len), torch.zeros(self.max_len), torch.zeros(target_size),\
-            torch.zeros(self.max_len, dtype=torch.bool), {'obsid': obsid, 'snrg': 1e-3}, {'obsid': obsid, 'snrg': 1e-3}
-        meta['obsid'] = obsid
+            if 'APOGEE' in self.id:
+                spectra, meta = self.read_apogee_spectra(filepath)
+            else:
+                spectra, meta = self.read_lamost_spectra(filepath)
+        except (OSError, FileNotFoundError) as e:
+            info = self.create_empty_info({self.id: obsid})
+            # print("Error reading file ", filepath, "\n", e)
+            return (torch.zeros(self.max_len),
+                    torch.zeros(self.max_len),
+                    torch.zeros(target_size),\
+                    torch.zeros(self.max_len, dtype=torch.bool),
+                    info,
+                    info)
+        meta[self.id] = obsid
         if self.transforms:
             spectra, _, info = self.transforms(spectra, None, meta)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, info)
 
-        # supervised case
         if self.df is not None:
             row = self.df.iloc[idx]
-            if 'APOGEE_TEFF' in row.keys():
+            if 'APOGEE' in self.id:
                 target, info = self.create_apogee_target(row, meta)
             else:
                 target, info = self.create_lamost_target(row, meta)
         else:
             target = torch.zeros_like(mask)
-        # ssl case
+            
         if spectra_masked.shape[-1] < self.max_len:
             pad = torch.zeros(1, self.max_len - spectra_masked.shape[-1])
             spectra_masked = torch.cat([spectra_masked, pad], dim=-1)
@@ -215,15 +258,16 @@ class SpectraDataset(Dataset):
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
+        
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
          target.float(), mask.squeeze(0), info, info)
 
 
 class KeplerDataset():
-  """
-  A dataset for Kepler data.
-  """
-  def __init__(self,
+    """
+    A dataset for Kepler data.
+    """
+    def __init__(self,
                 df:pd.DataFrame=None,
                 prot_df:pd.DataFrame=None,
                 npy_path:str=None,
@@ -232,236 +276,256 @@ class KeplerDataset():
                 target_transforms:object=None,
                 masked_transforms:bool=False,
                 ):
-    """
-    dataset for Kepler data
-    Args:
-        root_dir (str): root directory of the data
-        path_list (List): list of paths to the data
-        df (pd.DataFrame, optional): dataframe with the data. Defaults to None.
-        mask_prob (float, optional): masking probability
-        mask_val (float, optional): masking value. Defaults to -1.
-        np_array (bool, optional): flag to load data as numpy array. Defaults to False.
-        prot_df (pd.DataFrame, optional): refernce Dataframe (like McQ14). Defaults to None.
-        keep_ratio (float, optional): ratio of masked values to keep. Defaults to 0.8.
-        random_ratio (float, optional): ratio of masked values to convert into random numbers. Defaults to 0.2.
-        uniform_bound (int, optional): bound for random numbers range. Defaults to 2.
-        target_transforms (object, optional): transformations to target. Defaults to None.
-    """
-    self.df = df
-    self.transforms = transforms
-    self.target_transforms = target_transforms
-    self.npy_path = npy_path
-    self.prot_df = prot_df
-    self.seq_len = seq_len
-    if df is not None and 'predicted period' not in df.columns:
-      if prot_df is not None:
-        self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
-    self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
-      
+        """
+        dataset for Kepler data
+        Args:
+            df (pd.DataFrame): DataFrame containing Kepler paths
+            prot_df (pd.DataFrame): DataFrame containing rotation periods
+            npy_path (str): Path to numpy files
+            transforms (object): Transformations to apply to the data
+            seq_len (int): Sequence length
+            target_transforms (object): Transformations to apply to the target
+            masked_transforms (bool): Whether to apply masking transformations
 
-  def __len__(self):
-    return len(self.df)
+        """
+        self.df = df
+        self.transforms = transforms
+        self.target_transforms = target_transforms
+        self.npy_path = npy_path
+        self.prot_df = prot_df
+        self.seq_len = seq_len
+        if df is not None and 'predicted period' not in df.columns:
+            if prot_df is not None:
+                self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
+        self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
+            
 
-  def read_lc(self, filename: str):
-    """
-    Reads a FITS file and returns the PDCSAP_FLUX and TIME columns as numpy arrays.
+    def __len__(self):
+        return len(self.df)
 
-    Args:
-        filename (str): The path to the FITS file.
+    def read_lc(self, filename: str):
+        """
+        Reads a FITS file and returns the PDCSAP_FLUX and TIME columns as numpy arrays.
 
-    Returns:
-        Tuple[np.ndarray, np.ndarray]: The PDCSAP_FLUX and TIME columns as numpy arrays.
-    """
+        Args:
+            filename (str): The path to the FITS file.
 
-    with fits.open(filename) as hdulist:
-            binaryext = hdulist[1].data
-            meta = hdulist[0].header
-    df = pd.DataFrame(data=binaryext)
-    x = df['PDCSAP_FLUX']
-    time = df['TIME'].values
-    return x,time, meta
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: The PDCSAP_FLUX and TIME columns as numpy arrays.
+        """
+        with fits.open(filename) as hdulist:
+                binaryext = hdulist[1].data
+                meta = hdulist[0].header
+        df = pd.DataFrame(data=binaryext)
+        x = df['PDCSAP_FLUX']
+        time = df['TIME'].values
+        return x,time, meta
 
-  def read_row(self, idx):
-    row = self.df.iloc[idx]
-    if 'prot' in row.keys():
-        y_val = row['prot']
-    elif 'Prot' in row.keys():
-        y_val = row['Prot']
-    else:
-        y_val = np.nan
+    def read_row(self, idx):
+        """
+        Reads a row from the DataFrame.
+        """
+        row = self.df.iloc[idx]
+        if 'prot' in row.keys():
+            y_val = row['prot']
+        elif 'Prot' in row.keys():
+            y_val = row['Prot']
+        else:
+            y_val = np.nan
 
-    if self.npy_path is not None:
-        try:
-            file_path = os.path.join(self.npy_path, f"{int(row['KID'])}.npy")
-            x = np.load(file_path)            
-            # Check if x is a numpy array and has a length
-            if not isinstance(x, np.ndarray) or x.size == 0:
-                print(f"Warning: Empty or invalid numpy array for {row['KID']}")
+        if self.npy_path is not None:
+            try:
+                file_path = os.path.join(self.npy_path, f"{int(row['KID'])}.npy")
+                x = np.load(file_path)            
+                if not isinstance(x, np.ndarray) or x.size == 0:
+                    print(f"Warning: Empty or invalid numpy array for {row['KID']}")
+                    x = np.zeros((self.seq_len, 1))
+            except FileNotFoundError:
+                print(f"Error: File not found for {row['KID']}")
                 x = np.zeros((self.seq_len, 1))
-        except FileNotFoundError:
-            print(f"Error: File not found for {row['KID']}")
-            x = np.zeros((self.seq_len, 1))
-        except Exception as e:
-            print(f"Error loading file for {row['KID']}: {str(e)}")
-            x = np.zeros((self.seq_len, 1))
-        if 'Teff' in row.keys():
-            meta = {'TEFF': row['Teff'],
-                     'RADIUS': row['Rstar'],
-                    'LOGG': row['logg'],
-                    'M':row['Mstar'],
-                    'FeH': row['FeH'],
-                    'KMAG': row['kmag_abs']}
-        else:
-            meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'M': None, 'FeH':None, 'KMAG': None}
-        
-        if 'predicted period' in row.keys():
-            meta['predicted period'] = row['predicted period']
-            meta['mean_period_confidence'] = row['mean_period_confidence']
-        if 'Pmax' in row.keys() and 'Pmin' in row.keys():
-            meta['Pmax'] = row['Pmax']
-            meta['Pmin'] = row['Pmin']
-        return x, meta, None, y_val
-
-    try:
-        paths = row['data_file_path']
-        for i in range(len(paths)):
-            x, time, meta = self.read_lc(paths[i])
-            x /= x.max()
-            if i == 0:
-                x_tot = x.copy()
+            except Exception as e:
+                print(f"Error loading file for {row['KID']}: {str(e)}")
+                x = np.zeros((self.seq_len, 1))
+            if 'Teff' in row.keys():
+                meta = {'TEFF': row['Teff'],
+                            'RADIUS': row['Rstar'],
+                        'LOGG': row['logg'],
+                        'M':row['Mstar'],
+                        'FeH': row['FeH'],
+                        'KMAG': row['kmag_abs']}
             else:
-                border_val = np.nanmean(x) - np.nanmean(x_tot)
-                x -= border_val
-                x_tot = np.concatenate((x_tot, np.array(x)))
-            self.cur_len = len(x)
-    except (TypeError, ValueError, FileNotFoundError, OSError) as e:
-        print("Error: ", e)
-        x_tot, meta = np.zeros((self.seq_len), 1), {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'KMAG': None, 'M': None}
-    return x_tot, meta, None, y_val
-  
-  def fill_nan_np(self, x:np.ndarray, interpolate:bool=True):
-    """
-    fill nan values in a numpy array
-
-    Args:
-         x (np.ndarray): array to fill
-         interpolate (bool): whether to interpolate or not
-
-    Returns:
-        np.ndarray: filled array
-    """
-    non_nan_indices = np.where(~np.isnan(x))[0]
-    nan_indices = np.where(np.isnan(x))[0]
-    if len(nan_indices) and len(non_nan_indices):
-        if interpolate:
-            # Interpolate NaN values using linear interpolation
-            interpolated_values = np.interp(nan_indices, non_nan_indices, x[non_nan_indices])
-            # Replace NaNs with interpolated values
-            x[nan_indices] = interpolated_values
+                meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'M': None, 'FeH':None, 'KMAG': None}
+            
+            if 'predicted period' in row.keys():
+                meta['predicted period'] = row['predicted period']
+                meta['mean_period_confidence'] = row['mean_period_confidence']
+            if 'Pmax' in row.keys() and 'Pmin' in row.keys():
+                meta['Pmax'] = row['Pmax']
+                meta['Pmin'] = row['Pmin']
+            return x, meta, None, y_val
         else:
-            x[nan_indices] = 0
-    return x
-    
+            paths = row['data_file_path']
+            for i in range(len(paths)):
+                x, time, meta = self.read_lc(paths[i])
+                meta['M'] = None
+                if i == 0:
+                    x_tot = x.copy()
+                else:
+                    border_val = np.nanmean(x) - np.nanmean(x_tot)
+                    x -= border_val
+                    x_tot = np.concatenate((x_tot, np.array(x)))
+                self.cur_len = len(x)
+            return x_tot, meta, None, y_val
 
-  def __getitem__(self, idx):
-    tic = time.time()
-    x, meta, qs, p_val = self.read_row(idx)
-    x = self.fill_nan_np(x, interpolate=True)
-    info = {'idx': idx}
-    info['qs'] = qs
-    info['period'] = p_val
-    info_y = copy.deepcopy(info)
-    x /= x.max()
-    target = x.copy()
-    mask = None
-    if self.transforms is not None:
-        try:
-            x, mask, info = self.transforms(x, mask=None, info=info)
-            if 'x_norm' in info.keys():
-                x = torch.cat([x, info['x_norm']], dim=0)
-            if self.seq_len > x.shape[-1]:
-                x = F.pad(x, ((0, 0,0, self.seq_len - x.shape[-1],)), "constant", value=0)
+    def fill_nan_np(self, x:np.ndarray, interpolate:bool=True):
+        """
+        fill nan values in a numpy array
+
+        Args:
+                x (np.ndarray): array to fill
+                interpolate (bool): whether to interpolate or not
+
+        Returns:
+            np.ndarray: filled array
+        """
+        non_nan_indices = np.where(~np.isnan(x))[0]
+        nan_indices = np.where(np.isnan(x))[0]
+        if len(nan_indices) and len(non_nan_indices):
+            if interpolate:
+                # Interpolate NaN values using linear interpolation
+                interpolated_values = np.interp(nan_indices, non_nan_indices, x[non_nan_indices])
+                # Replace NaNs with interpolated values
+                x[nan_indices] = interpolated_values
+            else:
+                x[nan_indices] = 0	
+        return x
+
+
+    def __getitem__(self, idx):
+        tic = time.time()
+        x, meta, qs, p_val = self.read_row(idx)
+        x = self.fill_nan_np(x, interpolate=True)
+        info = {'idx': idx}
+        info['qs'] = qs
+        info['period'] = p_val
+        info_y = copy.deepcopy(info)
+        # x /= x.max()
+        target = x.copy()
+        mask = None
+        if self.transforms is not None:
+            try:
+                x, mask, info = self.transforms(x, mask=None, info=info)
+                norm_x = torch.Tensor(info['norm_x']) if 'norm_x' in info.keys() else None
+                if self.seq_len > x.shape[0]:
+                    x = F.pad(x, (0,0,0, self.seq_len - x.shape[0]), "constant", value=x[0][-1])
+                    if mask is not None:
+                        mask = F.pad(mask, (0,0,0, self.seq_len - mask.shape[0]), "constant", value=0)
+                    else:
+                        mask = torch.zeros_like(x)
+                    if norm_x is not None:
+                        norm_x = F.pad(norm_x, (0,0,0, self.seq_len - norm_x.shape[0]), "constant", value=norm_x[0][-1])
+                x = x[:self.seq_len,:].nan_to_num(0).squeeze()
                 if mask is not None:
-                    mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
-                else:
-                    mask = torch.zeros_like(x)
-            x = x[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
-            mask = mask[:self.seq_len,:].squeeze().unsqueeze(0)
-        except Exception as e:
-            print(f"Error in transforms for index {idx}: {str(e)}")
-            x = torch.zeros(1, self.seq_len)
-            mask = torch.zeros_like(x)
-    else:
-       x = torch.tensor(x)
+                    mask = mask[:self.seq_len,:].squeeze()
+                if norm_x is not None:
+                    norm_x = norm_x[:self.seq_len,:].squeeze()
+                    # x = torch.cat((x[None], norm_x[None]), dim=0)
+            except Exception as e:
+                print(f"Error in transforms for index {idx}: {str(e)}")
+                x = torch.zeros(self.seq_len).float()
+                mask = torch.zeros_like(x)
+        else:
+            x = torch.tensor(x)
 
-    if self.mask_transform is not None:
-        masked_x, mask, _ = self.mask_transform(x, None, info)
-    if self.target_transforms is not None:
-        try:
-            target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
-            if 'x_norm' in info_y.keys():
-                target = torch.cat([target, info_y['x_norm']], dim=0)
-            if self.seq_len > target.shape[-1]:
-                target = F.pad(target, ((0, 0,0, self.seq_len - target.shape[-1],)), "constant", value=0)
+        if self.mask_transform is not None:
+            masked_x, mask, _ = self.mask_transform(x, None, info)
+        if self.target_transforms is not None:
+            try:
+                target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
+                norm_target = torch.Tensor(info['norm_x']) if 'norm_x' in info.keys() else None
+                if 'x_norm' in info_y.keys():
+                    target = torch.cat([target, info_y['x_norm']], dim=0)
+                if self.seq_len > target.shape[0]:
+                    target = F.pad(target, (0,0,0,self.seq_len - target.shape[0]), "constant", value=target[0][-1])
+                    if mask_y is not None:
+                        mask_y = F.pad(mask_y, (0,0,0,self.seq_len - mask_y.shape[0]), "constant", value=0)
+                    else:
+                        mask_y = torch.zeros_like(target)
+                    if norm_target is not None:
+                        norm_target = F.pad(norm_target, (0,0,0,self.seq_len - norm_target.shape[0]), "constant", value=norm_target[0][-1])
+                target = target[:self.seq_len,:].nan_to_num(0).squeeze()
                 if mask_y is not None:
-                  mask_y = F.pad(mask_y, ((0, 0,0, self.seq_len - mask_y.shape[-1],)), "constant", value=0)
-                else:
-                   mask_y = torch.zeros_like(target)
-            target = target[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
-            mask_y = mask_y[:self.seq_len,:].squeeze().unsqueeze(0)
-        except Exception as e:
-            print(f"Error in target transforms for index {idx}: {str(e)}")
-            target = torch.zeros(1, self.seq_len)
+                    mask_y = mask_y[:self.seq_len,:].squeeze()
+                if norm_target is not None:
+                    norm_target = norm_target[:self.seq_len,:].squeeze()
+                    # target = torch.cat((target[None], norm_target[None]), dim=0)
+            except Exception as e:
+                print(f"Error in target transforms for index {idx}: {str(e)}")
+                target = torch.zeros(self.seq_len).float()
+                mask_y = torch.zeros_like(target)
+        elif 'predicted period' in meta.keys():
+            target = torch.tensor([np.log10(meta['predicted period'])])
             mask_y = torch.zeros_like(target)
-    elif 'predicted period' in meta.keys():
-        target = torch.tensor([np.log10(meta['predicted period'])])
-        mask_y = torch.zeros_like(target)
-    elif 'Pmax' in meta.keys():
-        target = torch.tensor([np.log10(meta['Pmax']), np.log10(meta['Pmin'])])
-        mask_y = torch.zeros_like(target)
-    else:
-        target = x.clone()
-        mask_y = torch.zeros_like(target)
-    if len(meta):
-      info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
-      info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
-      info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
-      info['kmag_abs'] = meta['KMAG'] if meta['KMAG'] is not None else 0
-      info['FeH'] = meta['FeH'] if meta['FeH'] is not None else 0
-      info['Mstar'] = meta['M'] if meta['M'] is not None else 0
-    info['KID'] = self.df.iloc[idx]['KID']
-    if 'predicted period' in meta.keys():
-        info['predicted period'] = meta['predicted period']
-        info['mean_period_confidence'] = meta['mean_period_confidence']
-    if 'Pmax' in meta.keys():
-        info['Pmax'] = meta['Pmax']
-        info['Pmin'] = meta['Pmin']
-    toc = time.time()
-    info['time'] = toc - tic
-    if mask is None:
-        mask = torch.zeros_like(x)
-    if mask_y is None:
-        mask_y = torch.zeros_like(target)
+        elif 'Pmax' in meta.keys():
+            target = torch.tensor([np.log10(meta['Pmax']), np.log10(meta['Pmin'])])
+            mask_y = torch.zeros_like(target)
+        else:
+            target = x.clone()
+            mask_y = torch.zeros_like(target)
+        if len(meta):
+            info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
+            info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
+            info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
+            info['kmag_abs'] = meta['KMAG'] if meta['KMAG'] is not None else 0
+            info['FeH'] = meta['FeH'] if meta['FeH'] is not None else 0
+            info['Mstar'] = meta['M'] if meta['M'] is not None else 0
+            info['KID'] = self.df.iloc[idx]['KID']
+        if 'predicted period' in meta.keys():
+            info['predicted period'] = meta['predicted period']
+            info['mean_period_confidence'] = meta['mean_period_confidence']
+        if 'Pmax' in meta.keys():
+            info['Pmax'] = meta['Pmax']
+            info['Pmin'] = meta['Pmin']
+        toc = time.time()
+        info['time'] = toc - tic
+        if mask is None:
+            mask = torch.zeros_like(x)
+        if mask_y is None:
+            mask_y = torch.zeros_like(target)
 
-    # Ensure info and info_y are always dictionaries
-    info = info if isinstance(info, dict) else {}
-    info_y = info_y if isinstance(info_y, dict) else {}
-    if self.mask_transform is not None:
-        result = (masked_x.float(), x.float(), target.float(), mask, info, info_y)
-    else:
-        result = (x.float(), target.float(), target.float(), mask, info, info_y)
-    if any(item is None for item in result):
-        print(f"Warning: None value in result for index {idx}")
-        print(f"x: {x.shape if x is not None else None}")
-        print(f"target: {target.shape if target is not None else None}")
-        print(f"mask: {mask.shape if mask is not None else None}")
-        print(f"mask_y: {mask_y.shape if mask_y is not None else None}")
-        print(f"info: {info}")
-        print(f"info_y: {info_y}")
-    return result
+        # Ensure info and info_y are always dictionaries
+        info = info if isinstance(info, dict) else {}
+        info_y = info_y if isinstance(info_y, dict) else {}
+        if self.mask_transform is not None:
+            result = (masked_x.float(), x.float(), target.float(), mask, info, info_y)
+        else:
+            result = (x.float(), target.float(), target.float(), mask, info, info_y)
+        if any(item is None for item in result):
+            print(f"Warning: None value in result for index {idx}")
+            print(f"x: {x.shape if x is not None else None}")
+            print(f"target: {target.shape if target is not None else None}")
+            print(f"mask: {mask.shape if mask is not None else None}")
+            print(f"mask_y: {mask_y.shape if mask_y is not None else None}")
+            print(f"info: {info}")
+            print(f"info_y: {info_y}")
+        return result
 
 
 class LightSpecDataset(KeplerDataset):
+    """
+    A Multimodal dataset for spectra and lightcurve.
+    Args:
+        df (pd.DataFrame): DataFrame containing paths
+        prot_df (pd.DataFrame): DataFrame containing rotation periods
+        npy_path (str): Path to numpy files
+        spec_path (str): Path to spectra files
+        light_transforms (object): Transformations to apply to the lightcurve
+        spec_transforms (object): Transformations to apply to the spectra
+        light_seq_len (int): Sequence length for lightcurve
+        spec_seq_len (int): Sequence length for spectra
+        meta_columns (List[str]): Columns to use as metadata weights
+
+    """
     def __init__(self, df:pd.DataFrame=None,
                 prot_df:pd.DataFrame=None,
                 npy_path:str=None,
@@ -501,7 +565,7 @@ class LightSpecDataset(KeplerDataset):
             spec_time = time.time() - start
         except OSError as e:
             print("Error reading file ", obsid, e)
-            spectra = np.zeros((1, self.spec_seq_len))
+            spectra = np.zeros((self.spec_seq_len))
             meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
         if self.spec_transforms:
             spectra, _, spec_info = self.spec_transforms(spectra, None, meta)

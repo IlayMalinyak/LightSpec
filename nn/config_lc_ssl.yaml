@@ -15,13 +15,12 @@ Data:
   create_umap: False
   masked_transform: True
 
-
 Conformer:
   encoder: ["mhsa_pro", "conv", "ffn"]
   timeshift: false
   num_layers: 4
   stride: 2
-  encoder_dim: 256
+  encoder_dim: 512
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.2
@@ -38,12 +37,12 @@ MultiEncoder:
   dropout_p: 0.3
   output_dim: 2
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
   avg_output: True
-  checkpoint_path: '/data/lightSpec/logs/light_2025-01-07/MultiEncoder_lc_2.pth'
+  checkpoint_path: /data/lightSpec/logs/light_2025-02-03/MultiEncoder_lc_2.pth
 
 
 CNNEncoder:
@@ -56,7 +55,7 @@ CNNEncoder:
   dropout_p: 0.3
   output_dim: 2
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
@@ -69,7 +68,7 @@ CNNEncoderDecoder:
   in_channels: 1
   num_layers: 8
   stride: 1
-  encoder_dims: [32,64,128,256]
+  encoder_dims: [32,64,128,256,512]
   kernel_size: 3
   dropout_p: 0.3
   output_dim: 2
@@ -79,6 +78,8 @@ CNNEncoderDecoder:
   activation: "sine"
   sine_w0: 1.0
   avg_output: False
+  checkpoint_path: '/data/lightSpec/logs/light_2025-02-02/CNNEncoderDecoder_lc_2.pth'
+
 
 Mamba:
   # Model

@@ -4,11 +4,13 @@ Data:
   # Data
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
+  data_dir_hr: '/data/apogee/data'
   model_name: MultiTaskRegressor
   batch_size: 64
   num_epochs: 1000
   exp_num: 1
   max_len_spectra: 4096
+  max_len_spectra_hr: 8704
   continuum_norm: True
   max_days_lc: 720
   lc_freq: 0.0208
@@ -81,7 +83,7 @@ MultiTaskRegressor:
   output_dim: 4
   num_quantiles: 5
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "silu"
   checkpoint_path: '/data/lightSpec/logs/spec_decode_multires_2025-01-24/MultiTaskRegressor_spectra_decode_multires_1.pth'
@@ -96,6 +98,20 @@ Conformer:
   kernel_size: 3
   dropout_p: 0.2
   norm: "postnorm"
+
+Transformer:
+  in_channels: 1
+  num_layers: 12
+  encoder_dim: 512
+  dropout_p: 0.2
+  num_heads: 8
+  dropout: 0.0
+  output_dim: 4
+  num_quantiles: 5
+  checkpoint_num: 1
+  load_checkpoint: False
+
+
 
 Optimization:
   # Optimization

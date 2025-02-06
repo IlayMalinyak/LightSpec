@@ -83,25 +83,30 @@ class CQR(nn.Module):
         index = int(np.ceil((1 - significance) * (nc.shape[0] + 1))) - 1
         index = min(max(index, 0), nc.shape[0] - 1)
         return np.vstack([nc[index], nc[index]])
+        
     def calibrate(self, preds, target):
+        """
+        Calibrate the model by calculating the non-conformity scores
+        for each prediction and target
+        """
         print("calibrate: ", preds.shape, target.shape)
         errs = []
         for i in range(len(self.quantiles)//2):
             y_lower = preds[:, i][:, None]
-            y_upper = preds[:, -(i + 1)][:, None]
+            y_upper = preds[:,  -(i + 1)][:, None]
             q_pair = np.concatenate((y_lower, y_upper), axis=1)
             q_error = self.calc_nc_error(q_pair, target)
             errs.append(q_error)
         # self.nc_errs = np.array(errs)
-        return np.array(errs).T
+        return np.swapaxes(np.array(errs), 0,1)
 
     def predict(self, preds, nc_errs):
         conformal_intervals = np.zeros_like(preds)
         for i in range(len(self.quantiles) // 2):
             significance = self.quantiles[-(i+1)] - self.quantiles[i]
             err_dist = self.apply_inverse(nc_errs[:, i], significance)
-            err_dist = np.hstack([err_dist] * preds.shape[0])
-            conformal_intervals[:, i] = preds[:, i] - err_dist[0, :]
-            conformal_intervals[:, -(i+1)] = preds[:, -(i + 1)] + err_dist[1, :]
+            err_dist = np.broadcast_to(err_dist[:, None, :], (err_dist.shape[0], preds.shape[0], err_dist.shape[1]))
+            conformal_intervals[:, i] = preds[: , i] - err_dist[0, :]
+            conformal_intervals[: , -(i+1)] = preds[: , -(i + 1)] + err_dist[1, :]
         conformal_intervals[:, len(self.quantiles) // 2] = preds[:, len(self.quantiles) // 2]
         return conformal_intervals
