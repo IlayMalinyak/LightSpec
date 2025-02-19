@@ -4,6 +4,7 @@ import numpy as np
 import time
 import os
 import yaml
+import json
 from matplotlib import pyplot as plt
 import glob
 from collections import OrderedDict
@@ -78,7 +79,7 @@ class Trainer(object):
         
         return None
 
-    def fit(self, num_epochs, device,  early_stopping=None, only_p=False, best='loss', conf=False):
+    def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False):
         """
         Fits the model for the given number of epochs.
         """
@@ -87,6 +88,7 @@ class Trainer(object):
         train_loss, val_loss,  = [], []
         train_acc, val_acc = [], []
         lrs = []
+        epochs = []
         # self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
         main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
@@ -95,7 +97,8 @@ class Trainer(object):
         print("is main process: ", main_proccess, flush=True)
         global_time = time.time()
         self.epoch = 0
-        for epoch in range(num_epochs):
+        for epoch in range(start_epoch, start_epoch + num_epochs):
+            epochs.append(epoch)
             self.epoch = epoch
             start_time = time.time()
             plot = (self.plot_every is not None) and (epoch % self.plot_every == 0)
@@ -130,6 +133,12 @@ class Trainer(object):
                     print(f"saving model at {model_name}...")
                     torch.save(self.model.state_dict(), model_name)
                     self.best_state_dict = self.model.state_dict()
+                    res = {"epochs": epochs, "train_loss": train_loss, "val_loss": val_loss,
+                           "train_acc": train_acc, "val_acc": val_acc, "lrs": lrs}
+                    output_filename = f'{self.log_path}/{self.exp_num}/{self.exp_name}.json'
+                    with open(output_filename, "w") as f:
+                        json.dump(res, f, indent=2)
+                    print(f"saved results at {output_filename}")
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
@@ -153,7 +162,7 @@ class Trainer(object):
                     print("time limit reached")
                     break 
 
-        return {"num_epochs":num_epochs, "train_loss": train_loss,
+        return {"epochs":epochs, "train_loss": train_loss,
                  "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc, "lrs": lrs}
 
     def process_loss(self, acc, loss_mean):
@@ -221,11 +230,11 @@ class Trainer(object):
         for i, batch in enumerate(pbar):
             if self.optimizer is not None:
                 self.optimizer.zero_grad()
-            loss, acc , y = self.train_batch(batch, i, device)
+            loss, acc , y = self.train_batch(batch, i + epoch * len(self.train_dl), device)
             train_loss.append(loss.item())
             all_accs = all_accs + acc
             total += len(y)
-            pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item()}")      
+            pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item():.4f}")      
             if i > self.max_iter:
                 break
         print("number of train_accs: ", train_acc)
@@ -269,11 +278,11 @@ class Trainer(object):
         all_accs = torch.zeros(self.output_dim, device=device)
         pbar = tqdm(self.val_dl)
         for i,batch in enumerate(pbar):
-            loss, acc, y = self.eval_batch(batch, i, device)
+            loss, acc, y = self.eval_batch(batch, i + epoch * len(self.val_dl), device)
             val_loss.append(loss.item())
             all_accs = all_accs + acc
             total += len(y)
-            pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item()}")
+            pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item():.4f}")
             if i > self.max_iter:
                 break
         return val_loss, all_accs/total
@@ -402,28 +411,38 @@ class MaskedSSLTrainer(Trainer):
 
 
 class ContrastiveTrainer(Trainer):
-    def __init__(self, temperature=1, stack_pairs=False, use_w=False,
+    def __init__(self, temperature=1, stack_pairs=False,
+                 use_w=False, use_pred_coeff=False, pred_coeff_val=None,
                    **kwargs):
         super().__init__(**kwargs)
         self.stack_pairs = stack_pairs
         self.temperature = temperature
         self.use_w = use_w
+        self.use_pred_coeff = use_pred_coeff
+        self.pred_coeff_val = pred_coeff_val
         
         
     def train_batch(self,batch, batch_idx, device):
         start_time = time.time()
-        x1, x2, w, _, info1, info2 = batch 
+        x1, x2, _, _, info1, info2 = batch 
         x1, x2 = x1.to(device), x2.to(device)
         if self.stack_pairs:
             x = torch.cat((x1, x2), dim=0)
             out = self.model(x, temperature=self.temperature)
             model_time = time.time() - start_time
-        else:
-            if self.use_w:
-                out = self.model(x1, x2, w)
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info1]).to(device)
+            if self.use_pred_coeff:
+                if self.pred_coeff_val != 'None':
+                    pred_coeff = float(self.pred_coeff_val)
+                else:
+                    pred_coeff = max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
+                out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
             else:
-                out = self.model(x1, x2)
-            model_time = time.time() - start_time
+                out = self.model(x1, x2, w=w)
+        else:
+            out = self.model(x1, x2)    
+        model_time = time.time() - start_time
         # print("nans: ", x1.isnan().sum(), x2.isnan().sum())
         loss = out['loss']
         if self.scaler is not None:
@@ -467,11 +486,18 @@ class ContrastiveTrainer(Trainer):
             if self.stack_pairs:
                 x = torch.cat((x1, x2), dim=0)
                 out = self.model(x, temperature=self.temperature)
-            else:
-                if self.use_w:
-                    out = self.model(x1, x2, w)
+            if self.use_w:
+                w = torch.stack([i['w'] for i in info1]).to(device)
+                if self.use_pred_coeff:                    
+                    if self.pred_coeff_val != 'None':
+                        pred_coeff = float(self.pred_coeff_val)
+                    else:
+                        pred_coeff = max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
+                    out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
                 else:
-                    out = self.model(x1, x2)
+                    out = self.model(x1, x2, w=w)
+            else:
+                out = self.model(x1, x2)
         loss = out['loss']
         # if self.wandb:
         #     wandb.log({"val_loss": loss.item()}) 
@@ -643,10 +669,14 @@ class MaskedRegressorTrainer(Trainer):
                         if key not in aggregated_info:
                             aggregated_info[key] = []
                         aggregated_info[key].append(value)
-
             with torch.no_grad():
                 y_pred, _ = self.model(x_masked, x)
                 y_pred = y_pred.view(b, -1, self.num_quantiles)
+            out_diff = int(y.shape[1] - y_pred.shape[1])
+            y = y[:, out_diff:]
+            if self.drop_first_y:
+                reg_out = reg_out[:, 1:]
+                y = y[:, 1:]
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
             if i > self.max_iter:
@@ -829,4 +859,71 @@ class DualTrainer(Trainer):
             if i > self.max_iter:
                 break
         return val_loss, all_accs / i
+    
+
+class LightSpecTrainer(Trainer):
+    def train_batch(self,batch, batch_idx, device):
+        start_time = time.time()
+        lc, spec, lc2, spec2, info1, info2 = batch 
+        lc, lc2, spec, spec2 = lc.to(device), lc2.to(device), spec.to(device), spec2.to(device)
+        # print("before padd: ", lc.shape, spec.shape, lc2.shape, spec2.shape)
+        spec = torch.nn.functional.pad(spec, (0, lc.shape[-1] - spec.shape[-1], 0,0))
+        spec2 = torch.nn.functional.pad(spec2, (0, lc2.shape[-1] - spec2.shape[-1], 0,0))
+        # print('after padd: ',  lc.shape, spec.shape, lc2.shape, spec2.shape)
+        x1 = torch.cat((lc, spec.unsqueeze(1)), dim=1)
+        x2 = torch.cat((lc2, spec2.unsqueeze(1)), dim=1)
+        out = self.model(x1, x2)    
+        model_time = time.time() - start_time
+        # print("nans: ", x1.isnan().sum(), x2.isnan().sum())
+        loss = out['loss']
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
+            if (batch_idx + 1) % self.accumulation_step == 0:
+                # Add gradient clipping before optimizer step
+                if self.grad_clip:
+                    self.scaler.unscale_(self.optimizer)
+                    # self.check_gradients()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.scaler.step(self.optimizer)
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                self.scaler.update()
+        else:
+            loss.backward()
+            if (batch_idx + 1) % self.accumulation_step == 0:
+                # Add gradient clipping before optimizer step
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+                if self.scheduler is not None:
+                    self.scheduler.step()
+        if torch.isnan(loss).sum() > 0:
+            print("nan in loss, idx: ", batch_idx)
+            exit()
+        backward_time = time.time() - start_time - model_time
+        self.optimizer.step()
+        optimizer_time = time.time() - start_time - model_time - backward_time
+        if self.scheduler is not None:
+                    self.scheduler.step()
+        # if self.wandb:
+        #     wandb.log({"train_loss": loss.item()})
+        # print(f"model time: {model_time}, backward time: {backward_time}, optimizer time: {optimizer_time}")
+        return loss, 0., x1
+
+    def eval_batch(self,batch, batch_idx, device):
+        lc, spec, lc2, spec2, info1, info2 = batch 
+        lc, lc2, spec, spec2 = lc.to(device), lc2.to(device), spec.to(device), spec2.to(device)
+        # print("before padd: ", lc.shape, spec.shape, lc2.shape, spec2.shape)
+        spec = torch.nn.functional.pad(spec, (0, lc.shape[-1] - spec.shape[-1], 0,0))
+        spec2 = torch.nn.functional.pad(spec2, (0, lc2.shape[-1] - spec2.shape[-1], 0,0))
+        # print('after padd: ',  lc.shape, spec.shape, lc2.shape, spec2.shape)
+        x1 = torch.cat((lc, spec.unsqueeze(1)), dim=1)
+        x2 = torch.cat((lc2, spec2.unsqueeze(1)), dim=1)
+        with torch.no_grad():
+            out = self.model(x1, x2)
+        loss = out['loss']
+        # if self.wandb:
+        #     wandb.log({"val_loss": loss.item()}) 
+        return loss, 0, x1
+
     

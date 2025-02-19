@@ -73,10 +73,10 @@ CNNRegressor:
 
 MultiTaskRegressor:
   in_channels: 1
-  num_layers: 4
+  num_layers: 6
   stride: 1
-  encoder_dims: [64,128,256,512]
-  transformer_layers: 4
+  encoder_dims: [64,128,256,512,1024,2048]
+  transformer_layers: 6
   kernel_size: 3
   dropout_p: 0.2
   avg_output: True
@@ -93,7 +93,7 @@ Conformer:
   encoder: ["mhsa_pro", "conv", "ffn"]
   timeshift: false
   num_layers: 8
-  encoder_dim: 512
+  encoder_dim: 2048
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.2
@@ -102,7 +102,7 @@ Conformer:
 Transformer:
   in_channels: 1
   num_layers: 12
-  encoder_dim: 512
+  encoder_dim: 2048
   dropout_p: 0.2
   num_heads: 8
   dropout: 0.0

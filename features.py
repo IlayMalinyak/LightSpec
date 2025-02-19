@@ -15,6 +15,7 @@ def create_umap(model,
                 temperature=1,
                 use_w=True,
                 dual=True,
+                combine=False,
                 return_predictions=False,
                 max_iter=np.inf):
     # Initialize UMAP reducer
@@ -28,9 +29,16 @@ def create_umap(model,
     for i, batch in enumerate(tqdm(dl)):
         if i >= max_iter:
             break
-        
-        x1, x2, w, _, info1, info2 = batch
-        x1, x2 = x1.to(device), x2.to(device)
+        if combine:
+            lc, spec, lc2, spec2, info1, info2 = batch 
+            lc, lc2, spec, spec2 = lc.to(device), lc2.to(device), spec.to(device), spec2.to(device)
+            spec = torch.nn.functional.pad(spec, (0, lc.shape[-1] - spec.shape[-1], 0,0))
+            spec2 = torch.nn.functional.pad(spec2, (0, lc2.shape[-1] - spec2.shape[-1], 0,0))
+            x1 = torch.cat((lc, spec.unsqueeze(1)), dim=1)
+            x2 = torch.cat((lc2, spec2.unsqueeze(1)), dim=1)
+        else:
+            x1, x2, w, _, info1, info2 = batch
+            x1, x2 = x1.to(device), x2.to(device)
         
         # Process model outputs
         with torch.no_grad():
@@ -67,13 +75,16 @@ def create_umap(model,
             batch_metadata.append(flat_info)
         
         # Combine metadata with UMAP coordinates
-        for metadata, umap_coords in zip(batch_metadata, reduced_data):
+        for metadata, umap_coords, logit in zip(batch_metadata, reduced_data, logits):
             metadata['umap_x'] = umap_coords[0]
             metadata['umap_y'] = umap_coords[1]
+            metadata['logits_std'] = logit.squeeze().cpu().numpy().std()
+            metadata['logits_mean'] = logits.squeeze().cpu().numpy().mean()
             data_list.append(metadata)
     
     # Create DataFrame
     df = pd.DataFrame(data_list)
+    print(df.columns)
     
     return df
 
@@ -84,7 +95,7 @@ def multimodal_umap(model,
                 device,
                 stack_pairs=False,
                 temperature=1,
-                use_w=True,
+                use_w=False,
                 dual=True,
                 return_predictions=False,
                 max_iter=np.inf):
@@ -107,32 +118,22 @@ def multimodal_umap(model,
         
         # Process model outputs
         with torch.no_grad():
-            lc_out = lc_encoder(lc)
-            spec_out = spec_encoder(spec)
+            lc_out, _ = lc_encoder(lc)
+            spec_out, _ = spec_encoder(spec)
             dual_out = model(lc, spec)
             if use_w:
                 dual_out = model(lc, spec, w)
             else:
                 dual_out = model(lc, spec)
            
-        
         # Extract logits and apply UMAP
         dual_logits = dual_out['logits']
-        if isinstance(dual_logits, tuple):
-            dual_logits = dual_logits[0]
-        if dual_logits.dim() > 2:
-            dual_logits = dual_logits.mean(dim=1)
-        if isinstance(lc_out, tuple):
-            lc_out = lc_out[0]
-        if lc_out.dim() > 2:
-            lc_out = lc_out.mean(dim=1)
-        if isinstance(spec_out, tuple):
-            spec_out = spec_out[0]
-        if spec_out.dim() > 2:
-            spec_out = spec_out.mean(dim=1)
+       
         reduced_dual = reducer.fit_transform(dual_logits.cpu().numpy())
         reduced_lc = reducer.fit_transform(lc_out.cpu().numpy())
         reduced_spec = reducer.fit_transform(spec_out.cpu().numpy())
+
+        print(reduced_lc.shape, reduced_spec.shape, reduced_dual.shape)
         
         # Aggregate metadata
         batch_metadata = []
@@ -148,21 +149,22 @@ def multimodal_umap(model,
             batch_metadata.append(flat_info)
         
         # Combine metadata with UMAP coordinates
-        for metadata, umap_coords in zip(batch_metadata, reduced_dual):
-            metadata['umap_x'] = umap_coords[0]
-            metadata['umap_y'] = umap_coords[1]
+        for metadata, dual_coords in zip(batch_metadata, reduced_dual):
+            print(dual_coords.shape)
+            metadata['umap_x'] = dual_coords[0]
+            metadata['umap_y'] = dual_coords[1]
             data_dual.append(metadata)
         
-        for metadata, umap_coords in zip(batch_metadata, reduced_lc):
-            metadata['umap_x'] = umap_coords[0]
-            metadata['umap_y'] = umap_coords[1]
+        for metadata, lc_coords in zip(batch_metadata, reduced_lc):
+            metadata['umap_x'] = lc_coords[0]
+            metadata['umap_y'] = lc_coords[1]
             data_lc.append(metadata)
         
-        for metadata, umap_coords in zip(batch_metadata, reduced_spec):
-            metadata['umap_x'] = umap_coords[0]
-            metadata['umap_y'] = umap_coords[1]
+        for metadata, spec_coords in zip(batch_metadata, reduced_spec):
+            metadata['umap_x'] = spec_coords[0]
+            metadata['umap_y'] = spec_coords[1]
             data_spec.append(metadata)
-    
+        print(data_spec[0]['umap_x'],data_lc[0]['umap_x'],data_dual[0]['umap_x'])
     # Create DataFrame
     df_dual = pd.DataFrame(data_dual)
     df_lc = pd.DataFrame(data_lc)

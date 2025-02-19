@@ -278,7 +278,7 @@ trainer = MultiResolutionTrainer(model=model, optimizer=optimizer,
 
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=10, only_p=False, best='loss', conf=True) 
+                        early_stopping=10, best='loss', conf=True) 
 output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_multires_{checkpoint_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)

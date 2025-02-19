@@ -70,43 +70,52 @@ class CQR(nn.Module):
 
 
     def calc_nc_error(self, prediction, y):
-        y_lower = prediction[:, 0]
-        y_upper = prediction[:, -1]
-        error_low = y_lower - y
-        error_high = y - y_upper
-        err = np.maximum(error_high, error_low)
-        return err
+        y_lower = prediction[:, :, 0]  # Shape: (N, num_labels)
+        y_upper = prediction[:, :, -1] # Shape: (N, num_labels)
+        
+        error_low = y_lower - y  # (N, num_labels)
+        error_high = y - y_upper # (N, num_labels)
+        
+        err = np.maximum(error_high, error_low)  # (N, num_labels)
+        return err  # Return per-label errors instead of collapsing them
 
 
     def apply_inverse(self, nc, significance):
-        nc = np.sort(nc, 0)
-        index = int(np.ceil((1 - significance) * (nc.shape[0] + 1))) - 1
+        nc = np.sort(nc,0)
+        index = int(np.ceil((1 - significance / 2) * (nc.shape[0] + 1))) - 1
         index = min(max(index, 0), nc.shape[0] - 1)
         return np.vstack([nc[index], nc[index]])
-        
+
+
     def calibrate(self, preds, target):
-        """
-        Calibrate the model by calculating the non-conformity scores
-        for each prediction and target
-        """
         print("calibrate: ", preds.shape, target.shape)
         errs = []
-        for i in range(len(self.quantiles)//2):
-            y_lower = preds[:, i][:, None]
-            y_upper = preds[:,  -(i + 1)][:, None]
-            q_pair = np.concatenate((y_lower, y_upper), axis=1)
-            q_error = self.calc_nc_error(q_pair, target)
+        
+        for i in range(len(self.quantiles) // 2):
+            y_lower = preds[:, :, i]  # Shape: (N, num_labels)
+            y_upper = preds[:, :, -(i + 1)]  # Shape: (N, num_labels)
+            
+            q_pair = np.stack([y_lower, y_upper], axis=-1)  # (N, num_labels, 2)
+            q_error = self.calc_nc_error(q_pair, target)  # (N, num_labels)
+            
             errs.append(q_error)
-        # self.nc_errs = np.array(errs)
-        return np.swapaxes(np.array(errs), 0,1)
+        errs = np.stack(errs)
+        errs = np.swapaxes(np.swapaxes(errs, 0, 1), 1,2)
+        return errs  # Shape: (N, num_labels, num_quantile_pairs)
 
     def predict(self, preds, nc_errs):
-        conformal_intervals = np.zeros_like(preds)
+        print("nc errors shape: ", nc_errs.shape)
+        conformal_intervals = np.zeros_like(preds)  # Shape: (N, num_labels, num_quantiles)
+
         for i in range(len(self.quantiles) // 2):
             significance = self.quantiles[-(i+1)] - self.quantiles[i]
-            err_dist = self.apply_inverse(nc_errs[:, i], significance)
-            err_dist = np.broadcast_to(err_dist[:, None, :], (err_dist.shape[0], preds.shape[0], err_dist.shape[1]))
-            conformal_intervals[:, i] = preds[: , i] - err_dist[0, :]
-            conformal_intervals[: , -(i+1)] = preds[: , -(i + 1)] + err_dist[1, :]
-        conformal_intervals[:, len(self.quantiles) // 2] = preds[:, len(self.quantiles) // 2]
+
+            for j in range(preds.shape[1]):
+                err_dist = self.apply_inverse(nc_errs[:, j, i], significance)  # (2)
+                err_dist = np.hstack([err_dist] * preds.shape[0])
+                print("err dist: ", err_dist.shape)
+                conformal_intervals[:, j, i] = preds[:, j, i] - err_dist[0]  # Lower bound
+                conformal_intervals[:, j, -(i+1)] = preds[:, j, -(i+1)] + err_dist[1]  # Upper bound
+
+        conformal_intervals[:, :, len(self.quantiles) // 2] = preds[:, :, len(self.quantiles) // 2]  # Median
         return conformal_intervals

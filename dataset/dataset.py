@@ -12,6 +12,7 @@ import copy
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import traceback
 
 import sys
 from os import path
@@ -275,6 +276,7 @@ class KeplerDataset():
                 seq_len:int=34560,
                 target_transforms:object=None,
                 masked_transforms:bool=False,
+                use_acf:bool=False
                 ):
         """
         dataset for Kepler data
@@ -298,6 +300,7 @@ class KeplerDataset():
             if prot_df is not None:
                 self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
         self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
+        self.use_acf = use_acf
             
 
     def __len__(self):
@@ -409,60 +412,48 @@ class KeplerDataset():
         info['qs'] = qs
         info['period'] = p_val
         info_y = copy.deepcopy(info)
-        # x /= x.max()
+        x /= x.max()
         target = x.copy()
         mask = None
         if self.transforms is not None:
             try:
                 x, mask, info = self.transforms(x, mask=None, info=info)
-                norm_x = torch.Tensor(info['norm_x']) if 'norm_x' in info.keys() else None
                 if self.seq_len > x.shape[0]:
-                    x = F.pad(x, (0,0,0, self.seq_len - x.shape[0]), "constant", value=x[0][-1])
+                    x = F.pad(x, ((0, 0,0, self.seq_len - x.shape[-1],)), "constant", value=0)
                     if mask is not None:
-                        mask = F.pad(mask, (0,0,0, self.seq_len - mask.shape[0]), "constant", value=0)
+                        mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
                     else:
                         mask = torch.zeros_like(x)
-                    if norm_x is not None:
-                        norm_x = F.pad(norm_x, (0,0,0, self.seq_len - norm_x.shape[0]), "constant", value=norm_x[0][-1])
-                x = x[:self.seq_len,:].nan_to_num(0).squeeze()
-                if mask is not None:
-                    mask = mask[:self.seq_len,:].squeeze()
-                if norm_x is not None:
-                    norm_x = norm_x[:self.seq_len,:].squeeze()
-                    # x = torch.cat((x[None], norm_x[None]), dim=0)
+                x = x[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
+                mask = mask[:self.seq_len,:].squeeze().unsqueeze(0)
+                if self.use_acf:
+                    acf = torch.tensor(info['acf']).nan_to_num(0)
+                    x = torch.cat((x, acf), dim=0)
             except Exception as e:
                 print(f"Error in transforms for index {idx}: {str(e)}")
-                x = torch.zeros(self.seq_len).float()
-                mask = torch.zeros_like(x)
+                # traceback.print_exc()
+                x = torch.zeros(1, self.seq_len) if not self.use_acf else torch.zeros(2, self.seq_len)
+                mask = torch.zeros(1, self.seq_len)
         else:
             x = torch.tensor(x)
-
-        if self.mask_transform is not None:
-            masked_x, mask, _ = self.mask_transform(x, None, info)
         if self.target_transforms is not None:
             try:
                 target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
-                norm_target = torch.Tensor(info['norm_x']) if 'norm_x' in info.keys() else None
-                if 'x_norm' in info_y.keys():
-                    target = torch.cat([target, info_y['x_norm']], dim=0)
                 if self.seq_len > target.shape[0]:
-                    target = F.pad(target, (0,0,0,self.seq_len - target.shape[0]), "constant", value=target[0][-1])
+                    target = F.pad(target, ((0, 0,0, self.seq_len - target.shape[-1],)), "constant", value=0)
                     if mask_y is not None:
-                        mask_y = F.pad(mask_y, (0,0,0,self.seq_len - mask_y.shape[0]), "constant", value=0)
+                        mask_y = F.pad(mask_y, ((0, 0,0, self.seq_len - mask_y.shape[-1],)), "constant", value=0)
                     else:
                         mask_y = torch.zeros_like(target)
-                    if norm_target is not None:
-                        norm_target = F.pad(norm_target, (0,0,0,self.seq_len - norm_target.shape[0]), "constant", value=norm_target[0][-1])
-                target = target[:self.seq_len,:].nan_to_num(0).squeeze()
-                if mask_y is not None:
-                    mask_y = mask_y[:self.seq_len,:].squeeze()
-                if norm_target is not None:
-                    norm_target = norm_target[:self.seq_len,:].squeeze()
-                    # target = torch.cat((target[None], norm_target[None]), dim=0)
+                target = target[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
+                mask_y = mask_y[:self.seq_len,:].squeeze().unsqueeze(0)
+                if self.use_acf:
+                    acf = torch.tensor(info_y['acf']).nan_to_num(0)
+                    target = torch.cat((target, acf), dim=0)
             except Exception as e:
                 print(f"Error in target transforms for index {idx}: {str(e)}")
-                target = torch.zeros(self.seq_len).float()
-                mask_y = torch.zeros_like(target)
+                target = torch.zeros(1, self.seq_len) if not self.use_acf else torch.zeros(2, self.seq_len)
+                mask_y = torch.zeros(1, self.seq_len)
         elif 'predicted period' in meta.keys():
             target = torch.tensor([np.log10(meta['predicted period'])])
             mask_y = torch.zeros_like(target)
@@ -479,7 +470,7 @@ class KeplerDataset():
             info['kmag_abs'] = meta['KMAG'] if meta['KMAG'] is not None else 0
             info['FeH'] = meta['FeH'] if meta['FeH'] is not None else 0
             info['Mstar'] = meta['M'] if meta['M'] is not None else 0
-            info['KID'] = self.df.iloc[idx]['KID']
+        info['KID'] = self.df.iloc[idx]['KID']
         if 'predicted period' in meta.keys():
             info['predicted period'] = meta['predicted period']
             info['mean_period_confidence'] = meta['mean_period_confidence']
@@ -496,10 +487,7 @@ class KeplerDataset():
         # Ensure info and info_y are always dictionaries
         info = info if isinstance(info, dict) else {}
         info_y = info_y if isinstance(info_y, dict) else {}
-        if self.mask_transform is not None:
-            result = (masked_x.float(), x.float(), target.float(), mask, info, info_y)
-        else:
-            result = (x.float(), target.float(), target.float(), mask, info, info_y)
+        result = (x.float(), target.float(), target.float(), mask, info, info_y)
         if any(item is None for item in result):
             print(f"Warning: None value in result for index {idx}")
             print(f"x: {x.shape if x is not None else None}")
@@ -533,14 +521,17 @@ class LightSpecDataset(KeplerDataset):
                 light_transforms:object=None,
                 spec_transforms:object=None,
                 light_seq_len:int=34560,
+                use_acf:bool=False,
                 spec_seq_len:int=3909,
-                meta_columns = ['Teff', 'M', 'logg'],
+                meta_columns = ['Teff', 'Mstar', 'logg'],
                 ):
-        super().__init__(df, prot_df, npy_path, light_transforms, light_seq_len)
+        super().__init__(df, prot_df, npy_path, light_transforms,
+                light_seq_len, target_transforms=light_transforms, use_acf=use_acf)
         self.spec_path = spec_path
         self.spec_transforms = spec_transforms
         self.spec_seq_len = spec_seq_len
         self.meta_columns = meta_columns
+        self.masked_transform = RandomMasking()
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:
@@ -554,7 +545,7 @@ class LightSpecDataset(KeplerDataset):
 
     def __getitem__(self, idx):
         start = time.time()
-        light, _, _, _, info, _ = super().__getitem__(idx)
+        light, light_target, _, _, info, _ = super().__getitem__(idx)
         light_time = time.time() - start
         kid = int(info['KID'])
         obsid = int(self.df.iloc[idx]['ObsID'])
@@ -573,12 +564,41 @@ class LightSpecDataset(KeplerDataset):
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
         spectra = torch.nan_to_num(spectra, nan=0)
+        masked_spectra, _, spec_info = self.masked_transform(spectra, None, spec_info)
         info.update(spec_info)
-        w = torch.tensor([info[c] for c in self.meta_columns], dtype=torch.float32)
+        if self.meta_columns is not None:
+            w = torch.tensor([info[c] for c in self.meta_columns], dtype=torch.float32)
+            info['w'] = w
         # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
-        return light.float().squeeze(0), spectra.float().squeeze(0), w, torch.zeros_like(spectra), info, info
+        return (light.float().squeeze(0), spectra.float().squeeze(0), light_target.float().squeeze(0),
+         masked_spectra.float().squeeze(0), info, info)
     
 
+class FineTuneDataset(LightSpecDataset):
+    """
+    A dataset for fine-tuning lightcurve and spectra models
+    """
+    def __init__(self, df:pd.DataFrame=None,
+                npy_path:str=None,
+                spec_path:str=None,
+                prot_df:pd.DataFrame=None,
+                light_transforms:object=None,
+                spec_transforms:object=None,
+                light_seq_len:int=34560,
+                use_acf:bool=False,
+                spec_seq_len:int=3909,
+                labels = ['inc'],
+                ):
+        super().__init__(df, prot_df, npy_path, spec_path, light_transforms,
+                spec_transforms, light_seq_len, use_acf, spec_seq_len)
+        self.labels = labels
+    
+    def __getitem__(self, idx):
+        light, spectra, light_target, spectra_target, info, _ = super().__getitem__(idx)
+        row = self.df.iloc[idx]
+        y = torch.tensor([row[label] for label in self.labels], dtype=torch.float32)
+        # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
+        return (light, spectra, light_target, spectra_target, y, info)
 
 def create_unique_loader(dataset, batch_size, num_workers=4, **kwargs):
     """

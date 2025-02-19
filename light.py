@@ -26,7 +26,7 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import KeplerDataset
 from nn.astroconf import Astroconformer
-from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder
+from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder, CNNRegressor
 # from nn.mamba import MambaEncoder
 from nn.simsiam import SimSiam
 from nn.train import ContrastiveTrainer, MaskedSSLTrainer
@@ -38,7 +38,7 @@ os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder,
-            "CNNEncoderDecoder": CNNEncoderDecoder}
+            "CNNEncoderDecoder": CNNEncoderDecoder, 'CNNRegressor': CNNRegressor}
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"light_{current_date}"
@@ -54,15 +54,11 @@ optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL']
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
-transforms = Compose([ RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
-                    #   FillNans(interpolate=True),
+transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
                         MovingAvg(13),
-                        # RandomMasking(mask_prob=0.2),
-                        # RandomTransform([AddGaussianNoise(sigma=0.0001),
-                        #                 RandomMasking(mask_prob=0.05),
-                        #                 Shuffle(segment_len=270/data_args.lc_freq),
-                        #                 Identity()]),
-                        # Normalize('std'),
+                        ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
+                        RandomMasking(mask_prob=0.2),
+                        Normalize('std'),
                         ToTensor(), ])
 
 
@@ -72,14 +68,14 @@ train_dataset = KeplerDataset(df=kepler_df, transforms=transforms,
                                 target_transforms=transforms,
                                 npy_path = '/data/lightPred/data/npy',
                                 seq_len=int(data_args.max_len_lc),
-                                masked_transforms = data_args.masked_transform
+                                masked_transforms = data_args.masked_transform,
+                                use_acf=data_args.use_acf
                                 )
 start = time.time()
 for i in range(100):
     x1,x2,_,_,info1,info2 = train_dataset[i]
-    print(x1.shape, x2.shape)
+    print(x1.shape, x2.shape)        
 print("average time taken per iteration: ", (time.time()-start)/100)
-
 
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
@@ -106,14 +102,16 @@ val_dataloader = DataLoader(val_subset,
 # backbone.pred_layer = torch.nn.Identity()
 # backbone = CNNEncoder(model_args)
 # backbone = MambaEncoder(model_args)
-model = models[model_name](model_args, conformer_args=conformer_args)
-# model = SimSiam(backbone)
+backbone = models[model_name](model_args, conformer_args=conformer_args)
+model = SimSiam(backbone)
 model = model.to(local_rank)
 
 model_suffix = 0
+checkpoint_dir = datetime_dir
+checkpoint_exp = exp_num
 if model_args.load_checkpoint:
-    datetime_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
-    exp_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
+    checkpoint_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
+    checkpoint_exp = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
     print(datetime_dir)
     print("loading checkpoint from: ", model_args.checkpoint_path)
     model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix='', load_backbone=False)
@@ -129,8 +127,8 @@ print(f"Number of parameters: {num_params}")
 if data_args.create_umap:
     umap_df = create_umap(model.module.encoder, val_dataloader, local_rank, use_w=False, dual=False)
     print("umap created: ", umap_df.shape)
-    umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
-    print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
+    umap_df.to_csv(f"{data_args.log_dir}/{checkpoint_dir}/umap_{checkpoint_exp}_ssl.csv", index=False)
+    print(f"umap saved at {data_args.log_dir}/{checkpoint_dir}/umap_{checkpoint_exp}_ssl.csv")
     exit()
 
     
@@ -187,18 +185,23 @@ complete_config = {
     "transforms": str(transforms),
     'trainer': trainer.__dict__
 }
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.json"
 with open(config_save_path, "w") as config_file:
-    yaml.dump(complete_config, config_file, default_flow_style=False)
+     json.dump(complete_config, config_file, indent=2, default=str)
 print(f"Configuration (with model structure) saved at {config_save_path}.")
-fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
+# fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
+# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=40, only_p=False, best='loss', conf=True) 
+                        early_stopping=40, best='loss', conf=True) 
 output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
 plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_lc_{exp_num}.png")
 plt.clf()
+
+umap_df = create_umap(model.module.encoder, val_dataloader, local_rank, use_w=False, dual=False)
+print("umap created: ", umap_df.shape)
+umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
+print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")

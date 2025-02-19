@@ -5,9 +5,9 @@ Data:
   dataset: "SpectraDataset"
   data_dir: '/data/lamost/data'
   model_name: MultiTaskRegressor
-  batch_size: 128
+  batch_size: 64
   num_epochs: 1000
-  exp_num: 1
+  exp_num: 5
   max_len_spectra: 4096
   continuum_norm: True
   max_days_lc: 720
@@ -71,9 +71,9 @@ CNNRegressor:
 
 MultiTaskRegressor:
   in_channels: 1
-  num_layers: 4
+  num_layers: 5
   stride: 1
-  encoder_dims: [64,128,256,512]
+  encoder_dims: [64,128,256,1024,2048]
   transformer_layers: 4
   kernel_size: 3
   dropout_p: 0.2
@@ -81,17 +81,16 @@ MultiTaskRegressor:
   output_dim: 3
   num_quantiles: 5
   beta: 1
-  load_checkpoint: False
+  load_checkpoint: True
   checkpoint_num: 1
   activation: "silu"
-  checkpoint_path: /data/lightSpec/logs/spec_decode2_2025-01-11/MultiTaskRegressor_spectra_decode_1.pth
-
+  checkpoint_path: '/data/lightSpec/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra_decode_4.pth'
 
 Conformer:
   encoder: ["mhsa_pro", "conv", "ffn"]
   timeshift: false
   num_layers: 8
-  encoder_dim: 512
+  encoder_dim: 2048
   num_heads: 8
   kernel_size: 3
   dropout_p: 0.2

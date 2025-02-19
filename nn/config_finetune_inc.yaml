@@ -24,46 +24,7 @@ Data:
   use_acf: True
   combined_embed: True
   pred_coeff_val: None
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-18/lightspec_1.pth'
-
-Astroconformer:
-  # Model
-  in_channels: 1
-  encoder: ["mhsa_pro", "conv", "mhsa_pro"]
-  decoder: ["mhsa_decoder",  "conv", "mhsa_decoder"]
-  timeshift: false
-  num_layers: 8
-  num_decoder_layers: 12
-  stride: 2
-  encoder_dim: 128
-  decoder_dim: 512
-  num_heads: 4
-  kernel_size: 3
-  dropout_p: 0.3
-  output_dim: 3
-  norm: "postnorm"
-  beta: 1
-  load_light_checkpoint: True
-  light_checkpoint_path: '/data/lightSpec/logs/exp5/astroconf_lc_1.pth'
-
-AstroEncoderDecoder:
-  # Model
-  in_channels: 1
-  encoder: ["mhsa_pro", "conv", "mhsa_pro"]
-  decoder: ["mhsa_decoder",  "conv", "mhsa_decoder"]
-  timeshift: false
-  num_layers: 6
-  num_decoder_layers: 6
-  stride: 2
-  encoder_dim: 512
-  decoder_dim: 512
-  num_heads: 4
-  kernel_size: 3
-  dropout_p: 0.2
-  output_dim: 3
-  norm: "postnorm"
-  load_spec_checkpoint: False
-  spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-08/lightspec_1.pth'
 
 MultiEncoder_lc:
   # Model
@@ -110,7 +71,7 @@ MultiTaskRegressor_spec:
   load_checkpoint: True
   checkpoint_num: 1
   activation: "silu"
-  checkpoint_path: "/data/lightSpec/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra_decode_4.pth"
+  checkpoint_path: "/data/lightSpec/logs/spec_decode2_2025-02-15/MultiTaskRegressor_spectra_decode_3.pth"
 
 
 Conformer_spec:
@@ -170,15 +131,6 @@ MultiEncoder_lightspec:
   avg_output: True
   checkpoint_path: ''
 
-Conformer_lightspec:
-  encoder: ["mhsa_pro", "conv", "ffn"]
-  timeshift: false
-  num_layers: 8
-  encoder_dim: 512
-  num_heads: 8
-  kernel_size: 3
-  dropout_p: 0.2
-  norm: "postnorm"
 
 Transformer_lightspec:
   in_channels: 1
@@ -193,52 +145,6 @@ Transformer_lightspec:
   load_checkpoint: False
 
 
-Conformer_lightspec:
-  encoder: ["mhsa_pro", "conv", "ffn"]
-  timeshift: false
-  num_layers: 4
-  stride: 2
-  encoder_dim: 256
-  num_heads: 8
-  kernel_size: 3
-  dropout_p: 0.2
-  norm: "shortcut"
-
-CNNEncoder:
-  # Model
-  in_channels: 1
-  num_layers: 8
-  stride: 1
-  encoder_dims: [32,64,128,256,512]
-  kernel_size: 3
-  dropout_p: 0.2
-  output_dim: 2
-  beta: 1
-  load_checkpoint: True
-  avg_output: True
-  checkpoint_num: 2
-  activation: "sine"
-  sine_w0: 1.0
-  load_checkpoint: True
-  checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
-
-CNNEncoderDecoder_lc:
-  # Model
-  in_channels: 1
-  num_layers: 8
-  stride: 1
-  encoder_dims: [32,64,128,256,512]
-  kernel_size: 3
-  dropout_p: 0.3
-  output_dim: 2
-  beta: 1
-  load_checkpoint: True
-  checkpoint_num: 1
-  activation: "sine"
-  sine_w0: 1.0
-  avg_output: True
-  checkpoint_path: '/data/lightSpec/logs/light_2025-02-04/CNNEncoderDecoder_lc_2.pth'
-
 MoCo:
   # Model
   K: 4096
@@ -249,7 +155,6 @@ MoCo:
   num_layers: 6
   freeze_lightcurve: False
   freeze_spectra: False
-  freeze_combined: False
   bidirectional: True
 
 predictor:

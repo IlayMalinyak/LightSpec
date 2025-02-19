@@ -165,13 +165,13 @@ class SimSiam(nn.Module):
         super().__init__()
         
         self.backbone = backbone
-        self.projector = projection_MLP(backbone.output_dim)
+        self.projector = projection_MLP(backbone.output_dim, backbone.output_dim // 4, backbone.output_dim // 4 )
 
         self.encoder = nn.Sequential( # f encoder
             self.backbone,
             self.projector
         )
-        self.predictor = prediction_MLP()
+        self.predictor = prediction_MLP(backbone.output_dim // 4, backbone.output_dim // 4, backbone.output_dim // 4)
     
     def forward(self, x1, x2):
         f, h = self.encoder, self.predictor
@@ -243,7 +243,7 @@ class MultiModalSimSiam(nn.Module):
         for param in self.spectra_backbone.parameters():
             param.requires_grad = False
     
-    def forward(self, lightcurve, spectra):
+    def forward(self, lightcurve, spectra, w=None):
         x1 = self.lightcurve_backbone(lightcurve)
         if isinstance(x1, tuple):
             x1 = x1[0]
@@ -254,4 +254,4 @@ class MultiModalSimSiam(nn.Module):
         z1, z2 = f(x1), f(x2)
         p1, p2 = h(z1), h(z2)
         L = D(p1, z2) / 2 + D(p2, z1) / 2
-        return {'loss': L}
+        return {'loss': L, 'logits1': z1, 'logits2': z2}

@@ -32,7 +32,7 @@ from nn.train import *
 from nn.utils import deepnorm_init, load_checkpoints_ddp, load_scheduler
 from nn.scheduler import WarmupScheduler
 from nn.optim import QuantileLoss, CQR
-from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn
+from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn, save_predictions_to_dataframe
 from features import create_umap
 
 
@@ -54,7 +54,8 @@ datetime_dir = f"spec_decode2_{current_date}"
 def test_dataset(dataset, num_iters=10):
     start_time = time.time()
     for i in range(num_iters):
-        x_masked, x, mask, _, info, _ = dataset[i]
+        x_masked, x, y, mask, info, _ = dataset[i]
+        print('y: ', len(y))
         if 'rv2' in info.keys():
             print(info['snrg'], info['snri'], info['snrr'], info['snrz'])
     print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.2f} seconds." \
@@ -92,8 +93,7 @@ model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 conformer_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
 model_args.num_quantiles = len(optim_args.quantiles)
-if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
-    os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
+os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                         ToTensor(),
@@ -151,9 +151,9 @@ print("model: ", model)
 
 checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
-    datetime_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
-    checkpoint_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
-    print(datetime_dir)
+    # datetime_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
+    # checkpoint_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
+    # print(datetime_dir)
     print("loading checkpoint from: ", model_args.checkpoint_path)
     model = load_checkpoints_ddp(model, model_args.checkpoint_path)
     print("loaded checkpoint from: ", model_args.checkpoint_path)
@@ -177,7 +177,7 @@ loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
 ssl_loss_fn = torch.nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{checkpoint_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{exp_num}_complete_config.yaml"
 
 complete_config = {
     "model_name": model_name,
@@ -201,36 +201,41 @@ trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=model_args.num_quantiles,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf, w_name='snrg',
-                           w_init_val=1,  exp_name=f"{model_name}_spectra_decode_{checkpoint_num}") 
+                                 accumulation_step=1, max_iter=np.inf, w_name='snrg',
+                           w_init_val=1,  exp_name=f"{model_name}_spectra_decode_{exp_num}") 
 
-fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=40, only_p=False, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{checkpoint_num}.json'
-with open(output_filename, "w") as f:
-    json.dump(fit_res, f, indent=2)
-fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra__decode_{checkpoint_num}.png")
-plt.clf()
+# fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+#                        early_stopping=40, best='loss', conf=True) 
+# output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra__decode_{exp_num}.json'
+# with open(output_filename, "w") as f:
+#     json.dump(fit_res, f, indent=2)
+# fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra__decode_{exp_num}.png")
+# plt.clf()
+#
+preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
 
 preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
+
+low_q = preds[:, :, 0] 
+high_q = preds[:, :, -1]
+coverage = np.mean((targets >= low_q) & (targets <= high_q))
+print('coverage: ', coverage)
+
+cqr_errs = loss_fn.calibrate(preds_val, targets_val)
 print(targets.shape, preds.shape)
-print(len(info['Teff']))
+preds = loss_fn.predict(preds, cqr_errs)
 
-try:
-    df_dict = {
-            **{f'target_{label}': targets[:, i] for i,label in enumerate(prediction_labels)},
-            **{f'pred_{label}': preds[:, i] for i,label in enumerate(prediction_labels)},
-            **info
-        }
+low_q = preds[:, :, 0]
+high_q = preds[:, :, -1]
+coverage = np.mean((targets >= low_q) & (targets <= high_q))
+print('coverage after calibration: ', coverage)
+df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
+df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv", index=False)
+print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv") 
 
-    df = pd.DataFrame(df_dict).to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_spectra_decode_{checkpoint_num}.csv",
-     index=False)
-except Exception as e:
-    df_dict = {
-            **{f'target_{label}': targets[:, i] for i,label in enumerate(prediction_labels)},
-            **{f'pred_{label}': preds[:, i] for i,label in enumerate(prediction_labels)},
-            'obsid': info['obsid']
-        }
-    df = pd.DataFrame(df_dict).to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_spectra_decode_{checkpoint_num}.csv",
-        index=False)
+umap_df = create_umap(model.module.encoder, test_dataloader, local_rank, use_w=False, dual=False)
+print("umap created: ", umap_df.shape)
+umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
+print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
+exit(0)

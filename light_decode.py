@@ -101,7 +101,7 @@ model = model.to(local_rank)
 checkpoint_num = int(model_args.checkpoint_num)
 if model_args.load_checkpoint:
     datetime_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
-    exp_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
+    # exp_num = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
     print(datetime_dir)
     print("loading checkpoint from: ", model_args.checkpoint_path)
     model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix='encoder.', load_backbone=True)

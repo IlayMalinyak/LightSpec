@@ -455,6 +455,7 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
         print(f"Number of samples: {len(info['Teff'])}")
 
     try:
+        id_name = [k for k in info.keys() if 'obsid' in k.lower()][0]
         # Create dictionary for targets and predictions
         df_dict = {
             # Add target values - use numpy array indexing
@@ -465,7 +466,7 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
                 for i, label in enumerate(prediction_labels)
                 for q_idx, quantile in enumerate(quantiles)
             },
-            'obsid': info['obsid'],
+            'obsid': info[id_name],
             'snrg': info['snrg'],
             'Teff': info['Teff']
             # Add info dictionary

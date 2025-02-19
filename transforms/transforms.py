@@ -7,6 +7,9 @@ import matplotlib.pyplot as plt
 import scipy.interpolate as interpolate
 from scipy.signal import medfilt
 from scipy.optimize import curve_fit
+import os
+from statsmodels.tsa.stattools import acf as A
+
 
 
 
@@ -31,7 +34,7 @@ class Compose:
         # print(f"Initial type: {out.dtype}")
         for t in self.transforms:
             out, mask, info = t(out, mask=mask, info=info)
-            # print(f"{t} took {time.time() - t0}, type: {out.dtype}")
+            # print(f"{t} took {time.time() - t0}, type: {out.dtype}, shape: {out.shape}")
             # if mask is not None:
             #     print("mask shape: ", mask.shape)
             # else:
@@ -272,14 +275,14 @@ class Normalize:
         if self.scheme == 'std':
             mean = np.mean(x_masked, axis=self.axis, keepdims=True)
             std = np.std(x_masked, axis=self.axis, keepdims=True)
-            info['norm_x'] =  (x - mean) / (std + 1e-8)
+            x =  (x - mean) / (std + 1e-8)
         elif self.scheme == 'minmax':
             min_val = np.min(x_masked, axis=self.axis, keepdims=True)
             max_val = np.max(x_masked, axis=self.axis, keepdims=True)
-            info['norm_x'] =  (x - min_val) / (max_val - min_val + 1e-8)
+            x =  (x - min_val) / (max_val - min_val + 1e-8)
         elif self.scheme == 'median':
             median = np.median(x_masked, axis=self.axis, keepdims=True)
-            info['norm_x'] =  x / median
+            x =  x / median
         return x, mask, info
 
     def _normalize_torch(self, x, mask=None, info=dict()):
@@ -289,14 +292,14 @@ class Normalize:
         if self.scheme == 'std':
             mean = torch.mean(x_masked, dim=self.axis, keepdim=True)
             std = torch.std(x_masked, dim=self.axis, keepdim=True)
-            info['norm_x'] =  (x - mean) / (std + 1e-8)
+            x =  (x - mean) / (std + 1e-8)
         elif self.scheme == 'minmax':
             min_val = torch.min(x_masked, dim=self.axis, keepdim=True)[0]
             max_val = torch.max(x_masked, dim=self.axis, keepdim=True)[0]
-            info['norm_x'] =  (x - min_val) / (max_val - min_val + 1e-8)
+            x =  (x - min_val) / (max_val - min_val + 1e-8)
         elif self.scheme == 'median':
             median = torch.median(x, dim=self.axis, keepdim=True)[0]
-            info['norm_x']  = x / median
+            x  = x / median
         return x, mask, info
 
     def __repr__(self):
@@ -717,3 +720,28 @@ class LAMOSTSpectrumPreprocessor:
                 f"blue_range={self.blue_range}, "
                 f"red_range={self.red_range}, "
                 f"resample_step={self.resample_step})")
+
+class ACF():
+    def __init__(self, max_lag_day=None, day_cadence=1/48,
+                   max_len=None):
+        self.max_lag_day = max_lag_day
+        self.day_cadence = day_cadence
+        self.max_len = max_len
+
+    def __call__(self, x, mask=None, info=None, step=None):
+        if isinstance(x, np.ndarray):
+            if self.max_lag_day is None:
+                acf = A(x, nlags=len(x))
+            else:
+                acf = A(x, nlags=self.max_lag_day/self.day_cadence - 1)
+            # if mask is not None:
+                # acf[mask] = np.nan
+            if self.max_len is not None and (len(acf) < self.max_len):
+                acf = np.pad(acf, ((0, self.max_len - len(acf))))           
+            info['acf'] = acf[None]
+
+        else:
+            raise NotImplementedError
+        return x, mask, info
+    def __repr__(self):
+        return f"ACF(max_lag={self.max_lag_day})"

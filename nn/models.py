@@ -3,8 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from nn.Modules.conformer import ConformerEncoder, ConformerDecoder
 from nn.Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding
-from nn.Modules.flash_mhsa import ParallelMHA as Flash_Mha
-from nn.Modules.mlp import ParallelMLP as MLP
+from nn.Modules.flash_mhsa import MHA as Flash_Mha
+from nn.Modules.mlp import Mlp as MLP
+from nn.simsiam import projection_MLP
 
 import numbers
 import torch.nn.init as init
@@ -285,6 +286,7 @@ class MultiTaskRegressor(nn.Module):
         super().__init__()
         self.encoder = MultiEncoder(args, conformer_args)
         self.decoder = CNNDecoder(args)
+        # self.projector = projection_MLP(conformer_args.encoder_dim)
         
         if args.activation == 'silu':
             self.activation = nn.SiLU()
@@ -293,19 +295,19 @@ class MultiTaskRegressor(nn.Module):
         else:
             self.activation = nn.ReLU()
         
+        encoder_dim = conformer_args.encoder_dim
         self.regressor = nn.Sequential(
-            nn.Linear(conformer_args.encoder_dim, conformer_args.encoder_dim//2),
-            nn.BatchNorm1d(conformer_args.encoder_dim//2),
+            nn.Linear(encoder_dim, encoder_dim//2),
+            nn.BatchNorm1d(encoder_dim//2),
             self.activation,
             nn.Dropout(conformer_args.dropout_p),
-            nn.Linear(conformer_args.encoder_dim//2, args.output_dim*args.num_quantiles)
+            nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
         )
     
     def forward(self, x, y=None):
         x_enc, x = self.encoder(x)
         output_reg = self.regressor(x_enc)
         output_dec = self.decoder(x)
-        
         return output_reg, output_dec
 
 class MultiResRegressor(nn.Module):
@@ -343,7 +345,8 @@ class MultiEncoder(nn.Module):
         else:
             x_enc = backbone_out.permute(0,2,1).clone()
             
-        RoPE = self.pe(x_enc, x_enc.shape[1])
+        RoPE = self.pe(x_enc, x_enc.shape[1]).nan_to_num(0)
+        x_enc = x_enc.nan_to_num(0)
         if torch.isnan(x_enc).sum() > 0:
             print("nans in rope x_enc: ", torch.isnan(x_enc).sum(), x_enc.shape)
         if torch.isnan(RoPE).sum() > 0:
@@ -415,7 +418,7 @@ class Transformer(nn.Module):
             self.layers.append(Block(args))
         self.norm = RMSNorm(args.encoder_dim)
         self.head = MLP(args.encoder_dim, out_features=args.output_dim*args.num_quantiles, dtype=torch.get_default_dtype())
-    
+        self.output_dim = args.output_dim*args.num_quantiles
     def forward(self, x, y=None):
         if len(x.shape)==2:
             x = x.unsqueeze(-1)
