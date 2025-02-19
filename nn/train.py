@@ -12,7 +12,9 @@ from tqdm import tqdm
 import torch.distributed as dist
 import umap
 from torch.profiler import profile, record_function, ProfilerActivity
-
+from sklearn.model_selection import KFold
+from torch.utils.data import Subset, DataLoader
+from util.utils import kepler_collate_fn
 # import wandb
 
 
@@ -241,12 +243,14 @@ class Trainer(object):
         return train_loss, all_accs/total
     
     def train_batch(self, batch, batch_idx, device):
-        lc,spec, y,_ = batch
+        lc,spec,_,_, y,info = batch
         b, _, _ = lc.shape
         spec = spec.to(device)
         lc = lc.to(device)
+        if isinstance(y, tuple):
+            y = torch.stack(y)
         y = y.to(device)
-        y_pred = self.model(spec.float(), lc.float())
+        y_pred = self.model(lc.float(), spec.float())
         y_pred = y_pred.reshape(b, -1, self.output_dim)
         if len(y.shape) == 1:
             y = y.unsqueeze(1)
@@ -288,13 +292,15 @@ class Trainer(object):
         return val_loss, all_accs/total
 
     def eval_batch(self, batch, batch_idx, device):
-        lc,spec,y,_ = batch
+        lc,spec,_,_,y,info = batch
         spec = spec.to(device)
         lc = lc.to(device)
         b, _, _ = lc.shape
+        if isinstance(y, tuple):
+            y = torch.stack(y)
         y = y.to(device)
         with torch.no_grad():
-            y_pred= self.model(spec.float(), lc.float())
+            y_pred= self.model(lc.float(), spec.float())
             y_pred = y_pred.reshape(b, -1, self.output_dim)
         if len(y.shape) == 1:
             y = y.unsqueeze(1)
@@ -336,6 +342,120 @@ class Trainer(object):
                 targets = np.concatenate((targets, y.cpu().numpy()))
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets
+
+class KFoldTrainer(Trainer):
+    """
+    A trainer class that implements k-fold cross validation by extending the base Trainer class.
+    """
+    def __init__(self, model, optimizer, criterion, dataset, device, n_splits=5, batch_size=32, 
+                 shuffle=True, **kwargs):
+        self.n_splits = n_splits
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        
+        # Create a dummy dataloader just to initialize parent class
+        dummy_dataloader = DataLoader(dataset, batch_size=batch_size)
+        super().__init__(model=model, optimizer=optimizer, criterion=criterion, 
+                        train_dataloader=dummy_dataloader, device=device, **kwargs)
+        
+        # Initialize k-fold splitter
+        self.kfold = KFold(n_splits=n_splits, shuffle=shuffle)
+
+    def train_fold(self, train_idx, val_idx, num_epochs, early_stopping=None):
+        """
+        Train the model on a specific fold.
+        
+        Args:
+            train_idx (array-like): Indices for training data
+            val_idx (array-like): Indices for validation data
+            num_epochs (int): Number of epochs to train
+            early_stopping (int, optional): Number of epochs to wait before early stopping
+        """
+        # Create train and validation datasets for this fold
+        train_subset = Subset(self.dataset, train_idx)
+        val_subset = Subset(self.dataset, val_idx)
+        
+        # Create data loaders for this fold
+        self.train_dl = DataLoader(train_subset, batch_size=self.batch_size, shuffle=self.shuffle, collate_fn=kepler_collate_fn)
+        self.val_dl = DataLoader(val_subset, batch_size=self.batch_size, shuffle=False, collate_fn=kepler_collate_fn)
+        
+        # Update samplers
+        self.train_sampler = self.get_sampler_from_dataloader(self.train_dl)
+        self.val_sampler = self.get_sampler_from_dataloader(self.val_dl)
+        
+        # Train the model for this fold
+        return self.fit(num_epochs, self.device, early_stopping=early_stopping)
+
+    def run_kfold(self, num_epochs, early_stopping=None):
+        """
+        Run k-fold cross validation.
+        
+        Args:
+            num_epochs (int): Number of epochs to train each fold
+            early_stopping (int, optional): Number of epochs to wait before early stopping
+        
+        Returns:
+            dict: Dictionary containing results from all folds
+        """
+        fold_results = []
+        
+        # Get indices for all samples
+        indices = np.arange(len(self.dataset))
+        
+        # Run training for each fold
+        for fold, (train_idx, val_idx) in enumerate(self.kfold.split(indices)):
+            print(f"\nTraining Fold {fold+1}/{self.n_splits}")
+            
+            # Reset model weights
+            self.model.apply(self._weight_reset)
+            
+            # Reset optimizer
+            # if hasattr(self, 'optimizer'):
+            #     self.optimizer.state = {}
+            #     for group in self.optimizer.param_groups:
+            #         group['lr'] = group['initial_lr']
+            #
+            # Train the fold
+            fold_result = self.train_fold(train_idx, val_idx, num_epochs, early_stopping)
+            fold_results.append(fold_result)
+            
+            # Save fold results
+            if self.log_path is not None:
+                fold_path = f'{self.log_path}/{self.exp_num}/fold_{fold+1}'
+                os.makedirs(fold_path, exist_ok=True)
+                torch.save(self.model.state_dict(), f'{fold_path}/model.pth')
+                
+                with open(f'{fold_path}/results.json', 'w') as f:
+                    json.dump(fold_result, f, indent=2)
+
+        # Calculate average metrics across folds
+        avg_metrics = self._calculate_average_metrics(fold_results)
+        
+        return {
+            'fold_results': fold_results,
+            'average_metrics': avg_metrics
+        }
+
+    @staticmethod
+    def _weight_reset(m):
+        """
+        Reset model weights.
+        """
+        if hasattr(m, 'reset_parameters'):
+            m.reset_parameters()
+
+    def _calculate_average_metrics(self, fold_results):
+        """
+        Calculate average metrics across all folds.
+        """
+        avg_metrics = {
+            'train_loss': np.mean([np.mean(fold['train_loss']) for fold in fold_results]),
+            'val_loss': np.mean([np.mean(fold['val_loss']) for fold in fold_results]),
+            'train_acc': np.mean([np.mean(fold['train_acc']) for fold in fold_results]),
+            'val_acc': np.mean([np.mean(fold['val_acc']) for fold in fold_results])
+        }
+        return avg_metrics
 
 class MaskedSSLTrainer(Trainer):
     def __init__(self, **kwargs):

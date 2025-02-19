@@ -224,15 +224,18 @@ print('coverage: ', coverage)
 
 cqr_errs = loss_fn.calibrate(preds_val, targets_val)
 print(targets.shape, preds.shape)
-preds = loss_fn.predict(preds, cqr_errs)
+preds_cqr = loss_fn.predict(preds, cqr_errs)
 
-low_q = preds[:, :, 0]
-high_q = preds[:, :, -1]
+low_q = preds_cqr[:, :, 0]
+high_q = preds_cqr[:, :, -1]
 coverage = np.mean((targets >= low_q) & (targets <= high_q))
 print('coverage after calibration: ', coverage)
 df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
 df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv", index=False)
 print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv") 
+df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, prediction_labels, optim_args.quantiles)
+df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv", index=False)
+print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv")
 
 umap_df = create_umap(model.module.encoder, test_dataloader, local_rank, use_w=False, dual=False)
 print("umap created: ", umap_df.shape)

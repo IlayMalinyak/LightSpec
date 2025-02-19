@@ -423,3 +423,23 @@ class FullGatherLayer(torch.autograd.Function):
         all_gradients = torch.stack(grads)
         dist.all_reduce(all_gradients)
         return all_gradients[dist.get_rank()]
+
+class MocoTuner(nn.Module):
+    """
+    class to fine tune a moco model
+    """
+    def __init__(self, moco_model, tune_args, freeze_moco=True):
+        super(MocoTuner, self).__init__()
+        self.moco_model = moco_model
+        if freeze_moco:
+            for name, parameter in self.moco_model.named_parameters():
+                parameter.requires_grad = False
+        self.tune_args = tune_args
+        self.predictor = Predictor(**tune_args)
+
+    def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
+        moco_out = self.moco_model(lightcurves, spectra, w=w, pred_coeff=pred_coeff)
+        q = moco_out['q']
+        preds = self.predictor(q, w=w)
+        return preds
+

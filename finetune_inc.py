@@ -32,11 +32,12 @@ from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor, Transformer
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
-from nn.moco import MultimodalMoCo, PredictiveMoco
+from nn.moco import MultimodalMoCo, PredictiveMoco, MocoTuner
 from nn.simsiam import SimSiam, projection_MLP
+from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
-from nn.train import ContrastiveTrainer
+from nn.train import KFoldTrainer
 from tests.test_unique_sampler import run_sampler_tests
 from features import multimodal_umap, create_umap
 
@@ -123,7 +124,7 @@ def create_train_test_dfs():
 
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
-datetime_dir = f"lightspec_{current_date}"
+datetime_dir = f"inc_finetune_{current_date}"
 
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/config_finetune_inc.yaml'
@@ -134,7 +135,6 @@ spec_model_name = data_args.spec_model_name
 combined_model_name = data_args.combined_model_name
 if data_args.test_run:
     datetime_dir = f"test_{current_date}"
-
 light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{light_model_name}_lc'])
 spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{spec_model_name}_spec'])
 combined_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{combined_model_name}_combined'])
@@ -143,10 +143,11 @@ conformer_args_spec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer
 conformer_args_combined = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_combined'])
 lightspec_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiEncoder_lightspec'])
 transformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer_lightspec'])
-loss_args = Container(**yaml.safe_load(open(args_dir, 'r'))['loss'])
 predictor_args = Container(**yaml.safe_load(open(args_dir, 'r'))['predictor'])
+loss_args = Container(**yaml.safe_load(open(args_dir, 'r'))['loss'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
-optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
+optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
+tuner_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Tuner'])
 
 os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
@@ -159,18 +160,8 @@ light_transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
 spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                             ToTensor()
                            ])
-train_df, val_df = create_train_test_dfs()
-val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42) 
+train_df, test_df = create_train_test_dfs()
 train_dataset = FineTuneDataset(df=train_df, light_transforms=light_transforms,
-                                spec_transforms=spec_transforms,
-                                npy_path = '/data/lightPred/data/npy',
-                                spec_path = data_args.spectra_dir,
-                                light_seq_len=int(data_args.max_len_lc),
-                                spec_seq_len=int(data_args.max_len_spectra),
-                                use_acf=data_args.use_acf,
-                                labels=['inc']
-                                )
-val_dataset = FineTuneDataset(df=val_df, light_transforms=light_transforms,
                                 spec_transforms=spec_transforms,
                                 npy_path = '/data/lightPred/data/npy',
                                 spec_path = data_args.spectra_dir,
@@ -193,14 +184,6 @@ test_dataset =FineTuneDataset(df=test_df, light_transforms=light_transforms,
 for i in range(10):
     light, spec, _, _, y, info = train_dataset[i]
     print("train dataset: ", light.shape, spec.shape, y)
-
-train_dl = DataLoader(train_dataset, batch_size=data_args.batch_size,
-                      sampler=train_sampler, num_workers=4, pin_memory=True)
-val_dl = DataLoader(val_dataset, batch_size=data_args.batch_size,
-                    sampler=val_sampler, num_workers=4, pin_memory=True)
-test_dl = DataLoader(test_dataset, batch_size=1,
-                     sampler=test_sampler, num_workers=4, pin_memory=True)
-
 
 light_backbone = MODELS[light_model_name](light_model_args, conformer_args=conformer_args_lc)
 if light_model_name == 'Astroconformer':
@@ -240,16 +223,15 @@ if data_args.combined_embed:
 
 else:
     combined_encoder = None
-# backbone = Transformer(transformer_args_lightspec)
 
-# model = MultimodalMoCo(spec_model.encoder, light_model.encoder, transformer_args_lightspec,  **moco_args.get_dict()).to(local_rank)
-# model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
-model = PredictiveMoco(spec_model.encoder, light_model.encoder,
+moco_model = PredictiveMoco(spec_model.encoder, light_model.encoder,
                          transformer_args_lightspec,
                          predictor_args.get_dict(),
                          loss_args,
                         combined_encoder=combined_encoder,
+                        calc_loss=False,
                         **moco_args.get_dict()).to(local_rank)
+
 
 
 if data_args.load_checkpoint:
@@ -257,14 +239,39 @@ if data_args.load_checkpoint:
     exp_num = os.path.basename(data_args.checkpoint_path).split('.')[0].split('_')[-1]
     print(datetime_dir)
     print("loading checkpoint from: ", data_args.checkpoint_path)
-    model = load_checkpoints_ddp(model, data_args.checkpoint_path)
+    moco_model = load_checkpoints_ddp(moco_model, data_args.checkpoint_path)
     print("loaded checkpoint from: ", data_args.checkpoint_path)
 
-model = DDP(model, device_ids=[local_rank])
+model = MocoTuner(moco_model, tuner_args.get_dict()).to(local_rank)
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of trainble parameters: {num_params}")
 all_params = sum(p.numel() for p in model.parameters())
 print(f"Total parameters in model: {all_params}")
-print("number of training samples: ", len(train_dataset), len(val_dataset))
+print("number of training samples: ", len(train_dataset), len(test_dataset))
+
+loss_fn = CQR(quantiles=optim_args.quantiles)
+optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
+
+kfold_trainer = KFoldTrainer(
+    model=model,
+    optimizer=optimizer,
+    criterion=loss_fn,
+    dataset=train_dataset,
+    device=local_rank,
+    n_splits=5,
+    batch_size=data_args.batch_size,
+    output_dim=1,
+    log_path=data_args.log_dir,
+    exp_num=datetime_dir,
+    exp_name=f"inc_finetune_{exp_num}",
+)
+
+# Run k-fold cross validation
+results = kfold_trainer.run_kfold(num_epochs=100, early_stopping=10)
+
+# Access results
+print("Average metrics:", results['average_metrics'])
+print("Individual fold results:", results['fold_results'])
 

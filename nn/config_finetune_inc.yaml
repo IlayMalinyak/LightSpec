@@ -19,12 +19,12 @@ Data:
   meta_columns: ['Teff', 'Mstar']
   test_run: False
   create_umap: False
-  load_checkpoint: False
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
   combined_embed: True
   pred_coeff_val: None
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-08/lightspec_1.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-18/lightspec_2.pth'
 
 MultiEncoder_lc:
   # Model
@@ -37,7 +37,7 @@ MultiEncoder_lc:
   output_dim: 2
   beta: 1
   avg_output: True
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
@@ -68,7 +68,7 @@ MultiTaskRegressor_spec:
   output_dim: 3
   num_quantiles: 5
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "silu"
   checkpoint_path: "/data/lightSpec/logs/spec_decode2_2025-02-15/MultiTaskRegressor_spectra_decode_3.pth"
@@ -96,7 +96,7 @@ MultiEncoder_combined:
   output_dim: 2
   beta: 1
   avg_output: True
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
@@ -163,6 +163,11 @@ predictor:
   out_dim: 64
   w_dim: 2
 
+Tuner:
+  in_dim: 128
+  hidden_dim: 512
+  out_dim: 5
+
 loss:
   sim_coeff: 25
   std_coeff: 25 
@@ -218,3 +223,4 @@ Optimization:
   weight_decay: 5e-6
   warmup_pct: 0.3
   steps_per_epoch: 3500
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
