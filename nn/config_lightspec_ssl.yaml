@@ -2,7 +2,7 @@ Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
   exp_num: 1
-  light_model_name: "MultiEncoder"
+  light_model_name: "MultiTaskRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
   # Data
@@ -12,19 +12,22 @@ Data:
   batch_size: 4
   num_epochs: 1000
   max_len_spectra: 4096
-  max_days_lc: 270
-  max_len_lc: 13056
+  max_days_lc: 540
+  max_len_lc: 26112
   lc_freq: 0.0208
   continuum_norm: True
   meta_columns: ['Teff', 'Mstar']
+  labels: ['Teff', 'logg', 'FeH', 'Rstar', 'RUWE']
   test_run: False
   create_umap: False
   load_checkpoint: False
   masked_transform: False
   use_acf: True
-  combined_embed: True
+  scale_flux: False
+  combined_embed: False
   pred_coeff_val: None
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-18/lightspec_1.pth'
+  approach: "multitask"
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-24/lightspec_2.pth'
 
 Astroconformer:
   # Model
@@ -93,6 +96,25 @@ Conformer_lc:
   kernel_size: 3
   dropout_p: 0.2
   norm: "shortcut"
+
+MultiTaskRegressor_lc:
+  in_channels: 2
+  num_layers: 5
+  stride: 1
+  encoder_dims: [64,128,256,1024,2048]
+  transformer_layers: 4
+  kernel_size: 3
+  dropout_p: 0.2
+  avg_output: True
+  output_dim: 2
+  num_quantiles: 5
+  beta: 1
+  load_checkpoint: True
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+  checkpoint_path: "/data/lightSpec/logs/light_2025-03-01/MultiTaskRegressor_lc_2.pth"
+
 
 
 MultiTaskRegressor_spec:
@@ -258,6 +280,14 @@ predictor:
   out_dim: 64
   w_dim: 2
 
+
+reg_predictor:
+  in_dim: 128
+  hidden_dim: 512
+  out_dim: 20
+  w_dim: 0
+
+
 loss:
   sim_coeff: 25
   std_coeff: 25 
@@ -297,7 +327,7 @@ conv_args:
   avg_output: True
   activation: "silu"
   
-Optimization SSL:
+Optimization:
   # Optimization
   max_lr:  5e-5
   weight_decay: 1e-6
@@ -306,10 +336,5 @@ Optimization SSL:
   momentum: 0.95
   nesterov: true
   optimizer: "adamw"
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
 
-Optimization:
-  # Optimization
-  max_lr: 1e-5
-  weight_decay: 5e-6
-  warmup_pct: 0.3
-  steps_per_epoch: 3500

@@ -10,6 +10,7 @@ from multiprocessing import Pool, cpu_count, Manager
 from functools import partial
 import tqdm
 warnings.filterwarnings("ignore")
+import traceback
 
 class GracefulTimeoutException(Exception):
     pass
@@ -60,6 +61,7 @@ def process_single_item(idx_dataset_tuple, root_data_folder, folder_name, result
         return f'Successfully processed {kid}'
     except Exception as e:
         print(f'Error processing {idx}: {str(e)}', flush=True)
+        traceback.print_exc()
         results_dict['errors'] += 1
         return f'Error processing index {idx}: {str(e)}'
 
@@ -104,7 +106,10 @@ def kepler_fits_to_npy(raw=False, num_processes=None):
             kepler_df = get_all_samples_df(num_qs=None)
             print("filtering existings files....")
             existing_files = os.listdir(f"{root_data_folder}/{folder_name}")
-            kepler_df['exists'] = kepler_df.apply(lambda x: f"{x['KID']}.npy" in existing_files, axis=1)
+            if len(existing_files):
+                kepler_df['exists'] = kepler_df.apply(lambda x: f"{x['KID']}.npy" in existing_files, axis=1)
+            else:
+                kepler_df['exists'] = False
             kepler_df = kepler_df[~kepler_df['exists']]
             print(f"finished filter with {len(kepler_df)} samples")
             
@@ -114,6 +119,7 @@ def kepler_fits_to_npy(raw=False, num_processes=None):
                 target_transforms=None,
                 npy_path=None,
                 seq_len=None,
+                scale_flux=not raw
             )
             print(f"Total dataset size: {len(train_dataset)}")
            # Use SLURM CPU count if available, otherwise fall back to CPU count - 1

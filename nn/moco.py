@@ -298,6 +298,7 @@ class PredictiveMoco(MultimodalMoCo):
             + self.loss_args.std_coeff * std_loss
             + self.loss_args.cov_coeff * cov_loss
         )
+        loss = loss.nan_to_num(0)
         return loss
     
     def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
@@ -318,7 +319,8 @@ class PredictiveMoco(MultimodalMoCo):
 
         q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
         q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
-        
+        q_s = q_s.nan_to_num(0)
+        q_l = q_l.nan_to_num(0)
         if not self.calc_loss:
             return {
                     'q': torch.cat((q_l, q_s),dim=-1)
@@ -338,6 +340,7 @@ class PredictiveMoco(MultimodalMoCo):
         loss_s, logits_s, labels = self.contrastive_loss(
             q_s, k_l, self.lightcurve_queue
         )
+        cont_loss = loss_s
 
         loss_s = pred_coeff * loss_s_pred + (1 - pred_coeff) * loss_s
 
@@ -351,6 +354,8 @@ class PredictiveMoco(MultimodalMoCo):
             loss_l, logits_l, labels_l = self.contrastive_loss(
                 q_l, k_s, self.spectra_queue
             )
+
+            cont_loss = (cont_loss + loss_l) / 2
 
             loss_l = pred_coeff * loss_l_pred + (1 - pred_coeff) * loss_l
             
@@ -367,13 +372,15 @@ class PredictiveMoco(MultimodalMoCo):
             loss = loss_s
             loss_l = None
             logits = logits_s
+            loss_pred = loss_s_pred
             q = q_l
             k = k_s
-
+        loss = loss.nan_to_num(0)
         return {
             'loss': loss,
             'logits': logits,
             'loss_pred': loss_pred,
+            'loss_contrastive': cont_loss,
             'loss_s': loss_s,
             'loss_l': loss_l,
             'loss_l_pred': loss_l_pred,
@@ -383,6 +390,26 @@ class PredictiveMoco(MultimodalMoCo):
             'k': k
         }
 
+
+class MultiTaskMoCo(nn.Module):
+    """
+    Multitask MoCo model with shared encoder for light curves and spectra.
+    """
+    def __init__(
+        self,
+        moco_model,
+        predictor_args,
+    ):
+        super(MultiTaskMoCo, self).__init__()
+        self.moco_model = moco_model
+        self.predictor = Predictor(**predictor_args)
+    def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
+        moco_out = self.moco_model(lightcurves, spectra, w=w, pred_coeff=pred_coeff)
+        q = moco_out['q']
+        preds = self.predictor(q)
+        moco_out['preds'] = preds
+        return moco_out
+       
 
 class Predictor(nn.Module):
     """
@@ -428,7 +455,7 @@ class MocoTuner(nn.Module):
     """
     class to fine tune a moco model
     """
-    def __init__(self, moco_model, tune_args, freeze_moco=True):
+    def __init__(self, moco_model, tune_args, freeze_moco=False):
         super(MocoTuner, self).__init__()
         self.moco_model = moco_model
         if freeze_moco:

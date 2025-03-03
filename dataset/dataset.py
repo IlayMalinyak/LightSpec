@@ -276,7 +276,9 @@ class KeplerDataset():
                 seq_len:int=34560,
                 target_transforms:object=None,
                 masked_transforms:bool=False,
-                use_acf:bool=False
+                use_acf:bool=False,
+                scale_flux:bool=True,
+                labels:object=None
                 ):
         """
         dataset for Kepler data
@@ -301,7 +303,8 @@ class KeplerDataset():
                 self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
         self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
         self.use_acf = use_acf
-            
+        self.scale_flux = scale_flux
+        self.labels = labels
 
     def __len__(self):
         return len(self.df)
@@ -355,9 +358,15 @@ class KeplerDataset():
                         'LOGG': row['logg'],
                         'M':row['Mstar'],
                         'FeH': row['FeH'],
-                        'KMAG': row['kmag_abs']}
+                        'KMAG': row['kmag_abs'],
+                        'Dist': row['Dist']}
             else:
-                meta = {'TEFF': None, 'RADIUS': None, 'LOGG': None, 'M': None, 'FeH':None, 'KMAG': None}
+                meta = {'TEFF': None, 'RADIUS': None,
+                        'LOGG': None, 'M': None, 'FeH':None,
+                        'KMAG': None, 'Dist': None}
+            if self.labels is not None:
+                for label in self.labels:
+                    meta[label] = row[label]
             
             if 'predicted period' in row.keys():
                 meta['predicted period'] = row['predicted period']
@@ -368,9 +377,12 @@ class KeplerDataset():
             return x, meta, None, y_val
         else:
             paths = row['data_file_path']
+            meta = {}
             for i in range(len(paths)):
                 x, time, meta = self.read_lc(paths[i])
-                meta['M'] = None
+                meta = dict(meta.items())
+                meta['M'] = row['Mstar'] if 'Mstar' in row.keys() else None
+                meta['Dist'] = row['Dist'] if 'Dist' in row.keys() else None
                 if i == 0:
                     x_tot = x.copy()
                 else:
@@ -406,26 +418,28 @@ class KeplerDataset():
 
     def __getitem__(self, idx):
         tic = time.time()
-        x, meta, qs, p_val = self.read_row(idx)
+        x, info, qs, p_val = self.read_row(idx)
         x = self.fill_nan_np(x, interpolate=True)
-        info = {'idx': idx}
+        info['idx'] =  idx
         info['qs'] = qs
         info['period'] = p_val
         info_y = copy.deepcopy(info)
-        x /= x.max()
+        if self.scale_flux:
+            x /= x.max()
         target = x.copy()
         mask = None
         if self.transforms is not None:
             try:
                 x, mask, info = self.transforms(x, mask=None, info=info)
                 if self.seq_len > x.shape[0]:
-                    x = F.pad(x, ((0, 0,0, self.seq_len - x.shape[-1],)), "constant", value=0)
+                    x = F.pad(x, ((0, 0,0, self.seq_len - x.shape[-1],)), "constant", value=x.squeeze()[-1].item())
                     if mask is not None:
                         mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
                     else:
                         mask = torch.zeros_like(x)
                 x = x[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
-                mask = mask[:self.seq_len,:].squeeze().unsqueeze(0)
+                if mask is not None:
+                    mask = mask[:self.seq_len,:].squeeze().unsqueeze(0)
                 if self.use_acf:
                     acf = torch.tensor(info['acf']).nan_to_num(0)
                     x = torch.cat((x, acf), dim=0)
@@ -446,7 +460,8 @@ class KeplerDataset():
                     else:
                         mask_y = torch.zeros_like(target)
                 target = target[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
-                mask_y = mask_y[:self.seq_len,:].squeeze().unsqueeze(0)
+                if mask_y is not None:
+                    mask_y = mask_y[:self.seq_len,:].squeeze().unsqueeze(0)
                 if self.use_acf:
                     acf = torch.tensor(info_y['acf']).nan_to_num(0)
                     target = torch.cat((target, acf), dim=0)
@@ -454,40 +469,39 @@ class KeplerDataset():
                 print(f"Error in target transforms for index {idx}: {str(e)}")
                 target = torch.zeros(1, self.seq_len) if not self.use_acf else torch.zeros(2, self.seq_len)
                 mask_y = torch.zeros(1, self.seq_len)
-        elif 'predicted period' in meta.keys():
-            target = torch.tensor([np.log10(meta['predicted period'])])
-            mask_y = torch.zeros_like(target)
-        elif 'Pmax' in meta.keys():
-            target = torch.tensor([np.log10(meta['Pmax']), np.log10(meta['Pmin'])])
-            mask_y = torch.zeros_like(target)
+       
         else:
-            target = x.clone()
-            mask_y = torch.zeros_like(target)
-        if len(meta):
-            info['Teff'] = meta['TEFF'] if meta['TEFF'] is not None else 0
-            info['R'] = meta['RADIUS'] if meta['RADIUS'] is not None else 0
-            info['logg'] = meta['LOGG'] if meta['LOGG'] is not None else 0
-            info['kmag_abs'] = meta['KMAG'] if meta['KMAG'] is not None else 0
-            info['FeH'] = meta['FeH'] if meta['FeH'] is not None else 0
-            info['Mstar'] = meta['M'] if meta['M'] is not None else 0
+            target = x.clone() if not self.use_acf else x[0].clone()
+            mask_y = mask
+            if self.mask_transform is not None:
+                to_mask = x if not self.use_acf else x[0]
+                x, mask, info = self.mask_transform(to_mask, mask=None, info=info)
+                if self.use_acf:
+                    acf = torch.tensor(info['acf']).nan_to_num(0)
+                    x = torch.cat((x.unsqueeze(0), acf), dim=0)
+        info['Teff'] = info['TEFF']
+        info['Mstar'] = info['M']
+        info['logg'] = info['LOGG']
+        info['R'] = info['RADIUS']
+        info['kmag_abs'] = info['KMAG']
+       
         info['KID'] = self.df.iloc[idx]['KID']
-        if 'predicted period' in meta.keys():
-            info['predicted period'] = meta['predicted period']
-            info['mean_period_confidence'] = meta['mean_period_confidence']
-        if 'Pmax' in meta.keys():
-            info['Pmax'] = meta['Pmax']
-            info['Pmin'] = meta['Pmin']
         toc = time.time()
         info['time'] = toc - tic
         if mask is None:
             mask = torch.zeros_like(x)
         if mask_y is None:
             mask_y = torch.zeros_like(target)
-
+        if self.labels is not None:
+            if 'Teff' in self.labels:
+                info['Teff'] /= T_sun
+            y = torch.tensor([info[label] for label in self.labels], dtype=torch.float32)
+        else:
+            y = target
         # Ensure info and info_y are always dictionaries
         info = info if isinstance(info, dict) else {}
         info_y = info_y if isinstance(info_y, dict) else {}
-        result = (x.float(), target.float(), target.float(), mask, info, info_y)
+        result = (x.float(), target.float(), y, mask, info, info_y)
         if any(item is None for item in result):
             print(f"Warning: None value in result for index {idx}")
             print(f"x: {x.shape if x is not None else None}")
@@ -522,16 +536,18 @@ class LightSpecDataset(KeplerDataset):
                 spec_transforms:object=None,
                 light_seq_len:int=34560,
                 use_acf:bool=False,
+                scale_flux:bool=True,
                 spec_seq_len:int=3909,
-                meta_columns = ['Teff', 'Mstar', 'logg'],
+                meta_columns = ['Teff', 'Mstar', 'logg'], labels=None
                 ):
         super().__init__(df, prot_df, npy_path, light_transforms,
-                light_seq_len, target_transforms=light_transforms, use_acf=use_acf)
+                light_seq_len, target_transforms=light_transforms, use_acf=use_acf, scale_flux=scale_flux)
         self.spec_path = spec_path
         self.spec_transforms = spec_transforms
         self.spec_seq_len = spec_seq_len
         self.meta_columns = meta_columns
         self.masked_transform = RandomMasking()
+        self.labels = labels
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:
@@ -570,9 +586,101 @@ class LightSpecDataset(KeplerDataset):
             w = torch.tensor([info[c] for c in self.meta_columns], dtype=torch.float32)
             info['w'] = w
         # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
-        return (light.float().squeeze(0), spectra.float().squeeze(0), light_target.float().squeeze(0),
+        if self.labels is not None:
+            y = torch.tensor([info[label] for label in self.labels], dtype=torch.float32)
+        else:
+            y = light_target
+        return (light.float().squeeze(0), spectra.float().squeeze(0), y,
          masked_spectra.float().squeeze(0), info, info)
     
+
+class LightSpecDatasetV2(KeplerDataset):
+    def __init__(self, lc_df:pd.DataFrame=None,
+                 lc_data_dir:str=None,
+                 spec_df:pd.DataFrame=None,
+                 spec_data_dir:str=None,
+                 shared_df:pd.DataFrame=None,
+                 main_type:str='spectra',
+                 spec_col:str='combined_obsid',
+                 lc_col:str='KID',
+                 light_transforms:object=None,
+                 spec_transforms:object=None,
+                 light_seq_len:int=13506,
+                 spec_seq_len:int=4096,
+                 **kwargs):
+        self.lc_df = lc_df
+        self.lc_data_dir = lc_data_dir
+        self.spec_df = spec_df
+        self.spec_data_dir = spec_data_dir
+        self.shared_df = shared_df
+        self.spec_col = spec_col
+        self.lc_col = lc_col
+        self.main_type = main_type
+        self.spec_transforms = spec_transforms
+        self.light_transforms = light_transforms
+        self.light_seq_len = light_seq_len
+        self.spec_seq_len = spec_seq_len
+        super().__init__(df=lc_df,
+                        transforms=light_transforms,
+                         target_transforms=light_transforms,
+                        seq_len=light_seq_len,
+                         **kwargs)
+        self.mask_transform = RandomMasking()
+    def read_lamost_spectra(self, filename):
+        with fits.open(filename) as hdulist:
+          binaryext = hdulist[1].data
+          header = hdulist[0].header
+        x = binaryext['FLUX'].astype(np.float32)
+        wv = binaryext['WAVELENGTH'].astype(np.float32)
+        rv = header['HELIO_RV']
+        meta = {'RV': rv, 'wavelength': wv}
+        return x, meta
+    
+    def create_spectra_sample(self, spectra, meta):
+        spectra_masked = spectra.copy()
+        if self.spec_transforms:
+            spectra, _, meta = self.spec_transforms(spectra, None, meta)
+            spectra_masked, mask, _ = self.mask_transform(spectra, None, meta)
+ 
+        if spectra_masked.shape[-1] < self.spec_seq_len:
+            pad = torch.zeros(1, self.spec_seq_len - spectra_masked.shape[-1])
+            spectra_masked = torch.cat([spectra_masked, pad], dim=-1)
+            pad_mask = torch.zeros(1, self.spec_seq_len  - mask.shape[-1], dtype=torch.bool)
+            mask = torch.cat([mask, pad_mask], dim=-1)
+            pad_spectra = torch.zeros(1, self.spec_seq_len - spectra.shape[-1])
+            spectra = torch.cat([spectra, pad_spectra], dim=-1)
+        spectra = torch.nan_to_num(spectra, nan=0)
+        spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
+        return spectra, spectra_masked, mask, meta        
+
+    def __getitem__(self, idx):
+        if self.main_type == 'spectra':
+            spec_id = self.spec_df.iloc[idx][self.spec_col]
+            filepath = f"{self.spec_data_dir}/{spec_id}.fits"
+            spectra, meta = self.read_lamost_spectra(filepath)
+            spectra, spectra_masked, mask, info_spec = self.create_spectra_sample(spectra, meta)
+            if spec_id in self.shared_df[self.spec_col].values:
+                shared_idx = self.shared_df[self.shared_df[self.spec_col] == spec_id].index[0]
+                lc , lc_target, _, _, info_lc, _ = super().__getitem__(shared_idx)
+            else: 
+                lc = torch.zeros(1, self.seq_len) if not self.use_acf else torch.zeros(2, self.seq_len)
+                lc_target = torch.zeroslike(lc)
+                info_lc = {'data_dir': self.data_dir}
+        else:
+            lc, lc_target, _, _, info_lc, _ = super().__getitem__(idx)
+            lc_id = self.lc_df.iloc[idx][self.lc_col]
+            if lc_id in self.shared_df[self.lc_col].values:
+                shared_idx = self.shared_df[self.shared_df[self.lc_col] == lc_id].index[0]
+                filepath = f"{self.lc_data_dir}/{lc_id}.fits"
+                spectra, meta = self.read_lamost_spectra(filepath)
+                spectra, spectra_masked, mask, info_spec = self.create_spectra_sample(spectra,meta)
+            else:
+                spectra = torch.zeros(1, self.spec_seq_len)
+                spectra_masked = torch.zeros(1, self.spec_seq_len)
+                mask = torch.zeros(1, self.spec_seq_len)
+                info_spec = {}
+        return (lc.float().squeeze(0), spectra.float().squeeze(0), lc_target.float().squeeze(0),
+            spectra_masked.float().squeeze(0), info_lc, info_spec)
 
 class FineTuneDataset(LightSpecDataset):
     """

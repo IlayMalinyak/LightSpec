@@ -4,20 +4,20 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  model_name: "MultiEncoder"
-  batch_size: 64
+  model_name: "MultiTaskSimSiam"
+  batch_size: 16
   num_epochs: 1000
-  exp_num: 2
+  exp_num: 1
   max_len_spectra: 4096
   max_days_lc: 270
-  max_len_lc: 13056
+  max_len_lc: 26112
   lc_freq: 0.0208
   create_umap: False
   masked_transform: False
   use_acf: True
   scale_flux: False
-  ssl_weight: 0.9
-  labels: ['logg']
+  labels: ['Teff', 'kmag_abs']
+
 
 Conformer:
   encoder: ["mhsa_pro", "conv", "ffn"]
@@ -30,6 +30,40 @@ Conformer:
   dropout_p: 0.2
   norm: "shortcut"
 
+MultiTaskRegressor:
+  in_channels: 2
+  num_layers: 5
+  stride: 1
+  encoder_dims: [64,128,256,1024,2048]
+  transformer_layers: 4
+  kernel_size: 3
+  dropout_p: 0.2
+  avg_output: True
+  output_dim: 4
+  num_quantiles: 5
+  beta: 1
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-01/MultiTaskRegressor_lc_2.pth'
+
+MultiTaskSimSiam:
+  # Model
+  in_channels: 2
+  num_layers: 8
+  stride: 1
+  encoder_dims: [32,64,128,256,512,2048]
+  kernel_size: 3
+  dropout_p: 0.1
+  output_dim: 2
+  beta: 1
+  avg_output: True
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+  checkpoint_path: ''
 
 MultiEncoder:
   # Model
@@ -39,7 +73,7 @@ MultiEncoder:
   encoder_dims: [32,64,128,256,512,2048]
   kernel_size: 3
   dropout_p: 0.1
-  output_dim: 1
+  output_dim: 2
   beta: 1
   avg_output: True
   load_checkpoint: False
@@ -115,17 +149,13 @@ Mamba:
   sine_w0: 1.0
 
 
-Optimization SSL:
+Optimization:
   # Optimization
   max_lr: 5e-5
   weight_decay: 1e-5
   warmup_pct: 0.15
   steps_per_epoch: 2500
-  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+  quantiles: [0.1,0.25,0.5,0.75,0.9]
+  sb_weight: 0.1
+  energy_weight: 0
 
-Optimization:
-  # Optimization
-  max_lr: 1e-5
-  weight_decay: 5e-6
-  warmup_pct: 0.3
-  steps_per_epoch: 3500

@@ -417,7 +417,7 @@ def extract_date(p):
         print("No date found in the path.")
 
 
-def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quantiles, 
+def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quantiles,id_name='obsid', 
                                 save_path=None, verbose=True):
     """
     Save model predictions, including quantile predictions, to a DataFrame and optionally to CSV.
@@ -455,7 +455,7 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
         print(f"Number of samples: {len(info['Teff'])}")
 
     try:
-        id_name = [k for k in info.keys() if 'obsid' in k.lower()][0]
+        # id_name = [k for k in info.keys() if 'obsid' in k.lower()][0]
         # Create dictionary for targets and predictions
         df_dict = {
             # Add target values - use numpy array indexing
@@ -466,12 +466,13 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
                 for i, label in enumerate(prediction_labels)
                 for q_idx, quantile in enumerate(quantiles)
             },
-            'obsid': info[id_name],
-            'snrg': info['snrg'],
+            id_name: info[id_name],
             'Teff': info['Teff']
             # Add info dictionary
             # **info
         }
+        if 'snrg' in info.keys():
+            df_dict['snrg'] = info['snrg']
         for key, value in df_dict.items():
             print(key, end=': ')
             if isinstance(value, np.ndarray):
@@ -491,10 +492,11 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
                 for i, label in enumerate(prediction_labels)
                 for q_idx, quantile in enumerate(quantiles)
             },
-            'obsid': info['obsid'],
-            'snrg': info['snrg'],
+            id_name: info['obsid'],
             'Teff': info['Teff']
         }
+        if 'snrg' in info.keys():
+            df_dict['snrg'] = info['snrg']
         for key, value in df_dict.items():
             if isinstance(value, np.ndarray):
                 print(value.shape)

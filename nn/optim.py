@@ -3,9 +3,68 @@ import torch.nn as nn
 from typing import Optional, Sequence
 from torch import Tensor
 from torch.nn import functional as F
+from util.cgs_consts import *
 import numpy as np
 import warnings
 
+class StephanBoltzmanLoss(nn.Module):
+    def __init__(self, reduction: str = 'mean', max_T: float = 5, max_R: float = 10) -> None:
+        super(StephanBoltzmanLoss, self).__init__()
+        self.reduction = reduction
+        self.max_T = max_T
+        self.max_R = max_R
+
+    def get_rule(self, x):
+        """
+        calculate Luminosity using Stephan-Boltzman Law
+        assuming the input is in shape (batch_size, labels, num_quantile) and the order of [T, R,...] in solar units
+        """
+        num_quantile = x.shape[-1]
+        median = num_quantile // 2
+        T = x[:, 0, median]
+        R = x[:, 1, median]
+        mask_T_max = T > self.max_T
+        mask_R_max = R > self.max_R
+        mask_T_min = T < 0
+        mask_R_min = R < 0
+        mask = mask_T_max | mask_R_max | mask_T_min | mask_R_min
+        log_L = torch.log10(sigma_sb * 4 * np.pi * (x[:, 1, median] * R_sun) ** 2 * (x[:, 0, median] * 5778) ** 4 / L_sun) 
+        return log_L, mask
+
+        
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        l_hat, l_mask = self.get_rule(input)
+        loss = F.mse_loss(l_hat, target[:, 2], reduction=self.reduction)
+        if self.reduction == 'none':
+            loss = loss.unsqueeze(-1).expand_as(target)
+        loss = loss * (~l_mask.unsqueeze(-1)).float()
+        loss = torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
+        return loss
+
+class TotalEnergyLoss(nn.Module):
+    def __init__(self, reduction: str = 'mean') -> None:
+        super(TotalEnergyLoss, self).__init__()
+        self.reduction = reduction
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        return F.mse_loss(input.sum(-1).unsqueeze(-1), target.sum(-1).unsqueeze(-1), reduction=self.reduction)
+
+class SumLoss(nn.Module):
+    def __init__(self, losses: Sequence[nn.Module], weights: Optional[Sequence[float]] = None) -> None:
+        super(SumLoss, self).__init__()
+        self.losses = losses
+        self.weights = weights
+
+    def forward(self, input: Tensor, target: Tensor) -> Tensor:
+        loss = 0
+        for i, l in enumerate(self.losses):
+            # print(i, l),
+            # print(l(input, target))
+            cur_loss = l(input, target)
+            cur_loss.nan_to_num_(0)
+            loss += cur_loss * self.weights[i] if self.weights is not None else cur_loss
+        return loss
 
 class QuantileLoss(nn.Module):
     def __init__(self, quantiles):

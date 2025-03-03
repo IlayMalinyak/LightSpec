@@ -1,3 +1,4 @@
+
 import os
 import torch
 from torch.cuda.amp import GradScaler
@@ -26,11 +27,12 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import KeplerDataset
 from nn.astroconf import Astroconformer
-from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder, CNNRegressor
+from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder, CNNRegressor, MultiTaskSimSiam
 # from nn.mamba import MambaEncoder
 from nn.simsiam import SimSiam
 from nn.train import ContrastiveTrainer, MaskedSSLTrainer
 from nn.utils import deepnorm_init, load_checkpoints_ddp
+from nn.optim import CQR
 from util.utils import *
 from features import create_umap
 
@@ -54,29 +56,37 @@ optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL']
 if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
     os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
 
+model_args.num_quantiles = len(optim_args.quantiles)
+model_args.output_dim = len(data_args.labels)
+
 transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
                         MovingAvg(13),
                         ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
-                        RandomMasking(mask_prob=0.2),
-                        Normalize('std'),
+                        RandomMasking(0.1),
+                        Normalize('dist_median'),
                         ToTensor(), ])
 
 
 kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
+berger_cat = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
+kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+kepler_df = kepler_df.merge(berger_cat, on='KID').merge(kepler_meta[['KID', 'KMAG']], on='KID')
+kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
+kepler_df.dropna(subset=data_args.labels, inplace=True)
 print("number of samples: ", len(kepler_df))
 train_dataset = KeplerDataset(df=kepler_df, transforms=transforms,
                                 target_transforms=transforms,
-                                npy_path = '/data/lightPred/data/npy',
+                                npy_path = '/data/lightPred/data/raw_npy',
                                 seq_len=int(data_args.max_len_lc),
                                 masked_transforms = data_args.masked_transform,
-                                use_acf=data_args.use_acf
+                                use_acf=data_args.use_acf,
+                                scale_flux=data_args.scale_flux,
+                                labels=data_args.labels,
                                 )
-start = time.time()
-for i in range(100):
-    x1,x2,_,_,info1,info2 = train_dataset[i]
-    print(x1.shape, x2.shape)        
-print("average time taken per iteration: ", (time.time()-start)/100)
-
+# start = time.time()
+# for i in range(100):
+#     x1,x2,y,_,info1,info2 = train_dataset[i]
+# print("average time taken per iteration: ", (time.time()-start)/100)
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 train_subset = Subset(train_dataset, train_indices)
@@ -104,6 +114,7 @@ val_dataloader = DataLoader(val_subset,
 # backbone = MambaEncoder(model_args)
 backbone = models[model_name](model_args, conformer_args=conformer_args)
 model = SimSiam(backbone)
+model = MultiTaskSimSiam(model_args, conformer_args=conformer_args)
 model = model.to(local_rank)
 
 model_suffix = 0
@@ -132,7 +143,8 @@ if data_args.create_umap:
     exit()
 
     
-loss_fn = torch.nn.MSELoss()
+loss_fn = CQR(quantiles=optim_args.quantiles)
+ssl_loss_fn = torch.nn.MSELoss()
 optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 scaler = GradScaler()
 total_steps = int(data_args.num_epochs) * len(train_dataloader)
@@ -157,8 +169,8 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
 
 
 if data_args.masked_transform:
-    trainer = MaskedSSLTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=1, scaler=scaler,
+    trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
+                        criterion=loss_fn, ssl_criterion=ssl_loss_fn, output_dim=1, scaler=scaler,
                        scheduler=scheduler, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
@@ -168,7 +180,7 @@ else:
     trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                             criterion=loss_fn, output_dim=1, scaler=scaler,
                         scheduler=scheduler, train_dataloader=train_dataloader,
-                        val_dataloader=val_dataloader, device=local_rank,
+                        val_dataloader=val_dataloader, device=local_rank, ssl_weight=data_args.ssl_weight, num_quantiles=len(optim_args.quantiles),
                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                             accumulation_step=1, max_iter=np.inf,
                             exp_name=f"{model_name}_lc_{exp_num}") 

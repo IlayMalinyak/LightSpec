@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: 1
+  exp_num: 2
   light_model_name: "MultiEncoder"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -9,7 +9,7 @@ Data:
   dataset: "LightSpecDataset"
   data_dir: '/data/lightPred/data'
   spectra_dir: '/data/lamost/data'
-  batch_size: 4
+  batch_size: 16
   num_epochs: 1000
   max_len_spectra: 4096
   max_days_lc: 270
@@ -17,14 +17,15 @@ Data:
   lc_freq: 0.0208
   continuum_norm: True
   meta_columns: ['Teff', 'Mstar']
+  prediction_labels: ['vsini', 'Prot']
   test_run: False
   create_umap: False
   load_checkpoint: True
   masked_transform: False
   use_acf: True
-  combined_embed: True
+  combined_embed: False
   pred_coeff_val: None
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-18/lightspec_2.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-24/lightspec_2.pth'
 
 MultiEncoder_lc:
   # Model
@@ -166,7 +167,7 @@ predictor:
 Tuner:
   in_dim: 128
   hidden_dim: 512
-  out_dim: 5
+  out_dim: 15
 
 loss:
   sim_coeff: 25
@@ -219,7 +220,7 @@ Optimization SSL:
 
 Optimization:
   # Optimization
-  max_lr: 1e-5
+  max_lr: 2e-5
   weight_decay: 5e-6
   warmup_pct: 0.3
   steps_per_epoch: 3500

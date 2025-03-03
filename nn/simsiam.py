@@ -171,6 +171,7 @@ class SimSiam(nn.Module):
             self.backbone,
             self.projector
         )
+        self.output_dim = backbone.output_dim // 4
         self.predictor = prediction_MLP(backbone.output_dim // 4, backbone.output_dim // 4, backbone.output_dim // 4)
     
     def forward(self, x1, x2):
@@ -178,7 +179,7 @@ class SimSiam(nn.Module):
         z1, z2 = f(x1), f(x2)
         p1, p2 = h(z1), h(z2)
         L = D(p1, z2) / 2 + D(p2, z1) / 2
-        return {'loss': L}
+        return {'loss': L, 'z1': z1, 'z2': z2}
 
 class MultiModalSimCLR(nn.Module):
     def __init__(self, backbone,

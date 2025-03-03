@@ -15,6 +15,7 @@ def create_umap(model,
                 temperature=1,
                 use_w=True,
                 dual=True,
+                logits_key='logits',
                 combine=False,
                 return_predictions=False,
                 max_iter=np.inf):
@@ -54,7 +55,7 @@ def create_umap(model,
                     out = model(x1)
         
         # Extract logits and apply UMAP
-        logits = out['logits'] if dual else out
+        logits = out[logits_key] if dual else out
         if isinstance(logits, tuple):
             logits = logits[0]
         if logits.dim() > 2:
@@ -73,7 +74,6 @@ def create_umap(model,
                     value = value.cpu().numpy().tolist()
                 flat_info[key] = value
             batch_metadata.append(flat_info)
-        
         # Combine metadata with UMAP coordinates
         for metadata, umap_coords, logit in zip(batch_metadata, reduced_data, logits):
             metadata['umap_x'] = umap_coords[0]

@@ -246,18 +246,18 @@ class RandomMasking:
 class Normalize:
     """
     Normalize the input data according to a specified scheme.
-    Supported schemes: 'std' (standardization), 'minmax', 'median'
+    Supported schemes: 'std' (standardization), 'minmax', 'median', 'dist'
     """
     def __init__(self, scheme='std', axis=None):
         """
         Initialize the Normalize transformation.
 
-        :param scheme: Normalization scheme ('std', 'minmax', or 'median')
+        :param scheme: Normalization scheme ('std', 'minmax', 'dist', or 'median')
         :param axis: Axis or axes along which to normalize. None for global normalization.
         """
         self.scheme = scheme.lower()
         self.axis = axis
-        assert self.scheme in ['std', 'minmax', 'median'], "Unsupported normalization scheme"
+        assert self.scheme in ['std', 'minmax', 'median', 'dist', 'dist_median'], "Unsupported normalization scheme"
 
     def __call__(self, x, mask=None, info=dict()):
         info['normalize'] = self.scheme
@@ -283,6 +283,16 @@ class Normalize:
         elif self.scheme == 'median':
             median = np.median(x_masked, axis=self.axis, keepdims=True)
             x =  x / median
+        elif self.scheme == 'dist':
+            d = info['Dist']
+            assert d is not None, "Distance must be provided for 'dist' normalization"
+            x = x * d ** 2
+            x = x / 1e11    # arbitrary scaling factor
+        elif self.scheme == 'dist_median':
+            d = info['Dist']
+            assert d is not None, "Distance must be provided for 'dist' normalization"
+            x = x * d ** 2
+            x = x / np.nanmedian(x + 1e-3)    
         return x, mask, info
 
     def _normalize_torch(self, x, mask=None, info=dict()):

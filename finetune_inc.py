@@ -1,4 +1,3 @@
-import os
 import torch
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader, Subset
@@ -98,7 +97,10 @@ def create_train_test_dfs():
     
     final_df['sin_inc'] = (final_df['vsini'] * final_df['Prot'] * 24 * 3600
                                 / (2 * np.pi * final_df['Rstar'] * R_SUN_KM) )
+    final_df['log_sin_inc'] = -np.log(final_df['sin_inc'] + 1e-3)
     final_df['inc'] = np.arcsin(final_df['sin_inc']) * 180 / np.pi
+    final_df['norm_vsini'] = (final_df['vsini'] - final_df['vsini'].min()) / (final_df['vsini'].max() - final_df['vsini'].min())
+    final_df['norm_Prot'] = (final_df['Prot'] - final_df['Prot'].min()) / (final_df['Prot'].max() - final_df['Prot'].min())
     final_df = final_df[~final_df['inc'].isna()]
     print("prot nans: ", final_df['Prot'].isna().sum(), " Rstar nans: ", final_df['Rstar'].isna().sum(), "VSINI nans: ", final_df['vsini'].isna().sum(), "inc nans: ", final_df['inc'].isna().sum())
     
@@ -114,9 +116,9 @@ def create_train_test_dfs():
         ref_df = train_df[train_df['vsini_ref'] == ref]
         if len(ref_df) < 20:
             continue
-        plt.hist(ref_df['inc'], bins=20, histtype='step', density=True, label=ref)
+        plt.hist(ref_df['log_sin_inc'], bins=40, histtype='step', density=True, label=ref)
     plt.legend()
-    plt.savefig(f"/data/lightSpec/images/inc_hist.png")
+    plt.savefig(f"/data/lightSpec/images/log_sin_inc_hist.png")
     plt.close()
 
 
@@ -148,6 +150,7 @@ loss_args = Container(**yaml.safe_load(open(args_dir, 'r'))['loss'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
 tuner_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Tuner'])
+tuner_args.out_dim = len(data_args.prediction_labels) * len(optim_args.quantiles)
 
 os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
@@ -168,7 +171,7 @@ train_dataset = FineTuneDataset(df=train_df, light_transforms=light_transforms,
                                 light_seq_len=int(data_args.max_len_lc),
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 use_acf=data_args.use_acf,
-                                labels=['inc']
+                                labels=data_args.prediction_labels
                                 )
 
 test_dataset =FineTuneDataset(df=test_df, light_transforms=light_transforms,
@@ -178,7 +181,7 @@ test_dataset =FineTuneDataset(df=test_df, light_transforms=light_transforms,
                                 light_seq_len=int(data_args.max_len_lc),
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 use_acf=data_args.use_acf,
-                                labels=['inc']
+                                labels=data_args.prediction_labels
                                 )
 
 for i in range(10):
@@ -262,16 +265,38 @@ kfold_trainer = KFoldTrainer(
     device=local_rank,
     n_splits=5,
     batch_size=data_args.batch_size,
-    output_dim=1,
+    output_dim=len(data_args.prediction_labels),
+    num_quantiles=len(optim_args.quantiles),
     log_path=data_args.log_dir,
     exp_num=datetime_dir,
     exp_name=f"inc_finetune_{exp_num}",
 )
 
 # Run k-fold cross validation
-results = kfold_trainer.run_kfold(num_epochs=100, early_stopping=10)
+# k_results = kfold_trainer.run_kfold(num_epochs=100, early_stopping=10)
+      
 
+test_dataloader = DataLoader(test_dataset, batch_size=data_args.batch_size, shuffle=False, collate_fn=kepler_collate_fn)
+final_results = kfold_trainer.train_final_model_and_test(
+    test_dataloader=test_dataloader,
+    num_epochs=1000,
+    early_stopping=15
+)
+
+train_res = final_results['train_results']
+with open(f"{data_args.log_dir}/{datetime_dir}/train_results.json", 'w') as f:
+    json.dump(train_res, f)
+test_res = final_results['test_results']
+
+y, y_pred = test_res['y'], test_res['y_pred']
+print('results shapes: ', y.shape, y_pred.shape)
+results_df = pd.DataFrame({'y': y})
+for q in len(optim_args.quantiles):
+    y_pred_q = y_pred[:,:, q]
+    for i, label in enumerate(['vsini', 'Prot', 'sin_inc']):
+        results_df[f'{label}_{q}'] = y_pred_q[:, i]
+print(results_df.head())
+results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/test_predictions.csv", index=False)
 # Access results
-print("Average metrics:", results['average_metrics'])
-print("Individual fold results:", results['fold_results'])
+
 

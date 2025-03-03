@@ -5,7 +5,7 @@ from nn.Modules.conformer import ConformerEncoder, ConformerDecoder
 from nn.Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding
 from nn.Modules.flash_mhsa import MHA as Flash_Mha
 from nn.Modules.mlp import Mlp as MLP
-from nn.simsiam import projection_MLP
+from nn.simsiam import projection_MLP, SimSiam
 
 import numbers
 import torch.nn.init as init
@@ -190,7 +190,7 @@ class CNNDecoder(nn.Module):
         
         # Final layer to match original input channels
         self.final_conv = nn.ConvTranspose1d(in_channels=decoder_dims[-1], 
-                                             out_channels=args.in_channels, 
+                                             out_channels=1, 
                                              kernel_size=3, 
                                              stride=1, 
                                              padding=1)
@@ -310,6 +310,34 @@ class MultiTaskRegressor(nn.Module):
         output_dec = self.decoder(x)
         return output_reg, output_dec
 
+class MultiTaskSimSiam(nn.Module):
+    def __init__(self, args, conformer_args):
+        super().__init__()
+        if args.activation == 'silu':
+            self.activation = nn.SiLU()
+        elif args.activation == 'sine':
+            self.activation = Sine(w0=args.sine_w0)
+        else:
+            self.activation = nn.ReLU()
+
+        self.backbone = MultiEncoder(args, conformer_args)
+        self.simsiam = SimSiam(self.backbone) 
+        encoder_dim = self.simsiam.output_dim * 2
+        self.regressor = nn.Sequential(
+            nn.Linear(encoder_dim, encoder_dim//2),
+            nn.BatchNorm1d(encoder_dim//2),
+            self.activation,
+            nn.Dropout(conformer_args.dropout_p),
+            nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
+        )
+
+    def forward(self, x1, x2, y=None):
+        out = self.simsiam(x1, x2)
+        z = torch.cat([out['z1'], out['z2']], dim=1)
+        output_reg = self.regressor(z)
+        out['preds'] = output_reg
+        return out
+
 class MultiResRegressor(nn.Module):
     def __init__(self, args, conformer_args):
         super().__init__()
@@ -335,10 +363,12 @@ class MultiEncoder(nn.Module):
     def forward(self, x):
         # print("nans in x: ", torch.isnan(x).sum(), x.shape)
         # Store backbone output in a separate tensor
+        if torch.isnan(x).sum() > 0:
+            print("nans in x: ", torch.isnan(x).sum(), x.shape)
         backbone_out = self.backbone(x)
         # print("nans in backbone: ", torch.isnan(backbone_out).sum(), backbone_out.shape)
-
-        
+        if torch.isnan(backbone_out).sum() > 0:
+            print("nans in backbone: ", torch.isnan(backbone_out).sum(), backbone_out.shape)
         # Create x_enc from backbone_out
         if len(backbone_out.shape) == 2:
             x_enc = backbone_out.unsqueeze(1).clone()
@@ -346,7 +376,7 @@ class MultiEncoder(nn.Module):
             x_enc = backbone_out.permute(0,2,1).clone()
             
         RoPE = self.pe(x_enc, x_enc.shape[1]).nan_to_num(0)
-        x_enc = x_enc.nan_to_num(0)
+        # x_enc = x_enc.nan_to_num(0)
         if torch.isnan(x_enc).sum() > 0:
             print("nans in rope x_enc: ", torch.isnan(x_enc).sum(), x_enc.shape)
         if torch.isnan(RoPE).sum() > 0:
@@ -362,7 +392,7 @@ class MultiEncoder(nn.Module):
                 x_enc = x_enc.sum(dim=1)
             else:
                 x_enc = x_enc.permute(0,2,1)
-        # print("nans in x_enc: ", torch.isnan(x_enc).sum())
+                  # print("nans in x_enc: ", torch.isnan(x_enc).sum())
                 
         # Return x_enc and the original backbone output
         return x_enc, backbone_out

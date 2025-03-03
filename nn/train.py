@@ -15,8 +15,10 @@ from torch.profiler import profile, record_function, ProfilerActivity
 from sklearn.model_selection import KFold
 from torch.utils.data import Subset, DataLoader
 from util.utils import kepler_collate_fn
+from pathlib import Path
+import io
+import zipfile
 # import wandb
-
 
 def count_occurence(x,y):
   coord_counts = {}
@@ -26,6 +28,58 @@ def count_occurence(x,y):
           coord_counts[coord] += 1
       else:
           coord_counts[coord] = 1
+
+def save_compressed_checkpoint(model, save_path, results, use_zip=True):
+        """
+        Save model checkpoint with compression
+        """
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        
+        if use_zip:
+            # Save model state dict to buffer first
+            buffer = io.BytesIO()
+            torch.save(model.state_dict(), buffer, 
+                    _use_new_zipfile_serialization=True,
+                    pickle_protocol=4)
+            
+            # Save buffer to compressed zip
+            model_path = str(Path(save_path).with_suffix('.zip'))
+            with zipfile.ZipFile(model_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr('model.pt', buffer.getvalue())
+                
+            # Save results separately
+            results_path = str(Path(save_path).with_suffix('.json'))
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+                
+        else:
+            # Save with built-in compression
+            model_path = str(Path(save_path).with_suffix('.pt'))
+            torch.save(model.state_dict(), model_path,
+                    _use_new_zipfile_serialization=True,
+                    pickle_protocol=4)
+                
+            results_path = str(Path(save_path).with_suffix('.json'))
+            with open(results_path, "w") as f:
+                json.dump(results, f, indent=2)
+                
+        return model_path, results_path
+
+def load_compressed_checkpoint(model, save_path):
+    """
+    Load model checkpoint from compressed format
+    """
+    if save_path.endswith('.zip'):
+        with zipfile.ZipFile(save_path) as zf:
+            with zf.open('model.pt') as f:
+                buffer = io.BytesIO(f.read())
+                state_dict = torch.load(buffer)
+    else:
+        state_dict = torch.load(save_path)
+    
+    model.load_state_dict(state_dict)
+    return model
+
 
 
 class Trainer(object):
@@ -80,7 +134,7 @@ class Trainer(object):
             return dataloader.batch_sampler.sampler
         
         return None
-
+    
     def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False):
         """
         Fits the model for the given number of epochs.
@@ -91,6 +145,10 @@ class Trainer(object):
         train_acc, val_acc = [], []
         lrs = []
         epochs = []
+        self.train_aux_loss_1 = []
+        self.train_aux_loss_2 = []
+        self.val_aux_loss_1 = []
+        self.val_aux_loss_2 = []
         # self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
         main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
@@ -136,11 +194,11 @@ class Trainer(object):
                     torch.save(self.model.state_dict(), model_name)
                     self.best_state_dict = self.model.state_dict()
                     res = {"epochs": epochs, "train_loss": train_loss, "val_loss": val_loss,
-                           "train_acc": train_acc, "val_acc": val_acc, "lrs": lrs}
-                    output_filename = f'{self.log_path}/{self.exp_num}/{self.exp_name}.json'
-                    with open(output_filename, "w") as f:
-                        json.dump(res, f, indent=2)
-                    print(f"saved results at {output_filename}")
+                           "train_acc": train_acc, "val_acc": val_acc, "train_aux_loss_1": self.train_aux_loss_1,
+                           "train_aux_loss_2":self.train_aux_loss_2, "val_aux_loss_1":self.val_aux_loss_1,
+                           "val_aux_loss_2": self.val_aux_loss_2, "lrs": lrs}
+                    # model_path, output_filename = save_compressed_checkpoint(
+                    #                            self.model, model_name, res, use_zip=True )
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
@@ -149,9 +207,15 @@ class Trainer(object):
                             else self.scheduler.get_last_lr()[0]
                 
                 lrs.append(current_lr)
-
+                
+                output_filename = f'{self.log_path}/{self.exp_num}/{self.exp_name}.json'
+                with open(output_filename, "w") as f:
+                    json.dump(res, f, indent=2)
+                print(f"saved results at {output_filename}")
+                
                 print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
-                f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
+                
+                        f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()},'\
                   f'Time: {time.time() - start_time:.2f}s, Total Time: {(time.time() - global_time)/3600} hr', flush=True)
                 if epoch % 10 == 0:
@@ -165,7 +229,10 @@ class Trainer(object):
                     break 
 
         return {"epochs":epochs, "train_loss": train_loss,
-                 "val_loss": val_loss, "train_acc": train_acc, "val_acc": val_acc, "lrs": lrs}
+                 "val_loss": val_loss, "train_acc": train_acc,
+                "val_acc": val_acc, "train_aux_loss_1": self.train_aux_loss_1,
+                "train_aux_loss_2": self.train_aux_loss_2, "val_aux_loss_1":self.val_aux_loss_1,
+                "val_aux_loss_2": self.val_aux_loss_2, "lrs": lrs}
 
     def process_loss(self, acc, loss_mean):
         if  torch.cuda.is_available() and torch.distributed.is_initialized():
@@ -211,7 +278,7 @@ class Trainer(object):
         for name, param in self.model.named_parameters():
             if param.grad is not None:
                 grad_norm = param.grad.norm().item()
-                if grad_norm > 10:
+                if grad_norm > 100:
                     print(f"Large gradient in {name}: {grad_norm}")
 
     def train_epoch(self, device, epoch):
@@ -331,12 +398,15 @@ class Trainer(object):
         confs = np.zeros((0, self.output_dim))
         tot_kic = []
         tot_teff = []
-        for i,(spec, lc, y,info) in enumerate(test_dataloader):
+        for i,(lc_spec,_,_, y,info) in enumerate(test_dataloader):
             spec = spec.to(device)
             lc = lc.to(device)
+            if isinstance(y, tuple):
+                y = torch.stack(y)
             y = y.to(device)
             with torch.no_grad():
                 y_pred = self.model(spec.float(), lc.float())
+            y_pred = y_pred.reshape(b, -1, self.output_dim)
             preds = np.concatenate((preds, y_pred.cpu().numpy()))
             if y.shape[1] == self.output_dim:
                 targets = np.concatenate((targets, y.cpu().numpy()))
@@ -457,6 +527,122 @@ class KFoldTrainer(Trainer):
         }
         return avg_metrics
 
+    def train_final_model_and_test(self, test_dataloader, num_epochs, early_stopping=None):
+        """
+        Train a final model on the entire dataset and evaluate on the test set.
+        
+        Args:
+            test_dataloader (DataLoader): DataLoader for the test set
+            num_epochs (int): Number of epochs to train the final model
+            early_stopping (int, optional): Number of epochs to wait before early stopping
+            
+        Returns:
+            dict: Dictionary containing training results and test metrics
+        """
+        print("\nTraining final model on all training data...")
+        
+        # Reset model weights
+        self.model.apply(self._weight_reset)
+        
+        # Reset optimizer
+        # if hasattr(self, 'optimizer'):
+        #     self.optimizer.state = {}
+        #     for group in self.optimizer.param_groups:
+        #         group['lr'] = group['initial_lr']
+        #
+        # Create dataloader for all training data
+        self.train_dl = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=self.shuffle, collate_fn=kepler_collate_fn)
+        self.val_dl = self.train_dl  # Use same data for validation during training
+        
+        # Update samplers
+        self.train_sampler = self.get_sampler_from_dataloader(self.train_dl)
+        self.val_sampler = self.get_sampler_from_dataloader(self.val_dl)
+        
+        # Train the final model
+        training_results = self.fit(num_epochs, self.device, early_stopping=early_stopping)
+        
+        # Save the final model
+        if self.log_path is not None:
+            final_model_path = f'{self.log_path}/{self.exp_num}/final_model'
+            os.makedirs(final_model_path, exist_ok=True)
+            torch.save(self.model.state_dict(), f'{final_model_path}/model.pth')
+            
+            with open(f'{final_model_path}/training_results.json', 'w') as f:
+                json.dump(training_results, f, indent=2)
+        
+        # Evaluate on test set
+        print("\nEvaluating final model on test set...")
+        test_metrics = self.evaluate_on_test_set(test_dataloader)
+        
+        return {
+            'train_results': training_results,
+            'test_results': test_metrics
+        }
+
+    def evaluate_on_test_set(self, test_dataloader):
+        """
+        Evaluate the trained model on a test set.
+        
+        Args:
+            test_dataloader (DataLoader): DataLoader for the test set
+            
+        Returns:
+            dict: Dictionary containing test metrics
+        """
+        self.model.eval()
+        test_loss = []
+        all_accs = torch.zeros(self.output_dim, device=self.device)
+        total = 0
+        
+        print("Running evaluation on test set...")
+        
+        pbar = tqdm(test_dataloader)
+        for i, batch in enumerate(pbar):
+            lc, spec, _, _, y, info = batch
+            spec = spec.to(self.device)
+            lc = lc.to(self.device)
+            b, _, _ = lc.shape
+            if isinstance(y, tuple):
+                y = torch.stack(y)     
+            y = y.to(self.device)
+            with torch.no_grad():
+                y_pred = self.model(lc.float(), spec.float())
+                y_pred = y_pred.reshape(b, -1, self.output_dim)
+                
+            if len(y.shape) == 1:
+                y = y.unsqueeze(1)
+                
+            loss = 0
+            for i in range(self.output_dim):
+                y_pred_i = y_pred[:, :, i]
+                y_i = y[:, i]
+                loss += self.criterion(y_pred_i, y_i)
+            loss /= self.output_dim
+            
+            test_loss.append(loss.item())
+            
+            y_pred_mean = y_pred[:, y_pred.shape[1]//2, :]
+            diff = torch.abs(y_pred_mean - y)
+            acc = (diff < (y/10)).sum(0)
+            all_accs = all_accs + acc
+            total += len(y)
+        
+        # Calculate average metrics
+        avg_test_loss = np.mean(test_loss)
+        avg_test_acc = all_accs.cpu().numpy() / total
+        
+        print(f"Test Loss: {avg_test_loss:.6f}")
+        print(f"Test Accuracy: {avg_test_acc}")
+        
+        return {
+                'y': y,
+                'y_pred': y_pred,
+            'test_loss': avg_test_loss,
+            'test_acc': avg_test_acc.tolist(),
+        }
+     
+    
+
 class MaskedSSLTrainer(Trainer):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -532,7 +718,7 @@ class MaskedSSLTrainer(Trainer):
 
 class ContrastiveTrainer(Trainer):
     def __init__(self, temperature=1, stack_pairs=False,
-                 use_w=False, use_pred_coeff=False, pred_coeff_val=None,
+                 use_w=False, use_pred_coeff=False, pred_coeff_val=None, ssl_weight=0.5,
                    **kwargs):
         super().__init__(**kwargs)
         self.stack_pairs = stack_pairs
@@ -540,74 +726,78 @@ class ContrastiveTrainer(Trainer):
         self.use_w = use_w
         self.use_pred_coeff = use_pred_coeff
         self.pred_coeff_val = pred_coeff_val
+        self.ssl_weight = ssl_weight
         
         
-    def train_batch(self,batch, batch_idx, device):
-        start_time = time.time()
-        x1, x2, _, _, info1, info2 = batch 
-        x1, x2 = x1.to(device), x2.to(device)
+    def train_batch(self, batch, batch_idx, device):
+        self.optimizer.zero_grad()  # Add this if not done elsewhere
+        
+        x1, x2, y, _, _, info = batch 
+        x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+        
+        # Forward pass
         if self.stack_pairs:
             x = torch.cat((x1, x2), dim=0)
             out = self.model(x, temperature=self.temperature)
-            model_time = time.time() - start_time
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info1]).to(device)
-            if self.use_pred_coeff:
-                if self.pred_coeff_val != 'None':
-                    pred_coeff = float(self.pred_coeff_val)
-                else:
-                    pred_coeff = max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
-                out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
-            else:
-                out = self.model(x1, x2, w=w)
+        elif self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+            pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
+            out = self.model(x1, x2, w=w, pred_coeff=pred_coeff) if self.use_pred_coeff else self.model(x1, x2, w=w)
         else:
             out = self.model(x1, x2)    
-        model_time = time.time() - start_time
-        # print("nans: ", x1.isnan().sum(), x2.isnan().sum())
+
         loss = out['loss']
+       
+        acc = 0
+        if self.criterion is not None:
+            preds = out['preds']
+            preds = preds.view(x1.shape[0], -1, self.num_quantiles)
+            reg_loss = self.criterion(preds, y)
+            self.train_aux_loss_1.append(loss.item())
+            self.train_aux_loss_2.append(reg_loss.item())
+            loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
+            preds_med = preds[: ,:, self.num_quantiles // 2]
+            acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
+        else:
+            if 'loss_pred' in out.keys():
+                self.train_aux_loss_1.append(out['loss_pred'].item())
+            if 'loss_contrastive' in out.keys():
+                self.train_aux_loss_2.append(out['loss_contrastive'].item())
+        
+
+        # Backward pass with gradient scaling
         if self.scaler is not None:
             self.scaler.scale(loss).backward()
             if (batch_idx + 1) % self.accumulation_step == 0:
-                # Add gradient clipping before optimizer step
+                self.scaler.unscale_(self.optimizer)
                 if self.grad_clip:
-                    self.scaler.unscale_(self.optimizer)
-                    # self.check_gradients()
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1)
                 self.scaler.step(self.optimizer)
+                self.scaler.update()
                 if self.scheduler is not None:
                     self.scheduler.step()
-                self.scaler.update()
+                self.check_gradients()  # Monitor gradients
         else:
             loss.backward()
             if (batch_idx + 1) % self.accumulation_step == 0:
-                # Add gradient clipping before optimizer step
                 if self.grad_clip:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1)
                 self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
-        if torch.isnan(loss).sum() > 0:
-            print("nan in loss, idx: ", batch_idx)
-            exit()
-        backward_time = time.time() - start_time - model_time
-        self.optimizer.step()
-        optimizer_time = time.time() - start_time - model_time - backward_time
-        if self.scheduler is not None:
-                    self.scheduler.step()
-        # if self.wandb:
-        #     wandb.log({"train_loss": loss.item()})
-        # print(f"model time: {model_time}, backward time: {backward_time}, optimizer time: {optimizer_time}")
-        return loss, 0., x1
+                self.check_gradients()  # Monitor gradients
+
+        return loss, acc, y
 
     def eval_batch(self,batch, batch_idx, device):
-        x1, x2, w, _, info1, info2 = batch 
-        x1, x2 = x1.to(device), x2.to(device)
+        x1, x2, y, _, _, info = batch 
+        x1, x2, y = x1.to(device), x2.to(device), y.to(device)
         with torch.no_grad():
             if self.stack_pairs:
                 x = torch.cat((x1, x2), dim=0)
                 out = self.model(x, temperature=self.temperature)
             if self.use_w:
-                w = torch.stack([i['w'] for i in info1]).to(device)
+                w = torch.stack([i['w'] for i in info]).to(device)
                 if self.use_pred_coeff:                    
                     if self.pred_coeff_val != 'None':
                         pred_coeff = float(self.pred_coeff_val)
@@ -619,9 +809,22 @@ class ContrastiveTrainer(Trainer):
             else:
                 out = self.model(x1, x2)
         loss = out['loss']
-        # if self.wandb:
-        #     wandb.log({"val_loss": loss.item()}) 
-        return loss, 0, x1
+        acc = 0
+        if self.criterion is not None:
+            preds = out['preds']
+            preds = preds.view(x1.shape[0], -1, self.num_quantiles)
+            reg_loss = self.criterion(preds, y)
+            self.val_aux_loss_1.append(loss.item())
+            self.val_aux_loss_2.append(reg_loss.item())
+            loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
+            preds_med = preds[: ,:, self.num_quantiles // 2]
+            acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
+        else:
+            if 'loss_pred' in out.keys():
+                self.val_aux_loss_1.append(out['loss_pred'].item())
+            if 'loss_contrastive' in out.keys():
+                self.val_aux_loss_2.append(out['loss_contrastive'].item())
+        return loss, acc, y
 
 class RegressorTrainer(Trainer):
     def __init__(self, w_name, w_init_val, **kwargs):
@@ -693,14 +896,19 @@ class MaskedRegressorTrainer(Trainer):
         b = x_masked.shape[0]
         
         # Get proximity weights for regression
-        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        if self.w_name is None:
+            w = torch.ones(x_masked.size(0)).to(device)
+        else:
+            w = torch.tensor([i[self.w_name] for i in info]).to(device)
         # w = const * torch.exp(w*const)
         
         # Forward pass for both tasks
-        reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
+        reg_out,ssl_out  = self.model(x_masked, x)
 
-        
+        # print('shapes: ', x_masked.shape, x.shape, y.shape, mask.shape, reg_out.shape, ssl_out.shape)          
         # Calculate SSL loss (masked filling)
+        if (len(x.shape) == 3) and (x.shape[1] > 1):
+            x = x[:, 0, :]
         ssl_loss = self.ssl_criterion(ssl_out, x)
         ssl_acc = self.mask_accuracy(ssl_out, x, mask)
 
@@ -712,23 +920,38 @@ class MaskedRegressorTrainer(Trainer):
         if self.drop_first_y:
             reg_out = reg_out[:, 1:]
             y = y[:, 1:]
-        # print("out ", reg_out[0],  "y ", y[0])
         reg_loss = self.criterion(reg_out, y)
         reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
         out_median = reg_out[..., reg_out.shape[-1]//2]
         reg_acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
-        
+        self.train_aux_loss_1.append(ssl_loss.item())
+        self.train_aux_loss_2.append(reg_loss.item())
         # Combine losses
-        total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
+        loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
         
-        # Backward and optimize
-        total_loss.backward()
-        self.optimizer.step()
-        if self.scheduler is not None:
-            self.scheduler.step()
+         # Backward pass with gradient scaling
+        if self.scaler is not None:
+            self.scaler.scale(loss).backward()
+            if (batch_idx + 1) % self.accumulation_step == 0:
+                self.scaler.unscale_(self.optimizer)
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                self.check_gradients()  # Monitor gradients
+        else:
+            loss.backward()
+            if (batch_idx + 1) % self.accumulation_step == 0:
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1)
+                self.optimizer.step()
+                if self.scheduler is not None:
+                    self.scheduler.step()
+                self.check_gradients()  # Monitor gradients
                 
-                
-        return total_loss, reg_acc, x
+        return loss, reg_acc, x
 
     def eval_batch(self, batch, batch_idx, device):
         const = self.w_init_val/(1+self.epoch)
@@ -736,7 +959,10 @@ class MaskedRegressorTrainer(Trainer):
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
         
-        w = torch.tensor([i[self.w_name] for i in info]).to(device)
+        if self.w_name is None:
+            w = torch.ones(x_masked.size(0)).to(device)
+        else:
+            w = torch.tensor([i[self.w_name] for i in info]).to(device)
         # w = const * torch.exp(w*const)
         
         with torch.no_grad():
@@ -756,7 +982,9 @@ class MaskedRegressorTrainer(Trainer):
             reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
             out_median = reg_out[..., reg_out.shape[-1]//2]
             reg_acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
-            
+            self.val_aux_loss_1.append(ssl_loss.item())
+            self.val_aux_loss_2.append(reg_loss.item())
+
             total_loss = (self.ssl_weight * ssl_loss) + ((1 - self.ssl_weight) * reg_loss)
             
         return total_loss, reg_acc, x
@@ -803,7 +1031,79 @@ class MaskedRegressorTrainer(Trainer):
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, aggregated_info
+
+class ContrastiveRegressorTrainer(Trainer):
+    def __init__(self, temperature=1, stack_pairs=False,
+                 use_w=False, use_pred_coeff=False, pred_coeff_val=None, ssl_weight=0.5,
+                   **kwargs):
+        super().__init__(**kwargs)
+        self.stack_pairs = stack_pairs
+        self.temperature = temperature
+        self.use_w = use_w
+        self.use_pred_coeff = use_pred_coeff
+        self.pred_coeff_val = pred_coeff_val
+        self.ssl_weight = ssl_weight
+        print("ssl_weight: ", self.ssl_weight)
         
+    def train_batch(self, batch, batch_idx, device):
+        self.optimizer.zero_grad()  # Add this if not done elsewhere
+        
+        x1, x2, y, _, _, info = batch 
+        x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+        
+        # Forward pass
+        if self.stack_pairs:
+            x = torch.cat((x1, x2), dim=0)
+            out = self.model(x, temperature=self.temperature)
+        elif self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+            pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
+            out = self.model(x1, x2, w=w, pred_coeff=pred_coeff) if self.use_pred_coeff else self.model(x1, x2, w=w)
+        else:
+            out = self.model(x1, x2)    
+
+        loss = out['loss']
+        acc = 0
+        preds = out['output_reg']
+        preds = preds.view(x1.shape[0], -1, self.num_quantiles)
+        reg_loss = self.criterion(preds, y)
+        self.train_aux_loss_1.append(loss.item())
+        self.train_aux_loss_2.append(reg_loss.item())
+        loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
+        preds_med = preds[: ,:, self.num_quantiles // 2]
+        acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
+        return loss, acc, y
+
+    def eval_batch(self,batch, batch_idx, device):
+        x1, x2, y, _, _, info = batch 
+        x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+        with torch.no_grad():
+            if self.stack_pairs:
+                x = torch.cat((x1, x2), dim=0)
+                out = self.model(x, temperature=self.temperature)
+            if self.use_w:
+                w = torch.stack([i['w'] for i in info]).to(device)
+                if self.use_pred_coeff:                    
+                    if self.pred_coeff_val != 'None':
+                        pred_coeff = float(self.pred_coeff_val)
+                    else:
+                        pred_coeff = max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
+                    out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
+                else:
+                    out = self.model(x1, x2, w=w)
+            else:
+                out = self.model(x1, x2)
+        loss = out['loss']
+        acc = 0
+        preds = out['output_reg']
+        preds = preds.view(x1.shape[0], -1, self.num_quantiles)
+        reg_loss = self.criterion(preds, y)
+        self.val_aux_loss_1.append(loss.item())
+        self.val_aux_loss_2.append(reg_loss.item())
+        loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
+        preds_med = preds[: ,:, self.num_quantiles // 2]
+        acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
+        return loss, acc, y
 
 class MultiResolutionTrainer(MaskedRegressorTrainer):
     def __init__(self, high_res_train, high_res_val, lambda_high_res=1, **kwargs):
@@ -1047,3 +1347,4 @@ class LightSpecTrainer(Trainer):
         return loss, 0, x1
 
     
+
