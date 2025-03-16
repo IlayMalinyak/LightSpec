@@ -30,7 +30,7 @@ from transforms.transforms import *
 from dataset.dataset import LightSpecDataset, create_unique_loader
 from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
-from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor
+from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor, MultiTaskSimSiam
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
 from nn.moco import MultimodalMoCo, PredictiveMoco, MultiTaskMoCo
 from nn.simsiam import SimSiam, projection_MLP
@@ -44,7 +44,7 @@ from features import create_umap
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Dist', 'kmag_abs', 'RUWE']
 
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
-           'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
+          'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder, 'MultiTaskSimSiam': MultiTaskSimSiam,}
 
 torch.cuda.empty_cache()
 
@@ -119,15 +119,14 @@ sims_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiModalSimSiam']
 # backbone_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNBackbone'])
 moco_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MoCo'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
-if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
-    os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
+os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 moco_pred_args.out_dim = len(data_args.labels) * len(optim_args.quantiles)
 
 light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                             MovingAvg(13),
                             ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
-                            Normalize('dist'),
+                            Normalize('dist_median'),
                             ToTensor(),
                          ])
 spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
@@ -203,7 +202,7 @@ light_model = init_model(light_model, light_model_args)
 
 num_params_lc_all = sum(p.numel() for p in light_model.parameters() if p.requires_grad)
 print(f"Number of trainble parameters in light model: {num_params_lc_all}")
-num_params_lc = sum(p.numel() for p in light_model.encoder.parameters() if p.requires_grad)
+num_params_lc = sum(p.numel() for p in light_model.simsiam.encoder.parameters() if p.requires_grad)
 print(f"Number of trainble parameters in lc encoder: {num_params_lc}")
 
 spec_model = MODELS[spec_model_name](spec_model_args, conformer_args=conformer_args_spec)
@@ -235,7 +234,7 @@ else:
 
 # model = MultimodalMoCo(spec_model.encoder, light_model.encoder, transformer_args_lightspec,  **moco_args.get_dict()).to(local_rank)
 # model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
-moco = PredictiveMoco(spec_model.encoder, light_model.encoder,
+moco = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
                          transformer_args_lightspec,
                          predictor_args.get_dict(),
                          loss_args,
@@ -252,7 +251,7 @@ if data_args.load_checkpoint:
     model = load_checkpoints_ddp(model, data_args.checkpoint_path)
     print("loaded checkpoint from: ", data_args.checkpoint_path)
 
-model = DDP(model, device_ids=[local_rank])
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of trainble parameters: {num_params}")
@@ -261,7 +260,7 @@ print(f"Total parameters in model: {all_params}")
 print("number of training samples: ", len(train_dataset), len(val_dataset))
 if data_args.create_umap:
     model.module.calc_loss = False
-    umap_df = create_umap(model, test_dataloader, local_rank, use_w=False, dual=True, logits_key='q')
+    umap_df = create_umap(model, test_dataloader, local_rank, use_w=True, dual=True, logits_key='q')
     print("umap created: ", umap_df.shape)
     print(umap_df['Teff'].min(), umap_df['Teff'].max())
     umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
@@ -289,13 +288,13 @@ scaler = GradScaler()
 # for name, param in model.named_parameters():
 #     if param.requires_grad:
 #         print(name, param.shape)
-
+accumulation_step = 1
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=1, scaler=scaler, grad_clip=True,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=num_quantiles,
                              exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                             accumulation_step=1, max_iter=np.inf, stack_pairs=False, use_w=True,
+                             accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
                         exp_name=f"lightspec_{exp_num}") 
 # save all containers in log directory
@@ -334,7 +333,7 @@ plt.clf()
 
 model.module.calc_loss = False
 model.eval()
-umap_df = create_umap(model, test_dataloader, local_rank, use_w=False, dual=True, logits_key='q')
+umap_df = create_umap(model, test_dataloader, local_rank, use_w=True, dual=True, logits_key='q')
 print("umap created: ", umap_df.shape)
 print(umap_df.head())
 umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)

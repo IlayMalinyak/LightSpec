@@ -28,7 +28,7 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import DualDataset
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
-from nn.cnn import CNNEncoder, CNNEncoderDecoder
+from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder
 from nn.simsiam import SimSiam
 from nn.moco import MoCo, MultimodalMoCo, LightCurveSpectraMoCo
 from nn.utils import init_model, load_checkpoints_ddp
@@ -37,8 +37,8 @@ from util.utils import *
 from nn.train import Trainer
 from nn.optim import QuantileLoss, CQR
 
-DATA_DIR = '/data/simulations/dataset_independent'
-LABELS_PATH = '/data/simulations/dataset_independent/simulation_properties.csv'
+DATA_DIR = '/data/simulations/dataset_small'
+LABELS_PATH = '/data/simulations/dataset_small/simulation_properties.csv'
 LABELS = ['Inclination', 'Shear', 'Period']
 QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder,
@@ -97,7 +97,6 @@ if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
 
 light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
                             MovingAvg(13),
-                            Normalize('std'),
                             ToTensor(),
                          ])
 spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=False, plot_steps=False),
@@ -112,15 +111,15 @@ train_indices, val_indices = train_test_split(indices, test_size=0.2, random_sta
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 
-# erros = 0
-# for i in range(len(train_dataset)):
-#     lc, spec, y, info = train_dataset[i]
-#     if i % 10000 == 0:
-#         print(i)
-#     if not lc.sum():
-#         erros += 1
-# print("num erros: ", erros)
-# exit()
+erros = 0
+for i in range(len(train_dataset)):
+    lc, spec, y, info = train_dataset[i]
+    if i % 10000 == 0:
+        print(i)
+    if not lc.sum():
+        erros += 1
+print("num erros: ", erros)
+exit()
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_subset, batch_size=data_args.batch_size, sampler=train_sampler, \

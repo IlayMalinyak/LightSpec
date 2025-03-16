@@ -24,7 +24,7 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
-from dataset.dataset import KeplerDataset
+from dataset.dataset import KeplerDataset, DualDataset
 from nn.astroconf import Astroconformer
 from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor, MultiTaskSimSiam, SimpleRegressor, LSTM_DUAL_LEGACY
 # from nn.mamba import MambaEncoder
@@ -38,6 +38,10 @@ from features import create_umap
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
+DATA_DIR = '/data/simulations/dataset_small'
+LABELS_PATH = '/data/simulations/dataset_small/simulation_properties.csv'
+LABELS = ['Period']
+QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskSimSiam': MultiTaskSimSiam,
           "CNNEncoderDecoder": CNNEncoderDecoder, 'CNNRegressor': CNNRegressor, 'MultiTaskRegressor': MultiTaskRegressor}
@@ -60,54 +64,53 @@ regressor_args.output_dim = len(data_args.labels)
 regressor_args.num_quantiles = len(optim_args.quantiles)
 model_args.num_quantiles = len(optim_args.quantiles)
 regressor_args.seq_len = int(data_args.max_len_lc)
+model_args.seq_len = int(data_args.max_len_lc)
 
 transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
                         MovingAvg(13),
                         ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
-                        Normalize(['dist_median', 'dist_std']),
                         ToTensor(), ])
 
 target_transforms = transforms if not data_args.masked_transform else None
 
-kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
-berger_cat = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
-kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
-period_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
-santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
-kepler_df = kepler_df.merge(berger_cat, on='KID').merge(kepler_meta[['KID', 'KMAG']], on='KID').merge(santos_df[['KID', 'Prot']], on='KID') 
-kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
-kepler_df.dropna(subset=data_args.labels, inplace=True)
-print("number of samples: ", len(kepler_df))
-print("labels: ", data_args.labels)
-for label in data_args.labels:
-    print(kepler_df[label].describe())
-train_dataset = KeplerDataset(df=kepler_df, transforms=transforms,
-                                target_transforms=target_transforms,
-                                npy_path = '/data/lightPred/data/raw_npy',
-                                seq_len=int(data_args.max_len_lc),
-                                masked_transforms = data_args.masked_transform,
-                                use_acf=data_args.use_acf,
-                                scale_flux=data_args.scale_flux,
-                                labels=data_args.labels,
-                                dims=model_args.in_channels,
-                                )
-start = time.time()
-for i in range(100):
-    x1,x2,y,_,info1,info2 = train_dataset[i]
-    print(x1.shape, x2.shape, x1[0].max(), len(torch.where(x1[0]!=x2)[0]), y)
-    # if i % 10 == 0:
-    #     fig, ax = plt.subplots(1, 2)
-    #     ax[0].plot(x2[0])
-    #     ax[1].plot(x2[1])
-    #     plt.savefig(f'/data/lightSpec/images/lc_{i}.png')
-print("average time taken per iteration: ", (time.time()-start)/100)
+light_transforms = Compose([RandomCrop(int(data_args.max_len_lc)),
+                            MovingAvg(13),
+                            ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
+                            Normalize(['std']),
+                            ToTensor(),
+                         ])
+spec_transforms = Compose([LAMOSTSpectrumPreprocessor(rv_norm=False, continuum_norm=True, plot_steps=False),
+                            ToTensor()
+                           ])
+
+train_dataset = DualDataset(data_dir=DATA_DIR,
+                            labels_names=LABELS,
+                            labels_path=LABELS_PATH,
+                            lc_transforms=light_transforms,
+                            spectra_transforms=spec_transforms,
+                            lc_seq_len=int(data_args.max_len_lc),
+                            spec_seq_len=int(data_args.max_len_spectra),
+                            use_acf=data_args.use_acf,
+                            )
+
 indices = list(range(len(train_dataset)))
-print("number of samples: ", len(indices))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
 train_subset = Subset(train_dataset, train_indices)
 val_subset = Subset(train_dataset, val_indices)
 test_subset = Subset(train_dataset, test_indices)
+
+start = time.time()
+for i in range(10):
+    x1,x2,y,_,info1,info2 = train_dataset[i]
+    print(x1.shape, x2.shape, x1[0].max(), y)
+    # if i % 1 == 0:
+    #     fig, ax = plt.subplots(1, 2)
+    #     ax[0].plot(x1[0])
+    #     ax[1].plot(x2[0])
+    #     plt.savefig(f'/data/lightSpec/images/simulation_{i}.png')
+print("average time taken per iteration: ", (time.time()-start)/100)
+print("number of samples: ", len(indices))
 
 # plt.hist(kepler_df.loc[train_indices, 'RUWE'], bins=20,label='train', histtype='step')
 # plt.hist(kepler_df.loc[val_indices, 'RUWE'], bins=20,label='val', histtype='step')
@@ -222,15 +225,7 @@ scheduler = OneCycleLR(
 # Save the complete configuration to a YAML file
 
 
-if data_args.masked_transform:
-    trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, ssl_criterion=ssl_loss_fn, output_dim=len(data_args.labels), scaler=scaler, grad_clip=True,
-                       scheduler=scheduler, train_dataloader=train_dataloader, num_quantiles=len(optim_args.quantiles),                       val_dataloader=val_dataloader, device=local_rank, w_name=None, w_init_val=1,ssl_weight=1e-5,
-                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf,
-                        exp_name=f"{model_name}_lc_{exp_num}")  
-else:
-    trainer = RegressorTrainer(model=model, optimizer=optimizer,
+trainer = RegressorTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=len(data_args.labels), scaler=scaler, grad_clip=True,
                        scheduler=scheduler, train_dataloader=train_dataloader, num_quantiles=len(optim_args.quantiles),
                             val_dataloader=val_dataloader, device=local_rank, w_name=None,

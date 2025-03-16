@@ -201,21 +201,22 @@ class RandomMasking:
             raise TypeError("Input must be either a numpy array or a PyTorch tensor")
 
     def _mask_numpy(self, x, mask=None, info=dict()):
+        if len(x.shape) == 1:
+            x = x[np.newaxis, :]
         if self.random_high is None:
             self.random_high = x.max()
-        if mask is None:
-            mask = np.random.rand(*x.shape) < self.mask_prob
+        mask = np.random.rand(*x[0].shape) < self.mask_prob
         
         # Create a copy of x to modify
         masked_x = x.copy()
         
         # Replace with mask_value
-        replace_mask = mask & (np.random.rand(*x.shape) < self.replace_prob)
-        masked_x[replace_mask] = self.mask_value
+        replace_mask = mask & (np.random.rand(*x[0].shape) < self.replace_prob)
+        masked_x[:, replace_mask] = self.mask_value
         
         # Replace with random values
         random_mask = mask & ~replace_mask
-        masked_x[random_mask] = np.random.uniform(self.random_low, self.random_high, size=random_mask.sum())
+        masked_x[:, random_mask] = np.random.uniform(self.random_low, self.random_high, size=random_mask.sum())
         
         return masked_x, mask, info
 
@@ -248,68 +249,86 @@ class Normalize:
     Normalize the input data according to a specified scheme.
     Supported schemes: 'std' (standardization), 'minmax', 'median', 'dist'
     """
-    def __init__(self, scheme='std', axis=None):
+    def __init__(self, scheme=['std'], axis=0):
         """
         Initialize the Normalize transformation.
 
-        :param scheme: Normalization scheme ('std', 'minmax', 'dist', or 'median')
+        :param scheme: Normalization scheme ('std', 'minmax', 'dist', 'mag' or 'median')
         :param axis: Axis or axes along which to normalize. None for global normalization.
         """
-        self.scheme = scheme.lower()
         self.axis = axis
-        assert self.scheme in ['std', 'minmax', 'median', 'dist', 'dist_median'], "Unsupported normalization scheme"
-
+        self.scheme = scheme
+        
     def __call__(self, x, mask=None, info=dict()):
-        info['normalize'] = self.scheme
+        x_total = []
+        for i, s in enumerate(self.scheme):
+            info[f'normalize {i}'] = s
+            if isinstance(x, np.ndarray):
+                x_norm, mask, info = self._normalize_numpy(x.squeeze(), s,  mask, info)
+                x_total.append(np.expand_dims(x_norm, axis=self.axis))
+            elif isinstance(x, torch.Tensor):
+                x_norm, mask, info = self._normalize_torch(x.squeeze(), s, mask, info)
+                x_total.append(x_norm.unsqueeze(self.axis))
         if isinstance(x, np.ndarray):
-            return self._normalize_numpy(x, mask, info)
-        elif isinstance(x, torch.Tensor):
-            return self._normalize_torch(x, mask, info)
+            x_total = np.concatenate(x_total, axis=self.axis)
         else:
-            raise TypeError("Input must be either a numpy array or a PyTorch tensor")
+            x_total = torch.cat(x_total, dim=self.axis)
+        return x_total, mask, info
 
-    def _normalize_numpy(self, x, mask=None, info=dict()):
+    def _normalize_numpy(self, x, scheme, mask=None, info=dict()):
         if mask is None:
             mask = np.zeros_like(x, dtype=bool)
+        else:
+            mask = mask.squeeze()
         x_masked = x[~mask]
-        if self.scheme == 'std':
+        if scheme == 'std':
             mean = np.mean(x_masked, axis=self.axis, keepdims=True)
             std = np.std(x_masked, axis=self.axis, keepdims=True)
             x =  (x - mean) / (std + 1e-8)
-        elif self.scheme == 'minmax':
+        elif scheme == 'minmax':
             min_val = np.min(x_masked, axis=self.axis, keepdims=True)
             max_val = np.max(x_masked, axis=self.axis, keepdims=True)
             x =  (x - min_val) / (max_val - min_val + 1e-8)
-        elif self.scheme == 'median':
-            median = np.median(x_masked, axis=self.axis, keepdims=True)
+        elif scheme == 'median':
+            median = np.nanmedian(x_masked + 1e-3, axis=self.axis, keepdims=True)
             x =  x / median
-        elif self.scheme == 'dist':
+        elif scheme == 'dist':
             d = info['Dist']
             assert d is not None, "Distance must be provided for 'dist' normalization"
             x = x * d ** 2
-            x = x / 1e11    # arbitrary scaling factor
-        elif self.scheme == 'dist_median':
+            x = x - x.mean()    # Subtract mean
+        elif scheme == 'dist_median':
             d = info['Dist']
             assert d is not None, "Distance must be provided for 'dist' normalization"
             x = x * d ** 2
-            x = x / np.nanmedian(x + 1e-3)    
+            x = x / np.nanmedian(x + 1e-3)
+        elif scheme == 'dist_std':
+            d = info['Dist']
+            assert d is not None, "Distance must be provided for 'dist' normalization"
+            x = x * d ** 2
+            x = (x - x.mean()) / (x.std() + 1e-8)
+        elif scheme == 'mag':
+            k = info['KMAG']
+            assert k is not None, "KMAG must be provided for 'mag' normalization"
+            k_inv = 2**(-k)
+            x = x / k_inv
         return x, mask, info
 
-    def _normalize_torch(self, x, mask=None, info=dict()):
+    def _normalize_torch(self, x, scheme, mask=None, info=dict()):
         if mask is None:
             mask = torch.zeros_like(x, dtype=torch.bool)
         x_masked = x[~mask]
-        if self.scheme == 'std':
+        if scheme == 'std':
             mean = torch.mean(x_masked, dim=self.axis, keepdim=True)
             std = torch.std(x_masked, dim=self.axis, keepdim=True)
             x =  (x - mean) / (std + 1e-8)
-        elif self.scheme == 'minmax':
+        elif scheme == 'minmax':
             min_val = torch.min(x_masked, dim=self.axis, keepdim=True)[0]
             max_val = torch.max(x_masked, dim=self.axis, keepdim=True)[0]
             x =  (x - min_val) / (max_val - min_val + 1e-8)
-        elif self.scheme == 'median':
+        elif scheme == 'median':
             median = torch.median(x, dim=self.axis, keepdim=True)[0]
-            x  = x / median
+            x  = x / median 
         return x, mask, info
 
     def __repr__(self):
@@ -524,6 +543,7 @@ class LAMOSTSpectrumPreprocessor:
                  resample_step=0.0001,
                  median_filter_size=3,
                  polynomial_order=5,
+                 rv_norm=True,
                  continuum_norm=True,
                  plot_steps=False):
         """
@@ -541,8 +561,10 @@ class LAMOSTSpectrumPreprocessor:
         self.resample_step = resample_step
         self.median_filter_size = median_filter_size
         self.polynomial_order = polynomial_order
+        self.rv_norm = rv_norm
         self.continuum_norm = continuum_norm
         self.plot_steps = plot_steps
+
 
 
     def __call__(self, spectrum, mask=None, info=dict()):
@@ -560,8 +582,8 @@ class LAMOSTSpectrumPreprocessor:
         # Convert to numpy if torch tensor
         if torch.is_tensor(spectrum):
             spectrum = spectrum.numpy()
-
-        radial_velocity = info['RV']
+        if self.rv_norm:
+            radial_velocity = info['RV']
         wavelength = info['wavelength']
 
         if self.plot_steps:
@@ -572,7 +594,10 @@ class LAMOSTSpectrumPreprocessor:
             merged_ax.set_title("Original Spectrum")
         
         # 1. Wavelength Correction
-        corrected_wavelength = self._wavelength_correction(wavelength, radial_velocity)
+        if self.rv_norm:
+            corrected_wavelength = self._wavelength_correction(wavelength, radial_velocity)
+        else:
+            corrected_wavelength = wavelength
         info['corrected_wavelength'] = corrected_wavelength
 
         
@@ -747,7 +772,8 @@ class ACF():
             # if mask is not None:
                 # acf[mask] = np.nan
             if self.max_len is not None and (len(acf) < self.max_len):
-                acf = np.pad(acf, ((0, self.max_len - len(acf))))           
+                acf = np.pad(acf, ((0, self.max_len - len(acf))))
+            acf = (acf - acf.mean()) / acf.std()
             info['acf'] = acf[None]
 
         else:

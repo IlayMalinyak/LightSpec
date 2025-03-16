@@ -279,7 +279,7 @@ class Trainer(object):
             if param.grad is not None:
                 grad_norm = param.grad.norm().item()
                 if grad_norm > 100:
-                    print(f"Large gradient in {name}: {grad_norm}")
+                   print(f"Large gradient in {name}: {grad_norm}")
 
     def train_epoch(self, device, epoch):
         """
@@ -306,7 +306,7 @@ class Trainer(object):
             pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item():.4f}")      
             if i > self.max_iter:
                 break
-        print("number of train_accs: ", train_acc)
+        print("number of train_accs: ", all_accs, "total: ", total)
         return train_loss, all_accs/total
     
     def train_batch(self, batch, batch_idx, device):
@@ -776,7 +776,7 @@ class ContrastiveTrainer(Trainer):
                 self.scaler.update()
                 if self.scheduler is not None:
                     self.scheduler.step()
-                self.check_gradients()  # Monitor gradients
+                # self.check_gradients()  # Monitor gradients
         else:
             loss.backward()
             if (batch_idx + 1) % self.accumulation_step == 0:
@@ -785,7 +785,7 @@ class ContrastiveTrainer(Trainer):
                 self.optimizer.step()
                 if self.scheduler is not None:
                     self.scheduler.step()
-                self.check_gradients()  # Monitor gradients
+                # self.check_gradients()  # Monitor gradients
 
         return loss, acc, y
 
@@ -825,15 +825,47 @@ class ContrastiveTrainer(Trainer):
             if 'loss_contrastive' in out.keys():
                 self.val_aux_loss_2.append(out['loss_contrastive'].item())
         return loss, acc, y
+    
+    def predict(self, test_dataloader, device, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        self.model.eval()
+        preds = np.zeros((0, self.output_dim, self.num_quantiles))
+        targets = np.zeros((0, self.output_dim))
+        tot_kic = []
+        tot_teff = []
+        aggregated_info = {}
+        pbar = tqdm(test_dataloader)
+
+        for i,(x1, x2, y, _, info, _) in enumerate(pbar):
+            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+            b = x1.shape[0]
+            for item in info:
+                for key, value in item.items():
+                    # Check if value is a scalar (not an array/tensor)
+                    if np.isscalar(value):
+                        if key not in aggregated_info:
+                            aggregated_info[key] = []
+                        aggregated_info[key].append(value)
+            with torch.no_grad():
+                out = self.model(x1, x2)
+                if self.criterion is not None:
+                    y_pred = out['preds']
+                    y_pred = y_pred.view(x1.shape[0], -1, self.num_quantiles)
+                    preds = np.concatenate((preds, y_pred.cpu().numpy()))
+                targets = np.concatenate((targets, y.cpu().numpy()))
+                if i > self.max_iter:
+                    break
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, aggregated_info
 
 class RegressorTrainer(Trainer):
-    def __init__(self, w_name, w_init_val, **kwargs):
+    def __init__(self, w_name, **kwargs):
         super().__init__(**kwargs)
         self.w_name = w_name
-        self.w_init_val = w_init_val
     
     def train_batch(self, batch, batch_idx, device):
-        const = self.w_init_val/(1+self.epoch)
         x, _, y, _, info,_ = batch
         x, y = x.to(device), y.to(device)
         b = x.shape[0]
@@ -841,9 +873,10 @@ class RegressorTrainer(Trainer):
             w = torch.ones(x.size(0)).to(device)
         else:
             w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        # w = 1 + (const * torch.log(w))
-        # w = torch.exp(w*const)
         out = self.model(x)
+        
+        if isinstance(out, tuple):
+            out = out[0]
         out = out.view(b, -1, self.num_quantiles)
         loss = self.criterion(out, y)
         # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape)
@@ -855,11 +888,12 @@ class RegressorTrainer(Trainer):
         # if self.wandb:
         #     wandb.log({"train_loss": loss.item()})
         out_median = out[..., out.shape[-1]//2]
+        if (len(out_median.shape) == 2) and (len(y.shape) == 1):
+            out_median = out_median.squeeze(1)
         acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         return loss, acc, x
 
     def eval_batch(self, batch, batch_idx, device):
-        const = self.w_init_val/(1+self.epoch)
         x, _, y, _, info,_ = batch
         x, y = x.to(device), y.to(device)
         b = x.shape[0]
@@ -867,9 +901,10 @@ class RegressorTrainer(Trainer):
             w = torch.ones(x.size(0)).to(device)
         else:
             w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        # w = 1 + (const * torch.log(w))
         with torch.no_grad():
             out = self.model(x)
+            if isinstance(out, tuple):
+                out = out[0]
             out = out.view(b, -1, self.num_quantiles)
         loss = self.criterion(out, y)
         loss = (loss * w.unsqueeze(-1)).mean(0).sum()
@@ -877,8 +912,44 @@ class RegressorTrainer(Trainer):
         #     wandb.log({"val_loss": loss.item()})
 
         out_median = out[..., out.shape[-1]//2]
+        if (len(out_median.shape) == 2) and (len(y.shape) == 1):
+            out_median = out_median.squeeze()
         acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         return loss, acc, x
+
+    def predict(self, test_dataloader, device, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        self.model.eval()
+        preds = np.zeros((0, self.output_dim, self.num_quantiles))
+        targets = np.zeros((0, self.output_dim))
+        tot_kic = []
+        tot_teff = []
+        aggregated_info = {}
+        pbar = tqdm(test_dataloader)
+
+        for i,(x, _, y, mask, info, _) in enumerate(pbar):
+            x, y =  x.to(device), y.to(device)
+            b = x.shape[0]
+            for item in info:
+                for key, value in item.items():
+                    # Check if value is a scalar (not an array/tensor)
+                    if np.isscalar(value):
+                        if key not in aggregated_info:
+                            aggregated_info[key] = []
+                        aggregated_info[key].append(value)
+            with torch.no_grad():
+                y_pred = self.model(x)
+                y_pred = y_pred.view(b, -1, self.num_quantiles)
+            out_diff = int(y.shape[1] - y_pred.shape[1])
+            y = y[:, out_diff:]
+            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+            if i > self.max_iter:
+                break
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, aggregated_info
 
 class MaskedRegressorTrainer(Trainer):
     def __init__(self, w_name, w_init_val, ssl_criterion, ssl_weight=0.5, **kwargs):

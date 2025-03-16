@@ -1,8 +1,8 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: 1
-  light_model_name: "MultiTaskRegressor"
+  exp_num: 2
+  light_model_name: "MultiTaskSimSiam"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
   # Data
@@ -19,15 +19,15 @@ Data:
   meta_columns: ['Teff', 'Mstar']
   labels: ['Teff', 'logg', 'FeH', 'Rstar', 'RUWE']
   test_run: False
-  create_umap: False
-  load_checkpoint: False
+  create_umap: True
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
   scale_flux: False
   combined_embed: False
   pred_coeff_val: None
   approach: "multitask"
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-24/lightspec_2.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-03/lightspec_2.pth'
 
 Astroconformer:
   # Model
@@ -83,7 +83,7 @@ MultiEncoder_lc:
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
-  checkpoint_path: '/data/lightSpec/logs/light_2025-02-11/MultiEncoder_lc_1.pth'
+  checkpoint_path: '/data/lightSpec/logs/light_2025-02-11/MultiEncoder_lc_3.pth'
 
 
 Conformer_lc:
@@ -97,23 +97,23 @@ Conformer_lc:
   dropout_p: 0.2
   norm: "shortcut"
 
-MultiTaskRegressor_lc:
+MultiTaskSimSiam_lc:
   in_channels: 2
-  num_layers: 5
+  num_layers: 8
   stride: 1
-  encoder_dims: [64,128,256,1024,2048]
+  encoder_dims: [32, 64,128,256,512,2048]
   transformer_layers: 4
   kernel_size: 3
   dropout_p: 0.2
   avg_output: True
-  output_dim: 2
+  output_dim: 1
   num_quantiles: 5
   beta: 1
   load_checkpoint: True
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
-  checkpoint_path: "/data/lightSpec/logs/light_2025-03-01/MultiTaskRegressor_lc_2.pth"
+  checkpoint_path: "/data/lightSpec/logs/light_2025-03-03/MultiEncoder_lc_2.pth"
 
 
 

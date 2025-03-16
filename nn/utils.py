@@ -24,6 +24,7 @@ def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False)
   state_dict = torch.load(f'{checkpoint_path}', map_location=torch.device('cpu'))
   new_state_dict = OrderedDict()
   for key, value in state_dict.items():
+    # print(key)
     while key.startswith('module.'):
         key = key[7:]
     if load_backbone:
@@ -32,17 +33,16 @@ def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False)
         else:
             continue
     key = prefix + key
-    # print(key)
+    # print(key, value.shape)
     new_state_dict[key] = value
   state_dict = new_state_dict
+  
   missing, unexpected = model.load_state_dict(state_dict, strict=False)
   print("number of keys in state dict and model: ", len(state_dict), len(model.state_dict()))
   print("number of missing keys: ", len(missing))
   print("number of unexpected keys: ", len(unexpected))
   print("missing keys: ", missing)
   print("unexpected keys: ", unexpected)
-#   print("state dict: ", state_dict.keys())
-#   print("model dict: ", model.state_dict().keys())
   return model
 
 def init_model(model, model_args, prefix='', load_backbone=False):

@@ -53,8 +53,7 @@ conformer_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer'])
 exp_num = data_args.exp_num
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
-if not os.path.exists(f"{data_args.log_dir}/{datetime_dir}"):
-    os.makedirs(f"{data_args.log_dir}/{datetime_dir}")
+os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 model_args.num_quantiles = len(optim_args.quantiles)
 model_args.output_dim = len(data_args.labels)
@@ -62,15 +61,16 @@ model_args.output_dim = len(data_args.labels)
 transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
                         MovingAvg(13),
                         ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
-                        RandomMasking(0.1),
-                        Normalize('dist_median'),
+                        Normalize(['none', 'std']),
+                        # RandomMasking(0.1, mask_value=-999),
                         ToTensor(), ])
 
 
 kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
 berger_cat = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
 kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
-kepler_df = kepler_df.merge(berger_cat, on='KID').merge(kepler_meta[['KID', 'KMAG']], on='KID')
+activity_cat = pd.read_csv('/data/logs/activity_proxies/proxies_full_dist.csv')
+kepler_df = kepler_df.merge(berger_cat, on='KID').merge(kepler_meta[['KID', 'KMAG']], on='KID', how='left').merge(activity_cat, on='KID', how='left')
 kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
 kepler_df.dropna(subset=data_args.labels, inplace=True)
 print("number of samples: ", len(kepler_df))
@@ -82,11 +82,18 @@ train_dataset = KeplerDataset(df=kepler_df, transforms=transforms,
                                 use_acf=data_args.use_acf,
                                 scale_flux=data_args.scale_flux,
                                 labels=data_args.labels,
+                                dims=model_args.in_channels,
                                 )
-# start = time.time()
-# for i in range(100):
-#     x1,x2,y,_,info1,info2 = train_dataset[i]
-# print("average time taken per iteration: ", (time.time()-start)/100)
+start = time.time()
+for i in range(100):
+    x1,x2,y,_,info1,info2 = train_dataset[i]
+    print(x1.shape, x1.max(), x1.min(), x2.max(), x2.min(),x1[:, x1[0]==-999].shape, x2[:, x2[0]==-999].shape)
+    if i % 10 == 0:
+        fig, axes = plt.subplots(x1.shape[0],1)
+        for j in range(x2.shape[0]):
+            axes[j].plot(x1[j, :1800].numpy())
+        plt.savefig(f"/data/lightSpec/images/lc_ssl_{i}.png")
+print("average time taken per iteration: ", (time.time()-start)/100)
 indices = list(range(len(train_dataset)))
 train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
 train_subset = Subset(train_dataset, train_indices)

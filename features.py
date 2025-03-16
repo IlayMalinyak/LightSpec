@@ -38,7 +38,7 @@ def create_umap(model,
             x1 = torch.cat((lc, spec.unsqueeze(1)), dim=1)
             x2 = torch.cat((lc2, spec2.unsqueeze(1)), dim=1)
         else:
-            x1, x2, w, _, info1, info2 = batch
+            x1, x2, _, _, info1, info2 = batch
             x1, x2 = x1.to(device), x2.to(device)
         
         # Process model outputs
@@ -48,6 +48,8 @@ def create_umap(model,
                 out = model(x, temperature=temperature)
             else:
                 if use_w:
+                    w = torch.stack([i['w'] for i in info1]).to(device)
+
                     out = model(x1, x2, w)
                 elif dual:
                     out = model(x1, x2)
@@ -60,6 +62,7 @@ def create_umap(model,
             logits = logits[0]
         if logits.dim() > 2:
             logits = logits.mean(dim=1)
+        # print(logits.shape)
         reduced_data = reducer.fit_transform(logits.cpu().numpy())
         
         # Aggregate metadata

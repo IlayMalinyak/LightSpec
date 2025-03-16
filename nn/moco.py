@@ -1,3 +1,4 @@
+        # Check for NaN in loss earl0
 # code modified from https://github.com/facebookresearch/moco/blob/main/moco/builder.py
 
 import torch
@@ -264,7 +265,9 @@ class PredictiveMoco(MultimodalMoCo):
             spectra_encoder, lightcurve_encoder, projection_args, **kwargs
         )
         
-        self.predictor = Predictor(**predictor_args)
+        self.vicreg_predictor = Predictor(**predictor_args)
+        predictor_args['w_dim'] = 0
+        # self.moco_predictor = Predictor(**predictor_args)
         self.loss_args = loss_args
     
     def off_diagonal(self, x):
@@ -328,14 +331,16 @@ class PredictiveMoco(MultimodalMoCo):
 
 
 
-        q_s_hat = self.predictor(q_s, w=w)
-        q_l_hat = self.predictor(q_l, w=w)
+        q_s_vicreg = self.vicreg_predictor(q_s, w=w)
+        q_l_vicreg = self.vicreg_predictor(q_l, w=w)
+        # q_s_moco = self.moco_predictor(q_s)
+        # q_l_moco = self.moco_predictor(q_l)
 
         with torch.no_grad():
-            k_s, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
-            k_l, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
+            k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
+            k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
         
-        loss_s_pred = self.vicreg_loss(q_s_hat, q_l)
+        loss_s_pred = self.vicreg_loss(q_s_vicreg, q_l_vicreg)
 
         loss_s, logits_s, labels = self.contrastive_loss(
             q_s, k_l, self.lightcurve_queue
@@ -350,7 +355,7 @@ class PredictiveMoco(MultimodalMoCo):
         )
 
         if self.bidirectional:
-            loss_l_pred = self.vicreg_loss(q_l_hat, q_s)
+            loss_l_pred = self.vicreg_loss(q_l_vicreg, q_s_vicreg)
             loss_l, logits_l, labels_l = self.contrastive_loss(
                 q_l, k_s, self.spectra_queue
             )

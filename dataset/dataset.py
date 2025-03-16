@@ -31,6 +31,37 @@ plt.rcParams.update({'legend.fontsize': 22})
 
 T_sun = 5778
 VSINI_MAX = 100
+P_MAX = 60
+
+def pad_with_last_element(tensor, seq_len):
+    """
+    Pad the last dimension of a tensor from size T to size seq_len, 
+    where the padding values for each dimension are the last elements of that dimension.
+    
+    Args:
+        tensor: Input tensor of shape (dims, T)
+        seq_len: Target sequence length for the last dimension
+        
+    Returns:
+        Padded tensor of shape (dims, seq_len)
+    """
+    dims, T = tensor.shape
+    
+    if T >= seq_len:
+        # If the tensor is already longer than or equal to seq_len, truncate it
+        return tensor[:, :seq_len]
+    
+    # Create the padded tensor
+    padded = torch.zeros((dims, seq_len), dtype=tensor.dtype, device=tensor.device)
+    
+    # Copy the original data
+    padded[:, :T] = tensor
+    
+    # For each dimension, fill the padding with the last element of that dimension
+    for i in range(dims):
+        padded[i, T:] = tensor[i, -1]
+    
+    return padded
 
 
 class DualDataset(Dataset):
@@ -38,7 +69,9 @@ class DualDataset(Dataset):
                     labels_path,
                     labels_names=['Period', 'Inclination'],
                     lc_transforms=None,
+                    use_acf=False,
                     spec_seq_len=4096,
+                    lc_seq_len=13506,
                     spectra_transforms=None,
                     example_wv_path='/data/lamost/example_wv.npy'
                 ):
@@ -46,10 +79,12 @@ class DualDataset(Dataset):
         self.labels = pd.read_csv(labels_path)
         self.labels_names = labels_names
         self.spec_seq_len = spec_seq_len
+        self.lc_seq_len = lc_seq_len
+        self.use_acf = use_acf
         self.range_dict = dict()
         self.update_range_dict()
         self.lc_dir = os.path.join(data_dir, 'lc')
-        self.spectra_dir = os.path.join(data_dir, 'spectra')
+        self.spectra_dir = os.path.join(data_dir, 'lamost')
         self.lc_transforms = lc_transforms
         self.spectra_transforms = spectra_transforms
         self.path_list = os.listdir(self.lc_dir)
@@ -78,6 +113,9 @@ class DualDataset(Dataset):
         try:
             spec = pd.read_parquet(os.path.join(self.spectra_dir, f'{idx}.pqt')).values
             lc = pd.read_parquet(os.path.join(self.lc_dir, f'{idx}.pqt')).values
+            max_val = np.max(np.abs(lc))
+            if max_val > 1e2:
+                lc[np.abs(lc) > 1e2] = np.random.uniform(0, 2, size=lc[np.abs(lc) > 1e2].shape)
         except (FileNotFoundError, OSError) as e:
             # print("Error reading file ", idx, e)
             lc = np.zeros((48000, 2))
@@ -87,18 +125,28 @@ class DualDataset(Dataset):
         info_s = dict()
         info_lc = {'data_dir': self.data_dir}
         label = self.labels.iloc[idx].to_dict()
-        info_s['RV'] = self.get_rv(label)
+        # L = label['L']
+        # lc -= L
+
+        # info_s['RV'] = self.get_rv(label)
         info_s['wavelength'] = self.example_wv
         if self.spectra_transforms:
             spectra, _,info_s = self.spectra_transforms(spectra, info=info_s)
         if self.lc_transforms:
             flux,_,info_lc = self.lc_transforms(flux, info=info_lc)
+            if self.use_acf:
+                acf = torch.tensor(info_lc['acf']).nan_to_num(0)
+                flux = torch.cat((flux, acf), dim=0)
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
+        if flux.shape[-1] < self.lc_seq_len:
+            flux = F.pad(flux, ((0, self.lc_seq_len - flux.shape[-1],0,0)), "constant", value=0)
         spectra = torch.nan_to_num(spectra, nan=0)
         info = {'spectra': info_s, 'lc': info_lc}
         y = torch.tensor([self._normalize(label[name], name) for name in self.labels_names], dtype=torch.float32)
-        return flux.squeeze().unsqueeze(0), spectra.squeeze().unsqueeze(0), y.squeeze() , info
+        flux = flux.nan_to_num(0)
+        spectra = spectra.nan_to_num(0)
+        return flux, spectra, y.squeeze() , torch.zeros_like(flux),  info, info
 
 class SpectraDataset(Dataset):
     """
@@ -278,7 +326,8 @@ class KeplerDataset():
                 masked_transforms:bool=False,
                 use_acf:bool=False,
                 scale_flux:bool=True,
-                labels:object=None
+                labels:object=None,
+                 dims:int=1
                 ):
         """
         dataset for Kepler data
@@ -305,6 +354,7 @@ class KeplerDataset():
         self.use_acf = use_acf
         self.scale_flux = scale_flux
         self.labels = labels
+        self.dims = dims
 
     def __len__(self):
         return len(self.df)
@@ -358,19 +408,23 @@ class KeplerDataset():
                         'LOGG': row['logg'],
                         'M':row['Mstar'],
                         'FeH': row['FeH'],
-                        'KMAG': row['kmag_abs'],
                         'Dist': row['Dist']}
             else:
                 meta = {'TEFF': None, 'RADIUS': None,
                         'LOGG': None, 'M': None, 'FeH':None,
-                        'KMAG': None, 'Dist': None}
+                        'Dist': None}
+            meta['KMAG'] = row['kmag_abs'] if 'kmag_abs' in row.keys() else None
             if self.labels is not None:
                 for label in self.labels:
                     meta[label] = row[label]
             
             if 'predicted period' in row.keys():
-                meta['predicted period'] = row['predicted period']
-                meta['mean_period_confidence'] = row['mean_period_confidence']
+                meta['predicted period'] = row['predicted period'] / P_MAX
+            if 'Prot' in row.keys():
+                meta['Prot'] = row['Prot'] / P_MAX
+            conf_cols = [c for c in row.keys() if 'confidence' in c]
+            for c in conf_cols:
+                meta[c] = row[c]
             if 'Pmax' in row.keys() and 'Pmin' in row.keys():
                 meta['Pmax'] = row['Pmax']
                 meta['Pmin'] = row['Pmin']
@@ -414,6 +468,31 @@ class KeplerDataset():
             else:
                 x[nan_indices] = 0	
         return x
+    
+    def transform_data(self, x, transforms, info, idx):
+        try:
+            x, mask, info = self.transforms(x, mask=None, info=info)
+            if len(x.shape) == 1:
+                x = x.unsqueeze(0)
+            elif (len(x.shape) == 2) and (x.shape[-1] == 1):
+                x = x.squeeze(-1).unsqueeze(0)
+            if mask is not None and len(mask.shape) == 1:
+                mask = mask.unsqueeze(0)
+            x = pad_with_last_element(x, self.seq_len)
+            if mask is not None:
+                mask = pad_with_last_element(mask, self.seq_len)
+            else:
+                mask = torch.zeros(1, self.seq_len)
+            if self.use_acf:
+                acf = torch.tensor(info['acf']).nan_to_num(0)
+                x = torch.cat((x, acf), dim=0)
+        except Exception as e:
+            print(f"Error in transforms for index {idx}: {str(e)}")
+            traceback.print_exc()
+            x = torch.zeros(self.dims, self.seq_len)
+            mask = torch.zeros(1, self.seq_len)
+        return x, mask, info
+
 
 
     def __getitem__(self, idx):
@@ -425,53 +504,17 @@ class KeplerDataset():
         info['period'] = p_val
         info_y = copy.deepcopy(info)
         if self.scale_flux:
-            x /= x.max()
+            x = (x - x.min()) / (x.max() - x.min())
         target = x.copy()
         mask = None
         if self.transforms is not None:
-            try:
-                x, mask, info = self.transforms(x, mask=None, info=info)
-                if self.seq_len > x.shape[0]:
-                    x = F.pad(x, ((0, 0,0, self.seq_len - x.shape[-1],)), "constant", value=x.squeeze()[-1].item())
-                    if mask is not None:
-                        mask = F.pad(mask, ((0,0,0, self.seq_len - mask.shape[-1])), "constant", value=0)
-                    else:
-                        mask = torch.zeros_like(x)
-                x = x[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
-                if mask is not None:
-                    mask = mask[:self.seq_len,:].squeeze().unsqueeze(0)
-                if self.use_acf:
-                    acf = torch.tensor(info['acf']).nan_to_num(0)
-                    x = torch.cat((x, acf), dim=0)
-            except Exception as e:
-                print(f"Error in transforms for index {idx}: {str(e)}")
-                # traceback.print_exc()
-                x = torch.zeros(1, self.seq_len) if not self.use_acf else torch.zeros(2, self.seq_len)
-                mask = torch.zeros(1, self.seq_len)
+          x, mask, info= self.transform_data(x, self.transforms, info, idx) 
         else:
             x = torch.tensor(x)
         if self.target_transforms is not None:
-            try:
-                target, mask_y, info_y = self.target_transforms(target, mask=None, info=info_y)
-                if self.seq_len > target.shape[0]:
-                    target = F.pad(target, ((0, 0,0, self.seq_len - target.shape[-1],)), "constant", value=0)
-                    if mask_y is not None:
-                        mask_y = F.pad(mask_y, ((0, 0,0, self.seq_len - mask_y.shape[-1],)), "constant", value=0)
-                    else:
-                        mask_y = torch.zeros_like(target)
-                target = target[:self.seq_len,:].nan_to_num(0).squeeze().unsqueeze(0)
-                if mask_y is not None:
-                    mask_y = mask_y[:self.seq_len,:].squeeze().unsqueeze(0)
-                if self.use_acf:
-                    acf = torch.tensor(info_y['acf']).nan_to_num(0)
-                    target = torch.cat((target, acf), dim=0)
-            except Exception as e:
-                print(f"Error in target transforms for index {idx}: {str(e)}")
-                target = torch.zeros(1, self.seq_len) if not self.use_acf else torch.zeros(2, self.seq_len)
-                mask_y = torch.zeros(1, self.seq_len)
-       
+            target, mask_y, info_y = self.transform_data(target, self.target_transforms, info_y, idx)       
         else:
-            target = x.clone() if not self.use_acf else x[0].clone()
+            target = x.clone()
             mask_y = mask
             if self.mask_transform is not None:
                 to_mask = x if not self.use_acf else x[0]
@@ -479,6 +522,8 @@ class KeplerDataset():
                 if self.use_acf:
                     acf = torch.tensor(info['acf']).nan_to_num(0)
                     x = torch.cat((x.unsqueeze(0), acf), dim=0)
+        x = x.nan_to_num(0)
+        target = target.nan_to_num(0)
         info['Teff'] = info['TEFF']
         info['Mstar'] = info['M']
         info['logg'] = info['LOGG']
