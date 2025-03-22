@@ -1,5 +1,6 @@
 
 import os
+# os.system("pip install astropy statsmodels umap-learn")
 import torch
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader, Subset
@@ -30,7 +31,7 @@ from transforms.transforms import *
 from dataset.dataset import LightSpecDataset, create_unique_loader
 from dataset.sampler import DistinctParameterSampler
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
-from nn.models import CNNEncoder, CNNEncoderDecoder, MultiEncoder, MultiTaskRegressor, MultiTaskSimSiam
+from nn.models import * 
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
 from nn.moco import MultimodalMoCo, PredictiveMoco, MultiTaskMoCo
 from nn.simsiam import SimSiam, projection_MLP
@@ -41,7 +42,7 @@ from nn.train import ContrastiveTrainer
 from tests.test_unique_sampler import run_sampler_tests
 from features import create_umap
 
-META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Dist', 'kmag_abs', 'RUWE']
+META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist', 'kmag_abs', 'RUWE', 'Prot']
 
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
           'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder, 'MultiTaskSimSiam': MultiTaskSimSiam,}
@@ -55,19 +56,70 @@ np.random.seed(1234)
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"lightspec_{current_date}"
 
+def priority_merge_prot(dataframes, target_df):
+    """
+    Merge 'Prot' values from multiple dataframes into target dataframe in priority order,
+    using 'KID' as the merge key. Much more efficient implementation.
+    
+    Args:
+        dataframes: List of dataframes, each containing 'Prot' and 'KID' columns (in decreasing priority order)
+        target_df: Target dataframe to merge 'Prot' values into (must contain 'KID' column)
+    
+    Returns:
+        DataFrame with aggregated 'Prot' values merged into target_df
+    """
+    # Create a copy of the target dataframe
+    result = target_df.copy()
+    
+    # Create an empty dataframe with just KID and Prot columns
+    prot_values = pd.DataFrame({'KID': [], 'Prot': [], 'Prot_ref': []})
+    
+    # Process dataframes in priority order
+    for df in dataframes:
+        print(f"Processing dataframe with {len(df)} rows. currently have {len(prot_values)} prot values")
+        # Extract just the KID and Prot columns
+        current = df[['KID', 'Prot', 'Prot_ref']].copy()
+        
+        # Only add keys that aren't already in our prot_values dataframe
+        missing_keys = current[~current['KID'].isin(prot_values['KID'])]
+        
+        # Concatenate with existing values
+        prot_values = pd.concat([prot_values, missing_keys])
+    
+    # Merge the aggregated Prot values into the result dataframe
+    result = result.merge(prot_values, on='KID', how='left')
+    
+    return result
+
+
 def create_train_test_dfs(norm_cols=['Teff', 'logg', 'Mstar']):
     kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
     kepler_meta = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
     kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
     kepler_df = kepler_df.merge(kepler_meta, on='KID', how='left').merge(kmag_df[['KID', 'KMAG']], on='KID', how='left')
     kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
+    lightpred_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
+    lightpred_df['Prot_ref'] = 'lightpred'
+    lightpred_df.rename(columns={'predicted period': 'Prot'}, inplace=True)
+
+    santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
+    santos_df['Prot_ref'] = 'santos'
+    mcq14_df = pd.read_csv('/data/lightPred/tables/Table_1_Periodic.txt')
+    mcq14_df['Prot_ref'] = 'mcq14'
+    reinhold_df = pd.read_csv('/data/lightPred/tables/reinhold2023.csv')
+    reinhold_df['Prot_ref'] = 'reinhold'
+
+    p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
+    kepler_df = priority_merge_prot(p_dfs, kepler_df)
+
+
     lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
     lamost_kepler_df = lamost_kepler_df.merge(kepler_df[META_COLUMNS], on='KID', how='inner')
     lamost_kepler_df['main_seq'] = lamost_kepler_df.apply(giant_cond, axis=1)
     lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==True]
-    lamost_kepler_df = lamost_kepler_df.dropna(subset=norm_cols)
+    # lamost_kepler_df = lamost_kepler_df.dropna(subset=norm_cols)
     train_df, val_df  = train_test_split(lamost_kepler_df, test_size=0.2, random_state=42)
     print("number of samples kepler: ", len(kepler_df),  " lamost-kepler :", len(lamost_kepler_df))
     return train_df, val_df 
@@ -106,12 +158,13 @@ if data_args.test_run:
     datetime_dir = f"test_{current_date}"
 light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{light_model_name}_lc'])
 spec_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{spec_model_name}_spec'])
-combined_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{combined_model_name}_combined'])
-conformer_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_lc'])
+astroconformer_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['AstroConformer_lc'])
+cnn_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNEncoder_lc'])
 conformer_args_spec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_spec'])
-conformer_args_combined = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_combined'])
 lightspec_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiEncoder_lightspec'])
 transformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer_lightspec'])
+conformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_lightspec'])
+projector_args = Container(**yaml.safe_load(open(args_dir, 'r'))['projector'])
 predictor_args = Container(**yaml.safe_load(open(args_dir, 'r'))['predictor'])
 moco_pred_args = Container(**yaml.safe_load(open(args_dir, 'r'))['reg_predictor'])
 loss_args = Container(**yaml.safe_load(open(args_dir, 'r'))['loss'])
@@ -122,11 +175,13 @@ optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
 os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 moco_pred_args.out_dim = len(data_args.labels) * len(optim_args.quantiles)
+predictor_args.w_dim = len(data_args.meta_columns)
 
-light_transforms = Compose([RandomCrop(int(data_args.max_days_lc/data_args.lc_freq)),
+light_transforms = Compose([RandomCrop(int(data_args.max_len_lc)),
                             MovingAvg(13),
                             ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
-                            Normalize('dist_median'),
+                            FFT(seq_len=int(data_args.max_len_lc)),
+                            Normalize(['mag_median', 'std']),
                             ToTensor(),
                          ])
 spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
@@ -137,6 +192,12 @@ norm_cols = data_args.meta_columns if not data_args.create_umap else []
 train_df, val_df = create_train_test_dfs(norm_cols=norm_cols)
 val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42) 
 
+# for label in data_args.labels:
+#     print(label)
+#     print(train_df[label].describe())
+#     print(test_df[label].describe())
+# exit()
+
 train_dataset = LightSpecDataset(df=train_df, light_transforms=light_transforms,
                                 spec_transforms=spec_transforms,
                                 npy_path = '/data/lightPred/data/raw_npy',
@@ -145,6 +206,7 @@ train_dataset = LightSpecDataset(df=train_df, light_transforms=light_transforms,
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 meta_columns=data_args.meta_columns,
                                 use_acf=data_args.use_acf,
+                                 use_fft=data_args.use_fft,
                                  scale_flux=data_args.scale_flux,
                                  labels=data_args.labels
                                 )
@@ -156,6 +218,7 @@ val_dataset = LightSpecDataset(df=val_df, light_transforms=light_transforms,
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 meta_columns=data_args.meta_columns,
                                 use_acf=data_args.use_acf,
+                               use_fft=data_args.use_fft,
                                scale_flux=data_args.scale_flux,
                                labels=data_args.labels
                                 )
@@ -168,6 +231,7 @@ test_dataset = LightSpecDataset(df=test_df, light_transforms=light_transforms,
                                 spec_seq_len=int(data_args.max_len_spectra),
                                 meta_columns=data_args.meta_columns,
                                 use_acf=data_args.use_acf,
+                                use_fft=data_args.use_fft,
                                 scale_flux=data_args.scale_flux,
                                 labels=data_args.labels
                                 )
@@ -185,19 +249,20 @@ val_dataloader = create_unique_loader(val_dataset,
                                      drop_last=True
                                     )
 
-test_dataloader = create_unique_loader(test_dataset,
-                                    batch_size=int(data_args.batch_size),
-                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                    collate_fn=kepler_collate_fn,
-                                    drop_last=True
-                                    )
+test_dataloader = DataLoader(test_dataset,
+                             batch_size=int(data_args.batch_size),
+                             collate_fn=kepler_collate_fn,
+                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                             drop_last=True
+                             )
 
 print("len train dataloader ", len(train_dataloader))
 
-light_model = MODELS[light_model_name](light_model_args, conformer_args=conformer_args_lc)
-# light_model = SimSiam(light_backbone)
-# light_model = light_backbone
 
+light_encoder1 = CNNEncoder(cnn_args_lc)
+light_encoder2 = Astroconformer(astroconformer_args_lc)
+light_backbone = DoubleInputRegressor(light_encoder1, light_encoder2, light_model_args)
+light_model = MultiTaskSimSiam(light_backbone, light_model_args)
 light_model = init_model(light_model, light_model_args)
 
 num_params_lc_all = sum(p.numel() for p in light_model.parameters() if p.requires_grad)
@@ -251,7 +316,7 @@ if data_args.load_checkpoint:
     model = load_checkpoints_ddp(model, data_args.checkpoint_path)
     print("loaded checkpoint from: ", data_args.checkpoint_path)
 
-model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Number of trainble parameters: {num_params}")
@@ -270,7 +335,7 @@ if data_args.approach == 'ssl':
     loss_fn = None
     num_quantiles = 1
 elif data_args.approach == 'multitask':
-    loss_fn = CQR(quantiles=optim_args.quantiles)
+    loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
     num_quantiles = len(optim_args.quantiles)
 if optim_args.optimizer == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(),
@@ -290,7 +355,7 @@ scaler = GradScaler()
 #         print(name, param.shape)
 accumulation_step = 1
 trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=1, scaler=scaler, grad_clip=True,
+                        criterion=loss_fn, output_dim=len(data_args.labels), scaler=scaler, grad_clip=True,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=num_quantiles,
                              exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
@@ -303,8 +368,9 @@ config_save_path = f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_comp
 complete_config = {
     "data_args": data_args.__dict__,
     "light_model_args": light_model_args.__dict__,
+    "light_astroconformer_args": astroconformer_args_lc.__dict__,
+    "light_cnn_args": cnn_args_lc.__dict__,
     "spec_model_args": spec_model_args.__dict__,
-    "conformer_args_lc": conformer_args_lc.__dict__,
     "conformer_args_spec": conformer_args_spec.__dict__,
     "transformer_args_lightspec": transformer_args_lightspec.__dict__,
     "moco_args": moco_args.__dict__,
@@ -331,8 +397,39 @@ plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lightspec_fit_{exp_num}.png")
 plt.clf()
 
 
-model.module.calc_loss = False
+model.module.moco_model.calc_loss = False
 model.eval()
+
+preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
+
+preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
+
+print(info.keys())
+
+low_q = preds[:, :, 0] 
+high_q = preds[:, :, -1]
+coverage = np.mean((targets >= low_q) & (targets <= high_q))
+print('coverage: ', coverage)
+
+cqr_errs = loss_fn.calibrate(preds_val, targets_val)
+print(targets.shape, preds.shape)
+preds_cqr = loss_fn.predict(preds, cqr_errs)
+
+low_q = preds_cqr[:, :, 0]
+high_q = preds_cqr[:, :, -1]
+coverage = np.mean((targets >= low_q) & (targets <= high_q))
+print('coverage after calibration: ', coverage)
+df = save_predictions_to_dataframe(preds, targets, info, data_args.labels, optim_args.quantiles,
+ id_name='KID', info_keys=['Prot_ref', 'kmag_abs', 'Dist', 'Mstar', 'Lstar'])
+print(df.columns)
+df.to_csv(f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.csv", index=False)
+print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.csv") 
+df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, data_args.labels, optim_args.quantiles,
+ id_name='KID', info_keys=['Prot_ref', 'kmag_abs', 'Dist', 'Mstar', 'Lstar'])
+df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_cqr.csv", index=False)
+print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_cqr.csv")
+
+
 umap_df = create_umap(model, test_dataloader, local_rank, use_w=True, dual=True, logits_key='q')
 print("umap created: ", umap_df.shape)
 print(umap_df.head())

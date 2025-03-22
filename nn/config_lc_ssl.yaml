@@ -4,31 +4,34 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  model_name: "MultiEncoder"
-  batch_size: 32
+  model_name: "DoubleInputRegressor"
+  batch_size: 16
   num_epochs: 1000
-  exp_num: 1
+  exp_num: 3_1_ssl
   max_len_spectra: 4096
   max_days_lc: 270
-  max_len_lc: 26112
+  max_len_lc: 34560
   lc_freq: 0.0208
   create_umap: False
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
+  use_fft: True
   scale_flux: False
   ssl_weight: 0.5
-  labels: ['logg']
+  labels: ['Prot']
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-19/DoubleInputRegressor_lc_3_ssl.pth'
 
-Conformer:
-  encoder: ["mhsa_pro", "conv", "ffn"]
-  timeshift: false
-  num_layers: 6
-  stride: 2
-  encoder_dim: 1024
-  num_heads: 8
-  kernel_size: 3
-  dropout_p: 0.2
-  norm: "shortcut"
+DoubleInputRegressor:
+  encoder_only: True
+  stacked_input: True
+  in_channels: 3
+  load_checkpoint: True
+  output_dim: 1
+  num_quantiles: 1
+  dropout_p: 0.3  
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-19/DoubleInputRegressor_lc_3_ssl.pth'
+
 
 
 MultiEncoder:
@@ -52,8 +55,8 @@ MultiEncoder:
 
 CNNEncoder:
   # Model
-  in_channels: 1
-  num_layers: 8
+  in_channels: 2
+  num_layers: 6
   stride: 1
   encoder_dims: [32,64,128,256,512]
   kernel_size: 3
@@ -100,20 +103,25 @@ CNNEncoderDecoder:
   checkpoint_path: '/data/lightSpec/logs/light_2025-02-02/CNNEncoderDecoder_lc_2.pth'
 
 
-Mamba:
+AstroConformer:
   # Model
-  in_channels: 1
-  num_layers: 12
-  stride: 1
-  encoder_dim: 64
+  in_channels: 2
+  encoder: ["mhsa_pro", "conv"]
+  timeshift: false
+  num_layers: 5
+  num_decoder_layers: 6
+  stride: 20
+  encoder_dim: 512
+  decoder_dim: 128
+  num_heads: 8
   kernel_size: 3
   dropout_p: 0.3
-  output_dim: 2
-  beta: 1
+  output_dim: 3
+  encoder_only: True
+  norm: "postnorm"
   load_checkpoint: False
-  checkpoint_num: 1
-  activation: "sine"
-  sine_w0: 1.0
+  spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
+
 
 
 Optimization SSL:

@@ -31,7 +31,7 @@ plt.rcParams.update({'legend.fontsize': 22})
 
 T_sun = 5778
 VSINI_MAX = 100
-P_MAX = 60
+P_MAX = 70
 
 def pad_with_last_element(tensor, seq_len):
     """
@@ -70,6 +70,7 @@ class DualDataset(Dataset):
                     labels_names=['Period', 'Inclination'],
                     lc_transforms=None,
                     use_acf=False,
+                    use_fft=False,
                     spec_seq_len=4096,
                     lc_seq_len=13506,
                     spectra_transforms=None,
@@ -81,14 +82,16 @@ class DualDataset(Dataset):
         self.spec_seq_len = spec_seq_len
         self.lc_seq_len = lc_seq_len
         self.use_acf = use_acf
+        self.use_fft = use_fft
         self.range_dict = dict()
         self.update_range_dict()
-        self.lc_dir = os.path.join(data_dir, 'lc')
+        # self.lc_dir = os.path.join(data_dir, 'lc')
         self.spectra_dir = os.path.join(data_dir, 'lamost')
         self.lc_transforms = lc_transforms
         self.spectra_transforms = spectra_transforms
-        self.path_list = os.listdir(self.lc_dir)
+        self.path_list = os.listdir(self.data_dir)
         self.example_wv = np.load(example_wv_path)
+        self.Nlc = len(self.path_list)
         
     def update_range_dict(self):
         for name in self.labels_names:
@@ -110,21 +113,29 @@ class DualDataset(Dataset):
         return np.sin(np.radians(row['Inclination'])) * (2*np.pi*r_km / p_sec)
 
     def __getitem__(self, idx):
+        padded_idx = f'{idx:d}'.zfill(int(np.log10(self.Nlc))+1)
         try:
             spec = pd.read_parquet(os.path.join(self.spectra_dir, f'{idx}.pqt')).values
-            lc = pd.read_parquet(os.path.join(self.lc_dir, f'{idx}.pqt')).values
+        except (FileNotFoundError, OSError) as e:   
+            # print("Error reading file ", idx, e)
+            spec = np.zeros((3909, 1))
+        try:    
+            lc = pd.read_parquet(os.path.join(self.data_dir, f'lc_{padded_idx}.pqt')).values
             max_val = np.max(np.abs(lc))
             if max_val > 1e2:
                 lc[np.abs(lc) > 1e2] = np.random.uniform(0, 2, size=lc[np.abs(lc) > 1e2].shape)
         except (FileNotFoundError, OSError) as e:
-            # print("Error reading file ", idx, e)
+            print("Error reading file ", idx, e)
             lc = np.zeros((48000, 2))
-            spec = np.zeros((3909, 1))
+        
         spectra = spec[:,-1]
         flux = lc[:,-1]
         info_s = dict()
         info_lc = {'data_dir': self.data_dir}
-        label = self.labels.iloc[idx].to_dict()
+        try:
+            label = self.labels.iloc[idx].to_dict()
+        except IndexError:
+            label = {name: 0 for name in self.labels_names}
         # L = label['L']
         # lc -= L
 
@@ -137,6 +148,9 @@ class DualDataset(Dataset):
             if self.use_acf:
                 acf = torch.tensor(info_lc['acf']).nan_to_num(0)
                 flux = torch.cat((flux, acf), dim=0)
+            if self.use_fft:
+                fft = torch.tensor(info_lc['fft']).nan_to_num(0)
+                flux = torch.cat((flux, fft), dim=0)
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
         if flux.shape[-1] < self.lc_seq_len:
@@ -144,8 +158,8 @@ class DualDataset(Dataset):
         spectra = torch.nan_to_num(spectra, nan=0)
         info = {'spectra': info_s, 'lc': info_lc}
         y = torch.tensor([self._normalize(label[name], name) for name in self.labels_names], dtype=torch.float32)
-        flux = flux.nan_to_num(0)
-        spectra = spectra.nan_to_num(0)
+        flux = flux.nan_to_num(0).float()
+        spectra = spectra.nan_to_num(0).float()
         return flux, spectra, y.squeeze() , torch.zeros_like(flux),  info, info
 
 class SpectraDataset(Dataset):
@@ -264,7 +278,7 @@ class SpectraDataset(Dataset):
             if 'APOGEE' in self.id:     
                 filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
             else:
-                filepath = f"{self.data_dir}/{self.df.iloc[idx][self.id]}.fits"
+                filepath = self.df.iloc[idx]['data_path']
             target_size = 4
         else: 
             filepath = self.path_list[idx]
@@ -325,6 +339,7 @@ class KeplerDataset():
                 target_transforms:object=None,
                 masked_transforms:bool=False,
                 use_acf:bool=False,
+                use_fft:bool=False,
                 scale_flux:bool=True,
                 labels:object=None,
                  dims:int=1
@@ -352,6 +367,7 @@ class KeplerDataset():
                 self.df = pd.merge(df, prot_df[['KID', 'predicted period']], on='KID')
         self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
         self.use_acf = use_acf
+        self.use_fft = use_fft
         self.scale_flux = scale_flux
         self.labels = labels
         self.dims = dims
@@ -422,12 +438,20 @@ class KeplerDataset():
                 meta['predicted period'] = row['predicted period'] / P_MAX
             if 'Prot' in row.keys():
                 meta['Prot'] = row['Prot'] / P_MAX
+            else:
+                meta['Prot'] = np.nan
+            if 'Prot_ref' in row.keys():
+                meta['Prot_ref'] = row['Prot_ref']
+            else:
+                meta['Prot_ref'] = np.nan
             conf_cols = [c for c in row.keys() if 'confidence' in c]
             for c in conf_cols:
                 meta[c] = row[c]
             if 'Pmax' in row.keys() and 'Pmin' in row.keys():
                 meta['Pmax'] = row['Pmax']
                 meta['Pmin'] = row['Pmin']
+            if 'RUWE' in row.keys():
+                meta['RUWE'] = row['RUWE']
             return x, meta, None, y_val
         else:
             paths = row['data_file_path']
@@ -471,7 +495,11 @@ class KeplerDataset():
     
     def transform_data(self, x, transforms, info, idx):
         try:
-            x, mask, info = self.transforms(x, mask=None, info=info)
+            if transforms is not None:
+                x, mask, info = self.transforms(x, mask=None, info=info)
+            else:
+                x = torch.tensor(x)
+                mask = torch.zeros(1, self.seq_len)
             if len(x.shape) == 1:
                 x = x.unsqueeze(0)
             elif (len(x.shape) == 2) and (x.shape[-1] == 1):
@@ -486,6 +514,9 @@ class KeplerDataset():
             if self.use_acf:
                 acf = torch.tensor(info['acf']).nan_to_num(0)
                 x = torch.cat((x, acf), dim=0)
+            if self.use_fft:
+                fft = torch.tensor(info['fft']).nan_to_num(0)
+                x = torch.cat((x, fft), dim=0)
         except Exception as e:
             print(f"Error in transforms for index {idx}: {str(e)}")
             traceback.print_exc()
@@ -507,21 +538,24 @@ class KeplerDataset():
             x = (x - x.min()) / (x.max() - x.min())
         target = x.copy()
         mask = None
-        if self.transforms is not None:
-          x, mask, info= self.transform_data(x, self.transforms, info, idx) 
-        else:
-            x = torch.tensor(x)
-        if self.target_transforms is not None:
-            target, mask_y, info_y = self.transform_data(target, self.target_transforms, info_y, idx)       
-        else:
-            target = x.clone()
-            mask_y = mask
-            if self.mask_transform is not None:
-                to_mask = x if not self.use_acf else x[0]
-                x, mask, info = self.mask_transform(to_mask, mask=None, info=info)
-                if self.use_acf:
-                    acf = torch.tensor(info['acf']).nan_to_num(0)
-                    x = torch.cat((x.unsqueeze(0), acf), dim=0)
+        x, mask, info= self.transform_data(x, self.transforms, info, idx) 
+        target, mask_y, info_y = self.transform_data(target, self.target_transforms, info_y, idx)       
+       # # if self.transforms is not None:
+       #  else:
+       #      x = torch.tensor(x)
+       #  if self.target_transforms is not None:
+       #  else:
+       #      target = x.clone()
+       #      mask_y = mask
+       #      if self.mask_transform is not None:
+       #          to_mask = x if not self.use_acf else x[0]
+       #          x, mask, info = self.mask_transform(to_mask, mask=None, info=info)
+       #          if self.use_acf:
+       #              acf = torch.tensor(info['acf']).nan_to_num(0)
+       #              x = torch.cat((x.unsqueeze(0), acf), dim=0)
+       #          if self.use_fft:
+       #              fft = torch.tensor(info['fft']).nan_to_num(0)
+       #              x = torch.cat((x, fft), dim=0)
         x = x.nan_to_num(0)
         target = target.nan_to_num(0)
         info['Teff'] = info['TEFF']
@@ -581,12 +615,13 @@ class LightSpecDataset(KeplerDataset):
                 spec_transforms:object=None,
                 light_seq_len:int=34560,
                 use_acf:bool=False,
+                 use_fft:bool=False,
                 scale_flux:bool=True,
                 spec_seq_len:int=3909,
                 meta_columns = ['Teff', 'Mstar', 'logg'], labels=None
                 ):
         super().__init__(df, prot_df, npy_path, light_transforms,
-                light_seq_len, target_transforms=light_transforms, use_acf=use_acf, scale_flux=scale_flux)
+                light_seq_len, target_transforms=light_transforms, use_acf=use_acf, use_fft=use_fft, scale_flux=scale_flux)
         self.spec_path = spec_path
         self.spec_transforms = spec_transforms
         self.spec_seq_len = spec_seq_len
@@ -611,7 +646,8 @@ class LightSpecDataset(KeplerDataset):
         kid = int(info['KID'])
         obsid = int(self.df.iloc[idx]['ObsID'])
         info['obsid'] = obsid
-        spectra_filename = os.path.join(self.spec_path, f'{obsid}.fits')
+        obsdir = str(obsid)[:4]
+        spectra_filename = os.path.join(self.spec_path, f'{obsdir}/{obsid}.fits')
         try:
             spectra, meta = self.read_spectra(spectra_filename)
             spec_time = time.time() - start
@@ -701,7 +737,8 @@ class LightSpecDatasetV2(KeplerDataset):
     def __getitem__(self, idx):
         if self.main_type == 'spectra':
             spec_id = self.spec_df.iloc[idx][self.spec_col]
-            filepath = f"{self.spec_data_dir}/{spec_id}.fits"
+            spec_dir = str(spec_id)[:4]
+            filepath = f"{self.spec_data_dir}/{spec_dir}/{spec_id}.fits"
             spectra, meta = self.read_lamost_spectra(filepath)
             spectra, spectra_masked, mask, info_spec = self.create_spectra_sample(spectra, meta)
             if spec_id in self.shared_df[self.spec_col].values:

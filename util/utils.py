@@ -6,7 +6,18 @@ import itertools
 import os
 import pandas as pd
 import re
+import random
 from typing import List
+
+def set_seed(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)  # if using multiple GPUs
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 def setup():
     """
@@ -417,7 +428,7 @@ def extract_date(p):
         print("No date found in the path.")
 
 
-def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quantiles,id_name='obsid', 
+def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quantiles, id_name='obsid', info_keys=[],
                                 save_path=None, verbose=True):
     """
     Save model predictions, including quantile predictions, to a DataFrame and optionally to CSV.
@@ -466,19 +477,15 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
                 for i, label in enumerate(prediction_labels)
                 for q_idx, quantile in enumerate(quantiles)
             },
-            id_name: info[id_name],
-            'Teff': info['Teff']
+            # Add info dictionary
+            # id_name: info[id_name],
+            # 'Teff': info['Teff']
             # Add info dictionary
             # **info
         }
-        if 'snrg' in info.keys():
-            df_dict['snrg'] = info['snrg']
-        for key, value in df_dict.items():
-            print(key, end=': ')
-            if isinstance(value, np.ndarray):
-                print(value.shape)
-            elif isinstance(value, list):
-                print(len(value))
+            
+        # if 'snrg' in info.keys():
+        #     df_dict['snrg'] = info['snrg']
 
     except Exception as e:
         print(f"Falling back to simplified format due to error: {e}")
@@ -492,21 +499,16 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
                 for i, label in enumerate(prediction_labels)
                 for q_idx, quantile in enumerate(quantiles)
             },
-            id_name: info['obsid'],
-            'Teff': info['Teff']
         }
-        if 'snrg' in info.keys():
-            df_dict['snrg'] = info['snrg']
-        for key, value in df_dict.items():
-            if isinstance(value, np.ndarray):
-                print(value.shape)
-            elif isinstance(value, list):
-                print(len(value))
 
 
     
     # Create DataFrame
     df = pd.DataFrame(df_dict)
+
+    for key in info_keys:
+        if key in info:
+            df[key] = info[key]
     
     # Save to CSV if path is provided
     if save_path is not None:

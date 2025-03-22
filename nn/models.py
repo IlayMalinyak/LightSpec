@@ -123,7 +123,7 @@ class CNNEncoder(nn.Module):
                         nn.BatchNorm1d(args.encoder_dims[0]),
                         self.activation,
         )
-        
+        self.in_channels = args.in_channels 
         self.layers = nn.ModuleList([ConvBlock(args, i+1)
         for i in range(args.num_layers)])
         self.pool = nn.MaxPool1d(2)
@@ -153,7 +153,7 @@ class LSTMEncoder(nn.Module):
         super(LSTMEncoder, self).__init__()
         self.t_features = args.seq_len//args.stride
         self.activation = get_activation(args)
-        # self.conv = Conv2dSubampling(in_channels=in_channels, out_channels=channels)
+        # self.conv = Conv2dSubampling(in_channels=in_channels, out_channels=self.encoder_dims[0])
         self.conv1 = nn.Conv1d(in_channels=args.in_channels, out_channels=args.encoder_dims[0], kernel_size=args.kernel_size, padding='same', stride=1)
         self.pool = nn.MaxPool1d(kernel_size=args.stride)
         self.skip = nn.Conv1d(in_channels=args.in_channels, out_channels=args.encoder_dims[0], kernel_size=1, padding=0, stride=args.stride)
@@ -164,8 +164,22 @@ class LSTMEncoder(nn.Module):
                             batch_first=True, bidirectional=True, dropout=args.dropout_p)
        
         self.output_dim = args.encoder_dims[1]*2
-
+        self.in_channels = args.in_channels
             #     torch.set_rng_state(rng_state)
+
+    def lstm_attention(self, query, keys, values):
+        # Query = [BxQ]
+        # Keys = [BxTxK]
+        # Values = [BxTxV]
+        # Outputs = a:[TxB], lin_comb:[BxV]
+        # Here we assume q_dim == k_dim (dot product attention)
+        scale = 1/(keys.size(-1) ** -0.5)
+        query = query.unsqueeze(1) # [BxQ] -> [Bx1xQ]
+        keys = keys.transpose(1,2) # [BxTxK] -> [BxKxT]
+        energy = torch.bmm(query, keys) # [Bx1xQ]x[BxKxT] -> [Bx1xT]
+        energy = F.softmax(energy.mul_(scale), dim=2) # scale, normalize
+        linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
+        return linear_combination
 
     def forward(self, x, return_cell=False):
         if len(x.shape) == 2:
@@ -178,12 +192,13 @@ class LSTMEncoder(nn.Module):
         x = x + skip[:, :, :x.shape[-1]] # [B, C, L//stride]
         x = x.view(x.shape[0], x.shape[1], -1).swapaxes(1,2) # [B, L//stride, C]
         x_f,(h_f,c_f) = self.lstm(x) # [B, L//stride, 2*hidden_size], [2*num_layers, B, hidden_size], [2*num_layers, B, hidden_size
+        c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
+        features = self.lstm_attention(c_f, x_f, x_f) # [B, 2*hidden_size]
         if return_cell:
-            return x_f, h_f, c_f
-        h_f = h_f.transpose(0,1).transpose(1,2)
-        h_f = h_f.reshape(h_f.shape[0], -1)
-        return h_f
+            return features, h_f, c_f
+        return features
 
+      
 class CNNDecoder(nn.Module):
     def __init__(self, args) -> None:
         super().__init__()
@@ -350,15 +365,12 @@ class MultiTaskRegressor(nn.Module):
 class SimpleRegressor(nn.Module):
     def __init__(self, encoder, args):
         super().__init__()
-        self.activation = get_activation(args)
         self.encoder = encoder
-        print("in regressor, avg output - ", encoder.avg_output)
         encoder_dim = args.encoder_dim
         self.regressor = nn.Sequential(
             nn.Linear(encoder_dim, encoder_dim//2),
-            nn.BatchNorm1d(encoder_dim//2),
-            self.activation,
-            nn.Dropout(0.1),
+            nn.GELU(),
+            nn.Dropout(p=0.3),
             nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
         )
     def forward(self, x):
@@ -371,24 +383,25 @@ class SimpleRegressor(nn.Module):
 
 
 class MultiTaskSimSiam(nn.Module):
-    def __init__(self, args, conformer_args):
+    def __init__(self, encoder, args):
         super().__init__()
-        if args.activation == 'silu':
-            self.activation = nn.SiLU()
-        elif args.activation == 'sine':
-            self.activation = Sine(w0=args.sine_w0)
-        else:
-            self.activation = nn.ReLU()
-
-        self.backbone = MultiEncoder(args, conformer_args)
-        self.simsiam = SimSiam(self.backbone) 
+        # if args.activation == 'silu':
+        #     self.activation = nn.SiLU()
+        # elif args.activation == 'sine':
+        #     self.activation = Sine(w0=args.sine_w0)
+        # else:
+        #     self.activation = nn.ReLU()
+        
+        self.activation = nn.GELU()
+        # self.backbone = MultiEncoder(args, conformer_args)
+        self.simsiam = SimSiam(encoder) 
         encoder_dim = self.simsiam.output_dim * 2
-        print("encoder_dim: ", encoder_dim, 'conformer_encoder: ', conformer_args.encoder_dim)
+        # print("encoder_dim: ", encoder_dim, 'conformer_encoder: ', conformer_args.encoder_dim)
         self.regressor = nn.Sequential(
             nn.Linear(encoder_dim, encoder_dim//2),
             nn.BatchNorm1d(encoder_dim//2),
             self.activation,
-            nn.Dropout(conformer_args.dropout_p),
+            nn.Dropout(args.dropout_p),
             nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
         )
 
@@ -408,6 +421,38 @@ class MultiResRegressor(nn.Module):
         output_reg, output_dec = self.model(x)
         output_reg_high, output_dec_high = self.model(x_high)      
         return output_reg, output_dec, output_reg_high, output_dec_high
+
+class DoubleInputRegressor(nn.Module):
+    def __init__(self, encoder1, encoder2, args):
+        super().__init__()
+        self.encoder1 = encoder1
+        self.encoder2 = encoder2
+        self.dims1 = self.encoder1.in_channels
+        self.stacked_input = args.stacked_input
+        self.output_dim = encoder1.output_dim + encoder2.output_dim
+        if not args.encoder_only:
+            self.regressor = nn.Sequential(
+                nn.Linear(self.output_dim, self.output_dim//2),
+                nn.GELU(),
+                nn.Dropout(p=0.3),
+                nn.Linear(self.output_dim//2, args.output_dim*args.num_quantiles)
+            )
+        else:
+            self.regressor = nn.Identity()
+
+        
+    def forward(self, x1, x2=None):
+        if self.stacked_input and (x2 is None):
+            x1, x2 = x1[:,-self.dims1:,:], x1[:,:-self.dims1,:]
+        x1 = self.encoder1(x1)
+        if isinstance(x1, tuple):
+            x1 = x1[0]
+        x2 = self.encoder2(x2)
+        if isinstance(x2, tuple):
+            x2 = x2[0]
+        x = torch.cat([x1, x2], dim=1)
+        out = self.regressor(x)
+        return out, x
 
 class MultiEncoder(nn.Module):
     def __init__(self, args, conformer_args):
@@ -589,7 +634,7 @@ class LSTMFeatureExtractor(nn.Module):
 
 class LSTM_DUAL_LEGACY(nn.Module):
     def __init__(self, dual_model, encoder_dims, lstm_args, predict_size=128,
-                 num_classes=4, freeze=False, ssl=False, **kwargs):
+                 num_classes=4, num_quantiles=1, freeze=False, ssl=False, **kwargs):
         super(LSTM_DUAL_LEGACY, self).__init__(**kwargs)
         # print("intializing dual model")
         # if lstm_model is not None:
@@ -609,7 +654,7 @@ class LSTM_DUAL_LEGACY(nn.Module):
         nn.Linear(self.num_features, predict_size),
         nn.GELU(),
         nn.Dropout(p=0.3),
-        nn.Linear(predict_size,num_classes//2),)
+        nn.Linear(predict_size,num_classes//2 * num_quantiles),)
         self.conf_layer = nn.Sequential(
         nn.Linear(16, 16),
         nn.GELU(),
@@ -629,26 +674,33 @@ class LSTM_DUAL_LEGACY(nn.Module):
         linear_combination = torch.bmm(energy, values).squeeze(1) #[Bx1xT]x[BxTxV] -> [BxV]
         return linear_combination
     
-    def forward(self, x, x_dual=None, acf_phr=None):
-        if x_dual is None:
-            x, acf = x[:,0,:], x[:,1,:]
-        if len(x.shape) == 2:
-            x = x.unsqueeze(1)
+    def forward(self, acf, x=None, acf_phr=None):
+        if x is None:
+            x, acf = acf[:,:-1,:], acf[:,-1,:]
+        if len(acf.shape) == 2:
+            acf = acf.unsqueeze(1)
+        x = x.squeeze()
+        # print("acf, x: ", acf.shape, x.shape)
         acf, h_f, c_f = self.feature_extractor(acf, return_cell=True) # [B, L//stride, 2*hidden_size], [B, 2*nlayers, hidden_szie], [B, 2*nlayers, hidden_Size]
         c_f = torch.cat([c_f[-1], c_f[-2]], dim=1) # [B, 2*hidden_szie]
         t_features = self.lstm_attention(c_f, acf, acf) # [B, 2*hidden_size]
         d_features, _ = self.dual_model(x) # [B, encoder_dims]
-
+        # print("nans in features: ", torch.isnan(t_features).sum(), torch.isnan(d_features).sum())
         features = torch.cat([t_features, d_features], dim=1) # [B, 2*hidden_size + encoder_dims]
         if self.ssl:
             return features
         out = self.pred_layer(features)
-        if acf_phr is not None:
-            phr = acf_phr.reshape(-1,1).float()
-        else:
-            phr = torch.zeros(features.shape[0],1, device=features.device)
-        mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
-        mean_features += phr
-        conf = self.conf_layer(mean_features)
-        return torch.cat([out, conf], dim=1)
+        return out
+       
+        # if acf_phr is not None:
+        #     phr = acf_phr.reshape(-1,1).float()
+        # else:
+        #     phr = torch.zeros(features.shape[0],1, device=features.device)
+        # mean_features = torch.nn.functional.adaptive_avg_pool1d(features.unsqueeze(1), 16).squeeze(1)
+        # mean_features += phr
+        # conf = self.conf_layer(mean_features)
+        # # print("shapes in models: ", out.shape, conf.shape)
+        # return torch.cat([out, conf], dim=1)
+
+
 

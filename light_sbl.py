@@ -26,11 +26,11 @@ print("running from ", ROOT_DIR)
 from transforms.transforms import *
 from dataset.dataset import KeplerDataset, DualDataset
 from nn.astroconf import Astroconformer
-from nn.models import CNNEncoder, MultiEncoder, CNNEncoderDecoder, CNNRegressor, MultiTaskRegressor, MultiTaskSimSiam, SimpleRegressor, LSTM_DUAL_LEGACY
+from nn.models import *
 # from nn.mamba import MambaEncoder
 from nn.simsiam import SimSiam
-from nn.train import RegressorTrainer, ContrastiveTrainer, MaskedRegressorTrainer, ContrastiveRegressorTrainer
-from nn.utils import deepnorm_init, load_checkpoints_ddp
+from nn.train import *
+from nn.utils import deepnorm_init, load_checkpoints_ddp, get_lightPred_model
 from nn.optim import CQR, TotalEnergyLoss, SumLoss, StephanBoltzmanLoss
 from util.utils import *
 from util.cgs_consts import *
@@ -38,8 +38,8 @@ from features import create_umap
 
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
-DATA_DIR = '/data/simulations/dataset_small'
-LABELS_PATH = '/data/simulations/dataset_small/simulation_properties.csv'
+DATA_DIR = '/data/butter/data_aigrain2/simulations'
+LABELS_PATH = '/data/butter/data_aigrain2/simulation_properties.csv'
 LABELS = ['Period']
 QUANTILES = [0.1, 0.25, 0.5, 0.75, 0.9]
 
@@ -58,13 +58,16 @@ exp_num = data_args.exp_num
 model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
 regressor_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Regressor'])
 optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
+cnn_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNEncoder'])
+lstm_args = Container(**yaml.safe_load(open(args_dir, 'r'))['LSTMEncoder'])
 astroconf_args = Container(**yaml.safe_load(open(args_dir, 'r'))['AstroConformer'])
 os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 regressor_args.output_dim = len(data_args.labels)
-regressor_args.num_quantiles = len(optim_args.quantiles)
-model_args.num_quantiles = len(optim_args.quantiles)
+regressor_args.num_quantiles = 1
+model_args.num_quantiles = 1
 regressor_args.seq_len = int(data_args.max_len_lc)
 model_args.seq_len = int(data_args.max_len_lc)
+lstm_args.seq_len = int(data_args.max_len_lc)
 
 transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
                         MovingAvg(13),
@@ -76,6 +79,7 @@ target_transforms = transforms if not data_args.masked_transform else None
 light_transforms = Compose([RandomCrop(int(data_args.max_len_lc)),
                             MovingAvg(13),
                             ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
+                            FFT(seq_len=int(data_args.max_len_lc)),
                             Normalize(['std']),
                             ToTensor(),
                          ])
@@ -91,6 +95,7 @@ train_dataset = DualDataset(data_dir=DATA_DIR,
                             lc_seq_len=int(data_args.max_len_lc),
                             spec_seq_len=int(data_args.max_len_spectra),
                             use_acf=data_args.use_acf,
+                            use_fft=data_args.use_fft,
                             )
 
 indices = list(range(len(train_dataset)))
@@ -158,10 +163,16 @@ test_dataloader = DataLoader(test_subset,
 # backbone = Astroconformer(model_args)
 # backbone.pred_layer = torch.nn.Identity()
 # backbone = CNNEncoder(model_args)
-# backbone = MambaEncoder(model_args)
-model = models[model_name](model_args, conformer_args=conformer_args).to(local_rank)
+# backbone = MambaEncoder(model_args)   
+# model = models[model_name](model_args, conformer_args=conformer_args).to(local_rank)
 # model = SimSiam(backbone)
 
+model = get_lightPred_model(int(data_args.max_len_lc))
+# encoder1 = CNNEncoder(cnn_args)
+# encoder2 = Astroconformer(astroconf_args)
+# model = DoubleInputRegressor(encoder1, encoder2, model_args)
+# print(model1)
+# print(model)
 model_suffix = 0
 checkpoint_dir = datetime_dir
 checkpoint_exp = exp_num
@@ -174,16 +185,6 @@ if model_args.load_checkpoint:
     print("loaded checkpoint from: ", model_args.checkpoint_path)
 else:
     deepnorm_init(model, model_args)
-model = SimpleRegressor(model, regressor_args).to(local_rank)
-# encoder_dim = model.simsiam.output_dim * 2
-# regressor = torch.nn.Sequential(
-#     torch.nn.Linear(encoder_dim, encoder_dim//2),
-#     torch.nn.BatchNorm1d(encoder_dim//2),
-#     model.activation,
-#     torch.nn.Dropout(conformer_args.dropout_p),
-#     torch.nn.Linear(encoder_dim//2, regressor_args.output_dim*regressor_args.num_quantiles)
-# )
-# model.regressor = regressor
 model = model.to(local_rank)
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
@@ -197,12 +198,13 @@ if data_args.create_umap:
     print(f"umap saved at {data_args.log_dir}/{checkpoint_dir}/umap_{checkpoint_exp}_ssl.csv")
     exit()
 
-loss_fn = CQR(quantiles=optim_args.quantiles)
+# loss_fn = CQR(quantiles=optim_args.quantiles)
+loss_fn = torch.nn.L1Loss()
 sb_weight = optim_args.sb_weight
 e_weight = optim_args.energy_weight
 # loss_fn = SumLoss([CQR(quantiles=optim_args.quantiles, reduction='none'), StephanBoltzmanLoss(reduction='none')], [1-sb_weight, sb_weight])
 ssl_loss_fn = SumLoss([torch.nn.MSELoss(), TotalEnergyLoss()], [1-e_weight, e_weight])  
-optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
+optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr))
 scaler = GradScaler()
 total_steps = int(data_args.num_epochs) * len(train_dataloader)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
@@ -227,11 +229,19 @@ scheduler = OneCycleLR(
 
 trainer = RegressorTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=len(data_args.labels), scaler=scaler, grad_clip=True,
-                       scheduler=scheduler, train_dataloader=train_dataloader, num_quantiles=len(optim_args.quantiles),
+                       scheduler=scheduler, train_dataloader=train_dataloader, num_quantiles=1,
                             val_dataloader=val_dataloader, device=local_rank, w_name=None,
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                            accumulation_step=1, max_iter=np.inf,
                         exp_name=f"{model_name}_lc_{exp_num}")
+
+# trainer = DoubleInputTrainer(model=model, optimizer=optimizer, num_classes=1,
+#                         criterion=loss_fn, output_dim=len(data_args.labels), scaler=scaler, grad_clip=True,
+#                        scheduler=None, train_dataloader=train_dataloader, num_quantiles=1,
+#                            val_dataloader=val_dataloader, device=local_rank,
+#                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+#                            accumulation_step=1, max_iter=200,
+#                         exp_name=f"{model_name}_lc_{exp_num}")
    
 complete_config = {
 "model_name": model_name,
@@ -250,7 +260,7 @@ with open(config_save_path, "w") as config_file:
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=10, best='loss', conf=True) 
+                        early_stopping=10, best='loss', conf=False) 
 output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)

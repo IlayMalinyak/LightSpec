@@ -63,13 +63,20 @@ class MultimodalMoCo(nn.Module):
         # with torch.no_grad():
         #     spectra_out_dim = spectra_encoder.output_dim
         #     lightcurve_out_dim = lightcurve_encoder.output_dim
+        # self.spectra_proj_q = nn.Linear(spectra_encoder.output_dim, projection_dim)
+        # self.lightcurve_proj_q = nn.Linear(lightcurve_encoder.output_dim, projection_dim)
         
         self.shared_encoder_q = Transformer(projection_args)
+        # self.shared_encoder_q = ConformerEncoder(projection_args)
         
         self.shared_encoder_k = copy.deepcopy(self.shared_encoder_q)
+        # self.spectra_proj_k = copy.deepcopy(self.spectra_proj_q)
+        # self.lightcurve_proj_k = copy.deepcopy(self.lightcurve_proj_q)
         
     
         self._freeze_encoder(self.shared_encoder_k)
+        # self._freeze_encoder(self.spectra_proj_k)
+        # self._freeze_encoder(self.lightcurve_proj_k)
         
         self.register_buffer("lightcurve_queue", torch.randn(projection_args.output_dim, K))
         self.lightcurve_queue = F.normalize(self.lightcurve_queue, dim=0)
@@ -201,6 +208,9 @@ class MultimodalMoCo(nn.Module):
         q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
         q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
 
+        # q_s = self.spectra_proj_q(spectra_feat)
+        # q_l = self.lightcurve_proj_q(lightcurve_feat)
+
         if not self.calc_loss:
             return {
                     'q': torch.cat((q_l, q_s),dim=-1)
@@ -209,6 +219,9 @@ class MultimodalMoCo(nn.Module):
         with torch.no_grad():
             k_s, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
             k_l, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
+
+            # k_s = self.spectra_proj_k(spectra_feat)
+            # k_l = self.lightcurve_proj_k(lightcurve_feat)
 
         loss_s, logits_s, labels = self.contrastive_loss(
             q_s, k_l, self.lightcurve_queue
@@ -319,9 +332,12 @@ class PredictiveMoco(MultimodalMoCo):
             combined_embed = self.combined_encoder(combined_input)
             spectra_feat = torch.cat((spectra_feat, combined_embed),dim=-1)
             lightcurve_feat = torch.cat((lightcurve_feat, combined_embed), dim=-1)
-
         q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
         q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
+
+        # q_s = self.spectra_proj_q(spectra_feat)
+        # q_l = self.lightcurve_proj_q(lightcurve_feat)
+
         q_s = q_s.nan_to_num(0)
         q_l = q_l.nan_to_num(0)
         if not self.calc_loss:
@@ -339,6 +355,9 @@ class PredictiveMoco(MultimodalMoCo):
         with torch.no_grad():
             k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
             k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
+
+            # k_s = self.spectra_proj_k(spectra_feat)
+            # k_l = self.lightcurve_proj_k(lightcurve_feat)
         
         loss_s_pred = self.vicreg_loss(q_s_vicreg, q_l_vicreg)
 

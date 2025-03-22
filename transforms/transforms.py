@@ -249,7 +249,7 @@ class Normalize:
     Normalize the input data according to a specified scheme.
     Supported schemes: 'std' (standardization), 'minmax', 'median', 'dist'
     """
-    def __init__(self, scheme=['std'], axis=0):
+    def __init__(self, scheme=['std'], axis=0, max_std=203429):
         """
         Initialize the Normalize transformation.
 
@@ -258,6 +258,7 @@ class Normalize:
         """
         self.axis = axis
         self.scheme = scheme
+        self.max_std = max_std
         
     def __call__(self, x, mask=None, info=dict()):
         x_total = []
@@ -285,6 +286,8 @@ class Normalize:
             mean = np.mean(x_masked, axis=self.axis, keepdims=True)
             std = np.std(x_masked, axis=self.axis, keepdims=True)
             x =  (x - mean) / (std + 1e-8)
+        elif scheme == 'max_std':
+            x = x / (x.std() + 1e-8) * (1 / np.log(self.max_std / np.std(x)) + 1) 
         elif scheme == 'minmax':
             min_val = np.min(x_masked, axis=self.axis, keepdims=True)
             max_val = np.max(x_masked, axis=self.axis, keepdims=True)
@@ -312,6 +315,12 @@ class Normalize:
             assert k is not None, "KMAG must be provided for 'mag' normalization"
             k_inv = 2**(-k)
             x = x / k_inv
+        elif scheme == 'kmag_median':
+            k = info['KMAG']
+            assert k is not None, "KMAG must be provided for 'mag' normalization"
+            k_inv = 2**(-k)
+            x = x / k_inv
+            x = x / np.nanmedian(x + 1e-3)
         return x, mask, info
 
     def _normalize_torch(self, x, scheme, mask=None, info=dict()):
@@ -781,3 +790,45 @@ class ACF():
         return x, mask, info
     def __repr__(self):
         return f"ACF(max_lag={self.max_lag_day})"
+
+class FFT():
+    def __init__(self, use_magnitude=True, log_scale=True, seq_len=None):
+        self.use_magnitude = use_magnitude
+        self.log_scale = log_scale
+        self.seq_len = seq_len
+        
+    def __call__(self, x, mask=None, info=None):
+        if isinstance(x, np.ndarray):
+            # Compute FFT
+            fft_result = np.fft.rfft(x.squeeze())
+            
+            # Use magnitude or power spectrum
+            if self.use_magnitude:
+                freq_features = np.abs(fft_result)
+            else:
+                freq_features = np.abs(fft_result)**2
+                
+            # Apply log scaling if enabled
+            if self.log_scale:
+                freq_features = np.log1p(freq_features)
+            
+            # Ensure output length matches input by using interpolation
+            target_length = self.seq_len or len(x)
+            current_length = len(freq_features)
+            
+            if current_length != target_length:
+                # Interpolate to match original array length
+                positions = np.linspace(0, current_length - 1, target_length)
+                freq_features = np.interp(positions, np.arange(current_length), freq_features)
+            
+            # Store frequency information
+            if info is not None:
+                info['fft_freqs'] = np.fft.rfftfreq(len(x.squeeze()))
+                info['fft'] = freq_features[None]
+            
+            # # Combine with original features
+            # x_with_freq = np.hstack((freq_features[:, None], x))
+            #
+            return x, mask, info
+        else:
+            raise NotImplementedError

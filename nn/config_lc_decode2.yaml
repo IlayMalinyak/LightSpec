@@ -4,20 +4,32 @@ Data:
   # Data
   dataset: "KeplerDataset"
   data_dir: '/data/lightPred/data'
-  model_name: "MultiEncoder"
-  batch_size: 16
+  model_name: "DoubleInputRegressor"
+  batch_size: 32
   num_epochs: 1000
-  exp_num: 3
+  exp_num: sbl_butter
   max_len_spectra: 4096
   max_days_lc: 270
-  max_len_lc: 26112
+  max_len_lc: 34560
   lc_freq: 0.0208
   create_umap: False
   masked_transform: False
   use_acf: True
-  scale_flux: True
+  use_fft: False
+  scale_flux: False
   ssl_weight: 0
-  labels: ['Prot']
+  labels: ['predicted period']
+
+
+DoubleInputRegressor:
+  encoder_only: False
+  stacked_input: True
+  in_channels: 3
+  load_checkpoint: False
+  output_dim: 1
+  num_quantiles: 1
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-18/DoubleInputRegressor_lc_baseline_lightpred.pth'
+
 
 
 Conformer:
@@ -87,15 +99,32 @@ MultiEncoder:
 
 Regressor:
   encoder_dim: 256
-  output_dim: 2
-  num_quantiles: 5
+  output_dim: 1
+  num_quantiles: 1
   activation: "sine"
   sine_w0: 2.0
 
+
+LSTMEncoder:
+  # Model
+  in_channels: 1
+  encoder_dims: [256,64]
+  num_layers: 5
+  dropout_p: 0.35
+  output_dim: 5
+  kernel_size: 4
+  stride: 4
+  activation: "sine"
+  sine_w0: 1.0
+  load_checkpoint: False
+  checkpoint_num: 1
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-12/LSTMEncoder_lc_1.pth'
+  
+
 CNNEncoder:
   # Model
-  in_channels: 3
-  num_layers: 8
+  in_channels: 1
+  num_layers: 6
   stride: 1
   encoder_dims: [32,64,128,256,512]
   kernel_size: 3
@@ -145,19 +174,20 @@ CNNEncoderDecoder:
 AstroConformer:
   # Model
   in_channels: 1
-  encoder: ["mhsa_pro", "conv", "mhsa_pro"]
+  encoder: ["mhsa_pro", "conv"]
   timeshift: false
-  num_layers: 6
+  num_layers: 5
   num_decoder_layers: 6
   stride: 20
   encoder_dim: 512
-  decoder_dim: 512
-  num_heads: 4
+  decoder_dim: 128
+  num_heads: 8
   kernel_size: 3
-  dropout_p: 0.2
+  dropout_p: 0.3
   output_dim: 3
+  encoder_only: True
   norm: "postnorm"
-  load_spec_checkpoint: False
+  load_checkpoint: False
   spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
 
 
@@ -168,7 +198,7 @@ Optimization:
   weight_decay: 1e-5
   warmup_pct: 0.15
   steps_per_epoch: 2500
-  quantiles: [0.1,0.25,0.5,0.75,0.9]
+  quantiles: [0.14, 0.5, 0.86]
   sb_weight: 0.1
   energy_weight: 0
 

@@ -27,12 +27,15 @@ class Astroconformer(nn.Module):
     self.encoder = ConformerEncoder(args)
     self.output_dim = args.encoder_dim
     
-    self.pred_layer = nn.Sequential(
-        nn.Linear(args.encoder_dim, args.encoder_dim),
-        nn.SiLU(),
-        nn.Dropout(p=0.3),
-        nn.Linear(args.encoder_dim,args.output_dim),
-    )
+    if not args.encoder_only:
+        self.pred_layer = nn.Sequential(
+            nn.Linear(args.encoder_dim, args.encoder_dim),
+            nn.SiLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(args.encoder_dim,args.output_dim),
+        )
+    else:
+        self.pred_layer = nn.Identity()
     if getattr(args, 'mean_label', False):
       self.pred_layer[3].bias.data.fill_(args.mean_label)
 

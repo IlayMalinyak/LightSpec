@@ -719,7 +719,7 @@ class MaskedSSLTrainer(Trainer):
 class ContrastiveTrainer(Trainer):
     def __init__(self, temperature=1, stack_pairs=False,
                  use_w=False, use_pred_coeff=False, pred_coeff_val=None, ssl_weight=0.5,
-                   **kwargs):
+                 weight_decay=False,   **kwargs):
         super().__init__(**kwargs)
         self.stack_pairs = stack_pairs
         self.temperature = temperature
@@ -727,6 +727,7 @@ class ContrastiveTrainer(Trainer):
         self.use_pred_coeff = use_pred_coeff
         self.pred_coeff_val = pred_coeff_val
         self.ssl_weight = ssl_weight
+        self.weight_decay = weight_decay
         
         
     def train_batch(self, batch, batch_idx, device):
@@ -753,8 +754,12 @@ class ContrastiveTrainer(Trainer):
             preds = out['preds']
             preds = preds.view(x1.shape[0], -1, self.num_quantiles)
             reg_loss = self.criterion(preds, y)
+            # print("shapes ", preds.shape, y.shape, reg_loss.shape, "nans in y: ", y.isnan().sum(), "nans in loss: ", reg_loss.isnan().sum())
+            reg_loss = reg_loss.nan_to_num(0).mean()
             self.train_aux_loss_1.append(loss.item())
             self.train_aux_loss_2.append(reg_loss.item())
+            # if self.weight_decay:
+            #     cur_weight = self.ssl_weight - 0.025 * self.epoch
             loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
             preds_med = preds[: ,:, self.num_quantiles // 2]
             acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
@@ -814,8 +819,11 @@ class ContrastiveTrainer(Trainer):
             preds = out['preds']
             preds = preds.view(x1.shape[0], -1, self.num_quantiles)
             reg_loss = self.criterion(preds, y)
+            reg_loss = reg_loss.nan_to_num(0).mean()
             self.val_aux_loss_1.append(loss.item())
             self.val_aux_loss_2.append(reg_loss.item())
+            # if self.weight_decay:
+            #    cur_weight = self.ssl_weight - 0.025 * self.epoch
             loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
             preds_med = preds[: ,:, self.num_quantiles // 2]
             acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
@@ -849,14 +857,29 @@ class ContrastiveTrainer(Trainer):
                             aggregated_info[key] = []
                         aggregated_info[key].append(value)
             with torch.no_grad():
-                out = self.model(x1, x2)
-                if self.criterion is not None:
-                    y_pred = out['preds']
-                    y_pred = y_pred.view(x1.shape[0], -1, self.num_quantiles)
-                    preds = np.concatenate((preds, y_pred.cpu().numpy()))
-                targets = np.concatenate((targets, y.cpu().numpy()))
-                if i > self.max_iter:
-                    break
+                if self.stack_pairs:
+                    x = torch.cat((x1, x2), dim=0)
+                    out = self.model(x, temperature=self.temperature)
+                if self.use_w:
+                    w = torch.stack([i['w'] for i in info]).to(device)
+                    if self.use_pred_coeff:                    
+                        if self.pred_coeff_val != 'None':
+                            pred_coeff = float(self.pred_coeff_val)
+                        else:
+                            pred_coeff = max(1 - i / (3 * len(self.train_dl)), 0.5)
+                        out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
+                    else:
+                        out = self.model(x1, x2, w=w)
+                else:
+                    out = self.model(x1, x2)
+            if self.criterion is not None:
+                y_pred = out['preds']
+                y_pred = y_pred.view(x1.shape[0], -1, self.num_quantiles)
+                # print(y_pred.shape)
+                preds = np.concatenate((preds, y_pred.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+            if i > self.max_iter:
+                break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, aggregated_info
 
@@ -877,9 +900,10 @@ class RegressorTrainer(Trainer):
         
         if isinstance(out, tuple):
             out = out[0]
-        out = out.view(b, -1, self.num_quantiles)
+        if self.num_quantiles > 1:
+            out = out.view(b, -1, self.num_quantiles)
         loss = self.criterion(out, y)
-        # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape)
+        # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape, 'loss: ', loss.shape)
         loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         loss.backward()
         self.optimizer.step()
@@ -935,12 +959,17 @@ class RegressorTrainer(Trainer):
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
-                    if np.isscalar(value):
-                        if key not in aggregated_info:
-                            aggregated_info[key] = []
-                        aggregated_info[key].append(value)
+                    try:
+                        if np.isscalar(value):
+                            if key not in aggregated_info:
+                                aggregated_info[key] = []
+                            aggregated_info[key].append(value)
+                    except:
+                        pass
             with torch.no_grad():
                 y_pred = self.model(x)
+                if isinstance(y_pred, tuple):
+                    y_pred = y_pred[0]
                 y_pred = y_pred.view(b, -1, self.num_quantiles)
             out_diff = int(y.shape[1] - y_pred.shape[1])
             y = y[:, out_diff:]
@@ -1396,7 +1425,7 @@ class LightSpecTrainer(Trainer):
         optimizer_time = time.time() - start_time - model_time - backward_time
         if self.scheduler is not None:
                     self.scheduler.step()
-        # if self.wandb:
+        # if self.wandb
         #     wandb.log({"train_loss": loss.item()})
         # print(f"model time: {model_time}, backward time: {backward_time}, optimizer time: {optimizer_time}")
         return loss, 0., x1
@@ -1418,4 +1447,127 @@ class LightSpecTrainer(Trainer):
         return loss, 0, x1
 
     
+class DoubleInputTrainer(Trainer):
+    def __init__(self, num_classes=2, eta=0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.eta = eta
+    def train_epoch(self, device, epoch=None ,plot=False, conf=False):
+        """
+        Trains the model for one epoch.
+        """
+        self.model.train()
+        train_loss = []
+        train_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        if self.train_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
+        pbar = tqdm(self.train_dl)
+        for i, batch in enumerate(pbar):
+            loss, acc,_ = self.train_batch(batch, device, conf)
+            train_loss.append(loss.item())   
+            pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item()}")
+            all_accs = all_accs + acc
+            if i > self.max_iter:
+                break
+            if self.range_update is not None and (i % self.range_update == 0):
+                self.train_dl.dataset.expand_label_range()
+                print("range: ", y.min(dim=0).values, y.max(dim=0).values)
+        return train_loss, all_accs/len(self.train_dl.dataset)
+    
+    def train_batch(self, batch, device, conf):
+        x,_,y,_,info,_ = batch
+        x1, x2 = x[:,-1,:], x[:,:-1,:]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+        self.optimizer.zero_grad()
+        y_pred = self.model(x1.float(), x2.float())
+        if isinstance(y_pred, tuple):
+            y_pred = y_pred[0]
+        if conf:        
+            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            conf_y = torch.abs(y - y_pred)
+        if self.num_classes > 1:
+            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+            loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
+            if conf:
+                loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+                loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+                loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+        else:
+            y_pred = y_pred.squeeze()
+            # print("nans: ", y_pred.isnan().sum(), y.isnan().sum())
+            loss = self.criterion(y_pred, y)
+            if conf:
+                loss += self.criterion(conf_pred, conf_y)
+        loss.backward()
+        self.optimizer.step()
+        diff = torch.abs(y_pred - y)
+        acc = (diff < (y/10)).sum(0)
+        return loss, acc, y_pred
+    
+    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
+        """
+        Evaluates the model for one epoch.
+        """
+        self.model.eval()
+        val_loss = []
+        val_acc = 0
+        all_accs = torch.zeros(self.num_classes, device=device)
+        if self.val_sampler is not None:
+            try:
+                self.train_sampler.set_epoch(epoch)
+            except AttributeError:
+                pass
+        pbar = tqdm(self.val_dl)
+        targets = np.zeros((0, self.num_classes))
+        for i, batch in enumerate(pbar):
+            loss, acc,_ = self.eval_batch(batch, device, conf)
+            val_loss.append(loss.item())
+            all_accs = all_accs + acc  
+            pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item()}")
+            if i > self.max_iter:
+                break
+            if self.range_update is not None and (i % self.range_update == 0):
+                self.train_dl.dataset.expand_label_range()
+        return val_loss, all_accs/len(self.val_dl.dataset)
+    
+    def eval_batch(self, batch, device, conf):
+        x,_,y,_,info,_ = batch
+        x1, x2 = x[:,-1,:], x[:,:-1,:]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+        with torch.no_grad():
+            y_pred = self.model(x1.float(), x2.float())
+            if isinstance(y_pred, tuple):
+                y_pred = y_pred[0]
+            if conf:
+                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+                conf_y = torch.abs(y - y_pred) 
+            if self.cos_inc:
+                inc_idx = 0
+                y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
+                y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
+            if self.num_classes > 1:
+                loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+                loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+                loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
+                if conf:
+                    loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+                    loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+                    loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+            else:
+                y_pred = y_pred.squeeze()
+                loss = self.criterion(y_pred, y)
+                if conf:
+                    loss += self.criterion(conf_pred, conf_y)
+            diff = torch.abs(y_pred - y)
+            acc = (diff < (y/10)).sum(0)
+        return loss, acc, y_pred
 

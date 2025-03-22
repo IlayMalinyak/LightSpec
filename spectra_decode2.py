@@ -213,6 +213,7 @@ trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
 # plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra__decode_{exp_num}.png")
 # plt.clf()
 #
+
 preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
 
 preds, targets, info = trainer.predict(test_dataloader, device=local_rank)

@@ -4,12 +4,13 @@ from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR
 from collections import OrderedDict
 from .Modules.mhsa_pro import MHA_rotary
 from .Modules.cnn import ConvBlock
-from nn.models import CNNEncoderDecoder, CNNEncoder
+from nn.models import *
 from nn.moco import MultimodalMoCo
 from nn.simsiam import SimCLR, SimSiam, MultiModalSimSiam
 from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.scheduler import WarmupScheduler
-
+from util.utils import Container
+import yaml
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'SimCLR': SimCLR, 'SimSiam': SimSiam,
            'MultiModalSimSiam': MultiModalSimSiam, 'MultimodalMoCo': MultimodalMoCo,
@@ -75,6 +76,31 @@ def deepnorm_init(model, args):
         
 
   model.apply(init_func)
+
+
+def get_lightPred_model(seq_len):
+    args = Container(**yaml.safe_load(open(f'/data/lightPred/Astroconf/default_config.yaml', 'r')))
+    args.load_dict(yaml.safe_load(open(f'/data/lightPred/Astroconf/model_config.yaml', 'r'))[args.model])
+    args.output_dim = 1
+    if args.deepnorm and args.num_layers >= 10:
+        layer_coeff = args.num_layers/5.0
+        args.alpha, args.beta = layer_coeff**(0.5), layer_coeff**(-0.5)
+    
+    model = Astroconformer(args)
+    deepnorm_init(model, args)
+    lstm_params = {
+        'dropout': 0.35,
+        'hidden_size': 64,
+        'image': False,
+        'in_channels': 1,
+        'kernel_size': 4,
+        'num_classes': 2,
+        'num_layers': 5,
+        'seq_len': seq_len,
+        'stride': 4}
+    model.pred_layer = nn.Identity()
+    model = LSTM_DUAL_LEGACY(model, encoder_dims=args.encoder_dim, lstm_args=lstm_params, num_classes=2)
+    return model
 
 
 def load_scheduler(optimizer, train_dataloader, world_size, optim_args, data_args):

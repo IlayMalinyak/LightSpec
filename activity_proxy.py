@@ -32,6 +32,40 @@ def setup(rank, world_size):
     # initialize the process group
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
+def compute_moments(x):
+    """
+    Compute standard deviation, third moment, and skewness for batched time series data.
+    
+    Args:
+        x: PyTorch tensor with shape (batch_size, time_steps)
+            where each row represents a separate time series
+    
+    Returns:
+        std_dev: Standard deviation for each batch (shape: batch_size)
+        third_moment: Raw third central moment for each batch (shape: batch_size)
+        skewness: Standardized third moment (third_moment / std_dev^3) for each batch
+    """
+    # Calculate mean for each batch
+    means = torch.mean(x, dim=1, keepdim=True)
+    
+    # Calculate centered data (x - μ)
+    centered_data = x - means
+    
+    # Standard deviation calculation
+    # Variance is the mean of squared deviations
+    variance = torch.mean(centered_data**2, dim=1)
+    std_dev = torch.sqrt(variance)
+    
+    # Third central moment calculation
+    # E[(x - μ)³]
+    third_moment_raw = torch.mean(centered_data**3, dim=1)
+    
+    # Standardized third moment (skewness)
+    # skewness = E[(x - μ)³] / σ³
+    skewness = third_moment_raw / (std_dev**3)
+    
+    return std_dev, skewness
+
 def calculate_percentile_differences_batch(time_series, window_size, step_size):
     # Initialize a list to store the differences for each batch
     # differences = []
