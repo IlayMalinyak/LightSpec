@@ -883,28 +883,109 @@ class ContrastiveTrainer(Trainer):
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, aggregated_info
 
-class RegressorTrainer(Trainer):
-    def __init__(self, w_name, **kwargs):
+class ClassificationTrainer(Trainer):
+    def __init__(self, num_cls=1, use_w=False, **kwargs):
         super().__init__(**kwargs)
-        self.w_name = w_name
-    
+        self.num_cls = num_cls
+        self.use_w = use_w
+
     def train_batch(self, batch, batch_idx, device):
-        x, _, y, _, info,_ = batch
-        x, y = x.to(device), y.to(device)
-        b = x.shape[0]
-        if self.w_name is None:
-            w = torch.ones(x.size(0)).to(device)
-        else:
-            w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        out = self.model(x)
-        
+        lc, spectra,y , _, _,info = batch
+        # print("numberof 1s: ", (y == 1).sum(), "number of 0s: ", (y == 0).sum())
+        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        b = lc.shape[0]
+        W = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        out = self.model(lc, spectra, w_tune=w)
         if isinstance(out, tuple):
             out = out[0]
+        elif isinstance(out, dict):
+            out = out['preds']
+        # print("nans in y: ", torch.isnan(y).sum(), "nans in out: ", torch.isnan(out).sum())
+        loss = self.criterion(out, y)
+        loss.backward()
+        self.optimizer.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+        probs = torch.sigmoid(out)
+        acc = ((probs > 0.5) == y).sum(0)
+        # acc = (torch.abs((out - y)) < 0.1).sum(0)
+        return loss, acc, y 
+
+    def val_batch(self, batch, batch_idx, device):
+        lc, spectra,y , _, _,info = batch
+        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        out = self.model(lc, spectra, w_tune=w)
+        if isinstance(out, tuple):
+            out = out[0]
+        elif isinstance(out, dict):
+            out = out['preds']
+        loss = self.criterion(out, y)
+        acc = (torch.abs((out - y)) < 0.1).sum(0)
+        return loss, acc, y
+    
+    def predict(self, test_dataloader, device, load_best=False):
+        """
+        Returns the predictions of the model on the given dataset.
+        """
+        self.model.eval()
+        preds = np.zeros((0, self.num_cls))
+        targets = np.zeros((0, self.num_cls))
+        tot_kic = []
+        tot_teff = []
+        aggregated_info = {}
+        pbar = tqdm(test_dataloader)
+
+        for i,(lc, spectra, y, _, _, info, _) in enumerate(pbar):
+            lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+            b = lc.shape[0]
+            for item in info:
+                for key, value in item.items():
+                    # Check if value is a scalar (not an array/tensor)
+                    if np.isscalar(value):
+                        if key not in aggregated_info:
+                            aggregated_info[key] = []
+                        aggregated_info[key].append(value)
+            with torch.no_grad():
+                w = None
+                if self.use_w:
+                    w = torch.stack([i['w'] for i in info]).to(device)
+                out = self.model(lc, spectra, w_tune=w)
+                probs = torch.softmax(out, dim=1)
+            preds = np.concatenate((preds, probs.cpu().numpy()))
+            targets = np.concatenate((targets, y.cpu().numpy()))
+            if i > self.max_iter:
+                break
+        print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
+        return preds, targets, aggregated_info
+
+class RegressorTrainer(Trainer):
+    def __init__(self, use_w, **kwargs):
+        super().__init__(**kwargs)
+        self.use_w = use_w
+    
+    def train_batch(self, batch, batch_idx, device):
+        lc, spectra,y , _, _,info = batch
+        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        b = lc.shape[0]
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        out = self.model(lc, spectra, w_tune=w) 
+        if isinstance(out, tuple):
+            out = out[0]
+        elif isinstance(out, dict):
+            out = out['preds']
         if self.num_quantiles > 1:
             out = out.view(b, -1, self.num_quantiles)
+        # print(out.shape, y.shape)
         loss = self.criterion(out, y)
         # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape, 'loss: ', loss.shape)
-        loss = (loss * w.unsqueeze(-1)).mean(0).sum()
+        # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
@@ -915,23 +996,23 @@ class RegressorTrainer(Trainer):
         if (len(out_median.shape) == 2) and (len(y.shape) == 1):
             out_median = out_median.squeeze(1)
         acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
-        return loss, acc, x
+        return loss, acc, y
 
     def eval_batch(self, batch, batch_idx, device):
-        x, _, y, _, info,_ = batch
-        x, y = x.to(device), y.to(device)
-        b = x.shape[0]
-        if self.w_name is None:
-            w = torch.ones(x.size(0)).to(device)
-        else:
-            w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        with torch.no_grad():
-            out = self.model(x)
-            if isinstance(out, tuple):
-                out = out[0]
-            out = out.view(b, -1, self.num_quantiles)
+        lc, spectra,y , _, _,info = batch
+        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        b = lc.shape[0]
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        out = self.model(lc, spectra, w_tune=w)
+        if isinstance(out, tuple):
+            out = out[0]
+        elif isinstance(out, dict):
+            out = out['preds']
+        out = out.view(b, -1, self.num_quantiles)
         loss = self.criterion(out, y)
-        loss = (loss * w.unsqueeze(-1)).mean(0).sum()
+        # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         # if self.wandb:
         #     wandb.log({"val_loss": loss.item()})
 
@@ -939,7 +1020,7 @@ class RegressorTrainer(Trainer):
         if (len(out_median.shape) == 2) and (len(y.shape) == 1):
             out_median = out_median.squeeze()
         acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
-        return loss, acc, x
+        return loss, acc, y
 
     def predict(self, test_dataloader, device, load_best=False):
         """
@@ -953,24 +1034,26 @@ class RegressorTrainer(Trainer):
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
-        for i,(x, _, y, mask, info, _) in enumerate(pbar):
-            x, y =  x.to(device), y.to(device)
-            b = x.shape[0]
+        for i,(lc, spectra, y, _, _, info, _) in enumerate(pbar):
+            lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+            b = lc.shape[0]
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
-                    try:
-                        if np.isscalar(value):
-                            if key not in aggregated_info:
-                                aggregated_info[key] = []
-                            aggregated_info[key].append(value)
-                    except:
-                        pass
+                    if np.isscalar(value):
+                        if key not in aggregated_info:
+                            aggregated_info[key] = []
+                        aggregated_info[key].append(value)
             with torch.no_grad():
-                y_pred = self.model(x)
-                if isinstance(y_pred, tuple):
-                    y_pred = y_pred[0]
-                y_pred = y_pred.view(b, -1, self.num_quantiles)
+                w = None
+                if self.use_w:
+                    w = torch.stack([i['w'] for i in info]).to(device)
+                out = self.model(lc, spectra, w_tune=w)
+                if isinstance(out, tuple):
+                    out = out[0]
+                elif isinstance(out, dict):
+                    out = out['preds']
+                y_pred = out.view(b, -1, self.num_quantiles)
             out_diff = int(y.shape[1] - y_pred.shape[1])
             y = y[:, out_diff:]
             preds = np.concatenate((preds, y_pred.cpu().numpy()))

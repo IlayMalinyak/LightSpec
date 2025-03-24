@@ -299,7 +299,7 @@ else:
 
 # model = MultimodalMoCo(spec_model.encoder, light_model.encoder, transformer_args_lightspec,  **moco_args.get_dict()).to(local_rank)
 # model = MultiModalSimSiam(backbone, spec_model.encoder, light_model.backbone, sims_args).to(local_rank)
-moco = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
+moco = PredictiveMoco(spec_model.encoder, light_model.simsiam.backbone,
                          transformer_args_lightspec,
                          predictor_args.get_dict(),
                          loss_args,

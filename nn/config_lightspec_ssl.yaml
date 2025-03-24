@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: test
+  exp_num: 5_cont_mlp_non_freeze
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -20,7 +20,7 @@ Data:
   labels: ['Teff', 'logg', 'FeH', 'Rstar', 'Prot']
   test_run: False
   create_umap: False
-  load_checkpoint: False
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
   use_fft: True
@@ -28,7 +28,7 @@ Data:
   combined_embed: False
   pred_coeff_val: None
   approach: "multitask"
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-21/lightspec_1.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-23/lightspec_5_mlp_non_freeze.pth'
 
 DoubleInputRegressor_lc:
   encoder_only: True
@@ -300,8 +300,8 @@ MoCo:
   hidden_dim: 512
   projection_dim: 64
   num_layers: 6
-  freeze_lightcurve: True
-  freeze_spectra: True
+  freeze_lightcurve: False
+  freeze_spectra: False
   freeze_combined: False
   bidirectional: True
 

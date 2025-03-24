@@ -7,11 +7,174 @@ from torch.utils.data import Sampler, Subset, Dataset
 import torch.distributed as dist
 import matplotlib.pyplot as plt
 from random import shuffle
-from typing import List, Optional
+from typing import List, Optional, TypeVar, Iterator
 import math
+import numpy as np
 
+T_co = TypeVar('T_co', covariant=True)
 
+import torch
+from torch.utils.data import Sampler
+import numpy as np
+import math
+from typing import Optional, List, TypeVar, Iterator
+from collections import defaultdict
 
+T_co = TypeVar('T_co', covariant=True)
+
+class BalancedDistributedSampler(Sampler[T_co]):
+    """
+    Sampler that ensures class balance in each batch while being compatible with distributed training.
+    
+    Args:
+        dataset: Dataset used for sampling.
+        labels: List of labels for each dataset item (must be integers).
+        num_replicas: Number of processes participating in distributed training.
+        rank: Rank of the current process within num_replicas.
+        shuffle: Whether to shuffle the indices.
+        balanced_ratio: Target ratio between classes (e.g., 1.0 means equal distribution).
+    """
+    
+    def __init__(
+        self, 
+        dataset: torch.utils.data.Dataset, 
+        labels: List[int], 
+        num_replicas: int = 1, 
+        rank: int = 0, 
+        shuffle: bool = True,
+        balanced_ratio: float = 1.0,
+        verbose: bool = False
+    ) -> None:
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.shuffle = shuffle
+        self.balanced_ratio = balanced_ratio
+        self.verbose = verbose
+        
+        # Cast labels to integers
+        self.labels = np.array([int(label) for label in labels])
+        
+        # Group indices by label
+        self.label_to_indices = defaultdict(list)
+        for idx, label in enumerate(self.labels):
+            self.label_to_indices[label].append(idx)
+            
+        # Get all possible class labels
+        self.unique_labels = sorted(self.label_to_indices.keys())
+        if self.verbose:
+            print(f"Unique labels: {self.unique_labels}")
+            for label in self.unique_labels:
+                print(f"Class {label} count: {len(self.label_to_indices[label])}")
+        
+        # Determine number of samples
+        n_minority = min([len(self.label_to_indices[label]) for label in self.unique_labels])
+        n_majority = max([len(self.label_to_indices[label]) for label in self.unique_labels])
+        
+        # Calculate how many samples we need per class based on balanced_ratio
+        # 0.0 = original distribution, 1.0 = completely balanced
+        # Formula: adjusted = minority + (majority - minority) * (1 - balanced_ratio)
+        samples_per_class = {}
+        for label in self.unique_labels:
+            class_size = len(self.label_to_indices[label])
+            if class_size == n_majority:  # Majority class
+                samples_per_class[label] = int(n_minority + (class_size - n_minority) * (1 - self.balanced_ratio))
+            else:  # Minority class(es)
+                samples_per_class[label] = int(class_size)
+        
+        if self.verbose:
+            print(f"Samples per class after balancing: {samples_per_class}")
+            
+        # Ensure we have the right number of samples per process
+        total_samples = sum(samples_per_class.values())
+        self.num_samples = total_samples // self.num_replicas
+        if total_samples % self.num_replicas != 0:
+            self.num_samples += 1
+        self.total_size = self.num_samples * self.num_replicas
+        
+        # Calculate how many samples from each class per process
+        self.samples_per_class_per_process = {}
+        for label in self.unique_labels:
+            self.samples_per_class_per_process[label] = samples_per_class[label] // self.num_replicas
+            if self.samples_per_class_per_process[label] == 0:
+                self.samples_per_class_per_process[label] = 1  # Ensure at least 1 sample
+                
+    def __iter__(self) -> Iterator[T_co]:
+        indices = []
+        
+        if self.shuffle:
+            # Deterministically shuffle based on epoch and seed
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            
+            # Shuffle indices within each class
+            for label in self.unique_labels:
+                label_indices = self.label_to_indices[label]
+                perm = torch.randperm(len(label_indices), generator=g).tolist()
+                indices_for_label = [label_indices[idx] for idx in perm]
+                
+                # Take samples_per_class_per_process for this process (with replacement if needed)
+                samples_needed = self.samples_per_class_per_process[label]
+                if samples_needed > len(indices_for_label):
+                    # Need to oversample with replacement
+                    additional = np.random.choice(
+                        indices_for_label, 
+                        size=samples_needed - len(indices_for_label),
+                        replace=True
+                    ).tolist()
+                    indices_for_label.extend(additional)
+                
+                # Add to overall indices
+                indices.extend(indices_for_label[:samples_needed])
+        else:
+            # Same as above but without shuffling
+            for label in self.unique_labels:
+                label_indices = self.label_to_indices[label]
+                samples_needed = self.samples_per_class_per_process[label]
+                if samples_needed > len(label_indices):
+                    # Need to oversample with replacement
+                    indices_for_label = label_indices.copy()
+                    additional = np.random.choice(
+                        label_indices, 
+                        size=samples_needed - len(label_indices),
+                        replace=True
+                    ).tolist()
+                    indices_for_label.extend(additional)
+                else:
+                    indices_for_label = label_indices[:samples_needed]
+                
+                # Add to overall indices
+                indices.extend(indices_for_label)
+        
+        # Shuffle all indices
+        if self.shuffle:
+            np.random.shuffle(indices)
+        
+        # Slice to get indices for this rank
+        indices = indices[self.rank::self.num_replicas]
+        
+        if self.verbose:
+            # Verify balance in this process
+            rank_labels = [self.labels[idx] for idx in indices]
+            class_counts = {}
+            for label in self.unique_labels:
+                class_counts[label] = rank_labels.count(label)
+            print(f"Rank {self.rank} - Class counts: {class_counts}")
+        
+        return iter(indices)
+        
+    def __len__(self) -> int:
+        return self.num_samples
+        
+    def set_epoch(self, epoch: int) -> None:
+        """
+        Sets the epoch for this sampler. Required for proper shuffling.
+        
+        Args:
+            epoch (int): Epoch number
+        """
+        self.epoch = epoch
 class DistributedUniqueLightCurveSampler(Sampler):
     def __init__(self, dataset, batch_size, num_replicas=None, rank=None):
         # Ensure distributed setup

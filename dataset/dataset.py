@@ -120,7 +120,7 @@ class DualDataset(Dataset):
             # print("Error reading file ", idx, e)
             spec = np.zeros((3909, 1))
         try:    
-            lc = pd.read_parquet(os.path.join(self.data_dir, f'lc_{padded_idx}.pqt')).values
+            lc = pd.read_parquet(os.path.join(self.data_dir, f'{idx}.pqt')).values
             max_val = np.max(np.abs(lc))
             if max_val > 1e2:
                 lc[np.abs(lc) > 1e2] = np.random.uniform(0, 2, size=lc[np.abs(lc) > 1e2].shape)
@@ -157,6 +157,10 @@ class DualDataset(Dataset):
             flux = F.pad(flux, ((0, self.lc_seq_len - flux.shape[-1],0,0)), "constant", value=0)
         spectra = torch.nan_to_num(spectra, nan=0)
         info = {'spectra': info_s, 'lc': info_lc}
+        if 'L' in label:
+            info['KMAG'] = label['L']
+        else:
+            info['KMAG'] = 1
         y = torch.tensor([self._normalize(label[name], name) for name in self.labels_names], dtype=torch.float32)
         flux = flux.nan_to_num(0).float()
         spectra = spectra.nan_to_num(0).float()
@@ -445,7 +449,10 @@ class KeplerDataset():
             else:
                 meta['Prot_ref'] = np.nan
             conf_cols = [c for c in row.keys() if 'confidence' in c]
+            prob_cols = [c for c in row.keys() if 'prob' in c]
             for c in conf_cols:
+                meta[c] = row[c]
+            for c in prob_cols:
                 meta[c] = row[c]
             if 'Pmax' in row.keys() and 'Pmin' in row.keys():
                 meta['Pmax'] = row['Pmax']
@@ -615,7 +622,7 @@ class LightSpecDataset(KeplerDataset):
                 spec_transforms:object=None,
                 light_seq_len:int=34560,
                 use_acf:bool=False,
-                 use_fft:bool=False,
+                use_fft:bool=False,
                 scale_flux:bool=True,
                 spec_seq_len:int=3909,
                 meta_columns = ['Teff', 'Mstar', 'logg'], labels=None
@@ -768,19 +775,11 @@ class FineTuneDataset(LightSpecDataset):
     """
     A dataset for fine-tuning lightcurve and spectra models
     """
-    def __init__(self, df:pd.DataFrame=None,
-                npy_path:str=None,
-                spec_path:str=None,
-                prot_df:pd.DataFrame=None,
-                light_transforms:object=None,
-                spec_transforms:object=None,
-                light_seq_len:int=34560,
-                use_acf:bool=False,
-                spec_seq_len:int=3909,
+    def __init__(self,
                 labels = ['inc'],
+                **kwargs
                 ):
-        super().__init__(df, prot_df, npy_path, spec_path, light_transforms,
-                spec_transforms, light_seq_len, use_acf, spec_seq_len)
+        super().__init__(**kwargs)
         self.labels = labels
     
     def __getitem__(self, idx):
@@ -788,7 +787,7 @@ class FineTuneDataset(LightSpecDataset):
         row = self.df.iloc[idx]
         y = torch.tensor([row[label] for label in self.labels], dtype=torch.float32)
         # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
-        return (light, spectra, light_target, spectra_target, y, info)
+        return (light, spectra, y, light_target, spectra_target, info)
 
 def create_unique_loader(dataset, batch_size, num_workers=4, **kwargs):
     """

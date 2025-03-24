@@ -2,7 +2,7 @@ Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
   exp_num: 2
-  light_model_name: "MultiEncoder"
+  light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
   # Data
@@ -16,49 +16,70 @@ Data:
   max_len_lc: 13056
   lc_freq: 0.0208
   continuum_norm: True
-  meta_columns: ['Teff', 'Mstar']
-  prediction_labels: ['vsini', 'Prot']
+  meta_columns: []
+  prediction_labels: ['sin_inc']
+  prediction_labels_simulation: ['Inclination']
   test_run: False
   create_umap: False
+  scale_flux: False
   load_checkpoint: True
   masked_transform: False
   use_acf: True
   use_fft: True
   combined_embed: False
   pred_coeff_val: None
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-02-24/lightspec_2.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-23/lightspec_freeze.pth'
 
-MultiEncoder_lc:
+DoubleInputRegressor_lc:
+  encoder_only: True
+  stacked_input: True
+  in_channels: 3
+  load_checkpoint: True
+  output_dim: 1
+  num_quantiles: 5
+  dropout_p: 0.3  
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-19/DoubleInputRegressor_lc_3_ssl.pth'
+
+CNNEncoder_lc:
   # Model
   in_channels: 2
-  num_layers: 8
+  num_layers: 6
   stride: 1
-  encoder_dims: [32,64,128,256,512,2048]
+  encoder_dims: [32,64,128,256,512]
   kernel_size: 3
   dropout_p: 0.3
   output_dim: 2
   beta: 1
-  avg_output: True
   load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
-  checkpoint_path: '/data/lightSpec/logs/light_2025-02-11/MultiEncoder_lc_1.pth'
+  avg_output: True
+  checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
 
 
-Conformer_lc:
-  encoder: ["mhsa_pro", "conv", "ffn"]
+AstroConformer_lc:
+  # Model
+  in_channels: 2
+  encoder: ["mhsa_pro", "conv"]
   timeshift: false
-  num_layers: 6
-  stride: 2
-  encoder_dim: 2048
+  num_layers: 5
+  num_decoder_layers: 6
+  stride: 20
+  encoder_dim: 512
+  decoder_dim: 128
   num_heads: 8
   kernel_size: 3
-  dropout_p: 0.2
-  norm: "shortcut"
+  dropout_p: 0.3
+  output_dim: 3
+  encoder_only: True
+  norm: "postnorm"
+  load_checkpoint: False
+  spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
 
 
 MultiTaskRegressor_spec:
+  backbone: 'cnn'
   in_channels: 1
   num_layers: 5
   stride: 1
@@ -153,23 +174,37 @@ MoCo:
   m: 0.9
   T: 0.05
   hidden_dim: 512
-  projection_dim: 512
+  projection_dim: 64
   num_layers: 6
   freeze_lightcurve: False
   freeze_spectra: False
   bidirectional: True
 
+projector:
+  in_dim: 256
+  hidden_dim: 1024
+  out_dim: 64
+
 predictor:
   in_dim: 64
   hidden_dim: 256
   out_dim: 64
-  w_dim: 2
+  w_dim: 3
+
+
+reg_predictor:
+  in_dim: 128
+  hidden_dim: 512
+  out_dim: 25
+  w_dim: 0
+
 
 Tuner:
   in_dim: 128
-  hidden_dim: 512
-  out_dim: 15
-
+  hidden_dim: 64
+  out_dim: 1
+  w_dim: 0
+  
 loss:
   sim_coeff: 25
   std_coeff: 25 
@@ -225,4 +260,4 @@ Optimization:
   weight_decay: 5e-6
   warmup_pct: 0.3
   steps_per_epoch: 3500
-  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+  quantiles: [0.1,0.25,0.5,0.75,0.9]
