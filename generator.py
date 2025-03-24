@@ -66,7 +66,7 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
         spec_transforms = Compose([LAMOSTSpectrumPreprocessor(rv_norm=False, continuum_norm=data_args.continuum_norm, plot_steps=False),
                             ToTensor()
                            ])
-        train_dataset = DualDataset(data_dir=SIMULATION_DATA_DIR,
+        full_dataset = DualDataset(data_dir=SIMULATION_DATA_DIR,
                             labels_names=data_args.prediction_labels_simulation,
                             labels_path=SIMULATION_LABELS_PATH,
                             lc_transforms=light_transforms,
@@ -76,27 +76,12 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
                             use_acf=data_args.use_acf,
                             use_fft=data_args.use_fft,
                             )
-        val_dataset = DualDataset(data_dir=SIMULATION_DATA_DIR,
-                            labels_names=data_args.prediction_labels_simulation,
-                            labels_path=SIMULATION_LABELS_PATH,
-                            lc_transforms=light_transforms,
-                            spectra_transforms=spec_transforms,
-                            lc_seq_len=int(data_args.max_len_lc),
-                            spec_seq_len=int(data_args.max_len_spectra),
-                            use_acf=data_args.use_acf,
-                            use_fft=data_args.use_fft,
-                            )
-        
-        test_dataset = DualDataset(data_dir=SIMULATION_DATA_DIR,
-                            labels_names=data_args.prediction_labels_simulation,
-                            labels_path=SIMULATION_LABELS_PATH,
-                            lc_transforms=light_transforms,
-                            spectra_transforms=spec_transforms,
-                            lc_seq_len=int(data_args.max_len_lc),
-                            spec_seq_len=int(data_args.max_len_spectra),
-                            use_acf=data_args.use_acf,
-                            use_fft=data_args.use_fft,
-                            )
+        indices = list(range(len(full_dataset)))
+        train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
+        val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
+        train_dataset = Subset(full_dataset, train_indices)
+        val_dataset = Subset(train_dataset, val_indices)
+        test_dataset = Subset(train_dataset, test_indices)
 
     else:
         spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),

@@ -60,6 +60,10 @@ train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(d
                                                                                  data_generation_fn=None,
                                                                                  dataset_name='Simulation')
 
+print("number of training samples: ", len(train_dataset))
+print("number of validation samples: ", len(val_dataset))
+print("number of test samples: ", len(test_dataset))
+
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,
                               batch_size=int(data_args.batch_size), \
