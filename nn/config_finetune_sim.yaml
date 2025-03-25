@@ -17,12 +17,12 @@ Data:
   lc_freq: 0.0208
   continuum_norm: True
   meta_columns: []
-  prediction_labels: ['Prot']
-  prediction_labels_simulation: ['Inclination']
+  prediction_labels: ['Period', 'age']
+  prediction_labels_simulation: ['Period', 'age']
   test_run: False
   create_umap: False
   scale_flux: False
-  load_checkpoint: False
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
   use_fft: True
@@ -33,10 +33,10 @@ Data:
 DoubleInputRegressor_lc:
   encoder_only: True
   stacked_input: True
-  in_channels: 3
+  in_channels: 2
   load_checkpoint: False
   output_dim: 1
-  num_quantiles: 5
+  num_quantiles: 1
   dropout_p: 0.3  
   checkpoint_path: '/data/lightSpec/logs/light_2025-03-19/DoubleInputRegressor_lc_3_ssl.pth'
 
@@ -52,11 +52,25 @@ CNNEncoder_lc:
   beta: 1
   load_checkpoint: False
   checkpoint_num: 1
-  activation: "sine"
+  activation: "gelu"
   sine_w0: 1.0
   avg_output: True
   checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
 
+LSTMEncoder_lc:
+  # Model
+  in_channels: 1
+  encoder_dims: [256,64]
+  num_layers: 5
+  dropout_p: 0.35
+  output_dim: 5
+  kernel_size: 4
+  stride: 4
+  activation: "gelu"
+  sine_w0: 1.0
+  load_checkpoint: False
+  checkpoint_num: 1
+  checkpoint_path: '/data/lightSpec/logs/light_2025-03-12/LSTMEncoder_lc_1.pth'
 
 AstroConformer_lc:
   # Model
@@ -203,14 +217,6 @@ Tuner:
   in_dim: 128
   hidden_dim: 64
   out_dim: 1
-  w_dim: 0
-
-Test_Tuner:
-  encoder_dim: 256
-  in_dim: 128
-  hidden_dim: 64
-  output_dim: 1
-  num_quantiles: 1
   w_dim: 0
   
 loss:

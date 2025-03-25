@@ -7,7 +7,7 @@ Data:
   model_name: MultiTaskRegressor
   batch_size: 64
   num_epochs: 1000
-  exp_num: 5
+  exp_num: test
   max_len_spectra: 4096
   continuum_norm: True
   max_days_lc: 720
@@ -70,6 +70,7 @@ CNNRegressor:
   activation: "silu"
 
 MultiTaskRegressor:
+  backbone: 'cnn'
   in_channels: 1
   num_layers: 5
   stride: 1
@@ -77,7 +78,7 @@ MultiTaskRegressor:
   transformer_layers: 4
   kernel_size: 3
   dropout_p: 0.2
-  avg_output: True
+  avg_output: False
   output_dim: 3
   num_quantiles: 5
   beta: 1

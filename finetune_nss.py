@@ -92,7 +92,7 @@ os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
                                                                                 create_train_test_dfs,
-                                                                                datase_name='FineTune')
+                                                                                dataset_name='FineTune')
 
 train_df, test_df = create_train_test_dfs(data_args.meta_columns)
 binary_labels = train_df['binary_prob'].tolist()
@@ -118,7 +118,8 @@ test_loader = DataLoader(test_dataset, batch_size=data_args.batch_size,
 model, optim_args, complete_config = generator.get_model(data_args,
                             args_dir,
                             complete_config,
-                            local_rank)
+                            local_rank,
+                            freeze=True)
 
 loss_fn = torch.nn.BCEWithLogitsLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))

@@ -193,15 +193,16 @@ class Trainer(object):
                     print(f"saving model at {model_name}...")
                     torch.save(self.model.state_dict(), model_name)
                     self.best_state_dict = self.model.state_dict()
-                    res = {"epochs": epochs, "train_loss": train_loss, "val_loss": val_loss,
-                           "train_acc": train_acc, "val_acc": val_acc, "train_aux_loss_1": self.train_aux_loss_1,
-                           "train_aux_loss_2":self.train_aux_loss_2, "val_aux_loss_1":self.val_aux_loss_1,
-                           "val_aux_loss_2": self.val_aux_loss_2, "lrs": lrs}
                     # model_path, output_filename = save_compressed_checkpoint(
                     #                            self.model, model_name, res, use_zip=True )
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
+
+                res = {"epochs": epochs, "train_loss": train_loss, "val_loss": val_loss,
+                        "train_acc": train_acc, "val_acc": val_acc, "train_aux_loss_1": self.train_aux_loss_1,
+                        "train_aux_loss_2":self.train_aux_loss_2, "val_aux_loss_1":self.val_aux_loss_1,
+                        "val_aux_loss_2": self.val_aux_loss_2, "lrs": lrs}
 
                 current_lr = self.optimizer.param_groups[0]['lr'] if self.scheduler is None \
                             else self.scheduler.get_last_lr()[0]
@@ -717,7 +718,7 @@ class MaskedSSLTrainer(Trainer):
 
 
 class ContrastiveTrainer(Trainer):
-    def __init__(self, temperature=1, stack_pairs=False,
+    def __init__(self, temperature=1, full_input=False, stack_pairs=True,
                  use_w=False, use_pred_coeff=False, pred_coeff_val=None, ssl_weight=0.5,
                  weight_decay=False,   **kwargs):
         super().__init__(**kwargs)
@@ -728,14 +729,14 @@ class ContrastiveTrainer(Trainer):
         self.pred_coeff_val = pred_coeff_val
         self.ssl_weight = ssl_weight
         self.weight_decay = weight_decay
+        self.full_input = full_input
         
         
     def train_batch(self, batch, batch_idx, device):
         self.optimizer.zero_grad()  # Add this if not done elsewhere
         
-        x1, x2, y, _, _, info = batch 
-        x1, x2, y = x1.to(device), x2.to(device), y.to(device)
-        
+        x1, x2, y, x1_target, x2_target, info = batch 
+        x1, x2, y, x1_target, x2_target = x1.to(device), x2.to(device), y.to(device), x1_target.to(device), x2_target.to(device)
         # Forward pass
         if self.stack_pairs:
             x = torch.cat((x1, x2), dim=0)
@@ -743,7 +744,12 @@ class ContrastiveTrainer(Trainer):
         elif self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
             pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
-            out = self.model(x1, x2, w=w, pred_coeff=pred_coeff) if self.use_pred_coeff else self.model(x1, x2, w=w)
+            if self.full_input:
+                out = self.model(lightcurves=x1, spectra=x2,
+                                 lightcurves2=x1_target, spectra2=x2_target,
+                                  w=w, pred_coeff=pred_coeff)
+            else:
+                out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
         else:
             out = self.model(x1, x2)    
 
@@ -795,22 +801,21 @@ class ContrastiveTrainer(Trainer):
         return loss, acc, y
 
     def eval_batch(self,batch, batch_idx, device):
-        x1, x2, y, _, _, info = batch 
-        x1, x2, y = x1.to(device), x2.to(device), y.to(device)
+        x1, x2, y, x1_target, x2_target, info = batch 
+        x1, x2, y, x1_target, x2_target = x1.to(device), x2.to(device), y.to(device), x1_target.to(device), x2_target.to(device)
         with torch.no_grad():
             if self.stack_pairs:
                 x = torch.cat((x1, x2), dim=0)
                 out = self.model(x, temperature=self.temperature)
             if self.use_w:
                 w = torch.stack([i['w'] for i in info]).to(device)
-                if self.use_pred_coeff:                    
-                    if self.pred_coeff_val != 'None':
-                        pred_coeff = float(self.pred_coeff_val)
-                    else:
-                        pred_coeff = max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
-                    out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
+                pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
+                if self.full_input:
+                    out = self.model(lightcurves=x1, spectra=x2,
+                                 lightcurves2=x1_target, spectra2=x2_target,
+                                  w=w, pred_coeff=pred_coeff)
                 else:
-                    out = self.model(x1, x2, w=w)
+                    out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
             else:
                 out = self.model(x1, x2)
         loss = out['loss']
@@ -913,7 +918,7 @@ class ClassificationTrainer(Trainer):
         # acc = (torch.abs((out - y)) < 0.1).sum(0)
         return loss, acc, y 
 
-    def val_batch(self, batch, batch_idx, device):
+    def eval_batch(self, batch, batch_idx, device):
         lc, spectra,y , _, _,info = batch
         lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
         w = None
@@ -964,25 +969,35 @@ class ClassificationTrainer(Trainer):
         return preds, targets, aggregated_info
 
 class RegressorTrainer(Trainer):
-    def __init__(self, use_w, **kwargs):
+    def __init__(self, use_w, only_lc=False, **kwargs):
         super().__init__(**kwargs)
         self.use_w = use_w
+        self.only_lc = only_lc
     
     def train_batch(self, batch, batch_idx, device):
-        lc, spectra,y , _, _,info = batch
+        lc, spectra, y , lc2, spectra2,info = batch
         lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
         b = lc.shape[0]
         w = None
+        # print("lcs: ", lc.shape, lc2.shape, lc.isnan().sum(), lc2.isnan().sum())
         if self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
-        out = self.model(lc, spectra, w_tune=w) 
+            out = self.model(lc, spectra, w_tune=w) 
+        elif self.only_lc:
+            out = self.model(lc, lc2)
+        else:
+            out = self.model(lc, spectra)
         if isinstance(out, tuple):
             out = out[0]
         elif isinstance(out, dict):
             out = out['preds']
         if self.num_quantiles > 1:
             out = out.view(b, -1, self.num_quantiles)
-        # print(out.shape, y.shape)
+        else:
+            out = out.squeeze(1)
+            if len(y.shape) == 2 and y.shape[1] == 1:
+                y = y.squeeze(1)
+        # print(out.shape, y.shape, out.isnan().sum(), y.isnan().sum())
         loss = self.criterion(out, y)
         # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape, 'loss: ', loss.shape)
         # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
@@ -990,35 +1005,57 @@ class RegressorTrainer(Trainer):
         self.optimizer.step()
         if self.scheduler is not None:
                 self.scheduler.step()
-        # if self.wandb:
-        #     wandb.log({"train_loss": loss.item()})
-        out_median = out[..., out.shape[-1]//2]
-        if (len(out_median.shape) == 2) and (len(y.shape) == 1):
-            out_median = out_median.squeeze(1)
+        if self.num_quantiles > 1:
+            out_median = out[..., out.shape[-1]//2]
+            if (len(out_median.shape) == 2) and (len(y.shape) == 1):
+                out_median = out_median.squeeze(1)
+        else:
+            out_median = out
         acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         return loss, acc, y
 
     def eval_batch(self, batch, batch_idx, device):
-        lc, spectra,y , _, _,info = batch
+        lc, spectra,y , lc2, spectra2,info = batch
         lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
         b = lc.shape[0]
-        w = None
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
-        out = self.model(lc, spectra, w_tune=w)
+        with torch.no_grad():
+            w = None
+            if self.use_w:
+                w = torch.stack([i['w'] for i in info]).to(device)
+                out = self.model(lc, spectra, w_tune=w) 
+            elif self.only_lc:
+                out = self.model(lc, lc2)
+            else:
+                out = self.model(lc, spectra)
         if isinstance(out, tuple):
             out = out[0]
         elif isinstance(out, dict):
             out = out['preds']
-        out = out.view(b, -1, self.num_quantiles)
+        if self.num_quantiles > 1:
+            out = out.view(b, -1, self.num_quantiles)
+        else:
+            out = out.squeeze(1)
+            if len(y.shape) == 2 and y.shape[1] == 1:
+                y = y.squeeze(1)
+        if isinstance(out, tuple):
+            out = out[0]
+        elif isinstance(out, dict):
+            out = out['preds']
+        if self.num_quantiles > 1:
+            out = out.view(b, -1, self.num_quantiles)
+        else:
+            out = out.squeeze(1)
         loss = self.criterion(out, y)
         # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         # if self.wandb:
         #     wandb.log({"val_loss": loss.item()})
 
-        out_median = out[..., out.shape[-1]//2]
-        if (len(out_median.shape) == 2) and (len(y.shape) == 1):
-            out_median = out_median.squeeze()
+        if self.num_quantiles > 1:
+            out_median = out[..., out.shape[-1]//2]
+            if (len(out_median.shape) == 2) and (len(y.shape) == 1):
+                out_median = out_median.squeeze(1)
+        else:
+            out_median = out
         acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         return loss, acc, y
 
@@ -1086,7 +1123,7 @@ class MaskedRegressorTrainer(Trainer):
         # w = const * torch.exp(w*const)
         
         # Forward pass for both tasks
-        reg_out,ssl_out  = self.model(x_masked, x)
+        reg_out,ssl_out,_  = self.model(x_masked, x)
 
         # print('shapes: ', x_masked.shape, x.shape, y.shape, mask.shape, reg_out.shape, ssl_out.shape)          
         # Calculate SSL loss (masked filling)
@@ -1149,7 +1186,7 @@ class MaskedRegressorTrainer(Trainer):
         # w = const * torch.exp(w*const)
         
         with torch.no_grad():
-            reg_out,ssl_out  = self.model(x_masked, x)  # Masked filling task
+            reg_out,ssl_out,_  = self.model(x_masked, x)  # Masked filling task
             
             ssl_loss = self.ssl_criterion(ssl_out, x)
             ssl_acc = self.mask_accuracy(ssl_out, x, mask)
@@ -1201,7 +1238,7 @@ class MaskedRegressorTrainer(Trainer):
                             aggregated_info[key] = []
                         aggregated_info[key].append(value)
             with torch.no_grad():
-                y_pred, _ = self.model(x_masked, x)
+                y_pred, _, _ = self.model(x_masked, x)
                 y_pred = y_pred.view(b, -1, self.num_quantiles)
             out_diff = int(y.shape[1] - y_pred.shape[1])
             y = y[:, out_diff:]
@@ -1535,33 +1572,33 @@ class DoubleInputTrainer(Trainer):
         super().__init__(**kwargs)
         self.num_classes = num_classes
         self.eta = eta
-    def train_epoch(self, device, epoch=None ,plot=False, conf=False):
-        """
-        Trains the model for one epoch.
-        """
-        self.model.train()
-        train_loss = []
-        train_acc = 0
-        all_accs = torch.zeros(self.num_classes, device=device)
-        if self.train_sampler is not None:
-            try:
-                self.train_sampler.set_epoch(epoch)
-            except AttributeError:
-                pass
-        pbar = tqdm(self.train_dl)
-        for i, batch in enumerate(pbar):
-            loss, acc,_ = self.train_batch(batch, device, conf)
-            train_loss.append(loss.item())   
-            pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item()}")
-            all_accs = all_accs + acc
-            if i > self.max_iter:
-                break
-            if self.range_update is not None and (i % self.range_update == 0):
-                self.train_dl.dataset.expand_label_range()
-                print("range: ", y.min(dim=0).values, y.max(dim=0).values)
-        return train_loss, all_accs/len(self.train_dl.dataset)
+    # def train_epoch(self, device, epoch=None ,plot=False, conf=False):
+    #     """
+    #     Trains the model for one epoch.
+    #     """
+    #     self.model.train()
+    #     train_loss = []
+    #     train_acc = 0
+    #     all_accs = torch.zeros(self.num_classes, device=device)
+    #     if self.train_sampler is not None:
+    #         try:
+    #             self.train_sampler.set_epoch(epoch)
+    #         except AttributeError:
+    #             pass
+    #     pbar = tqdm(self.train_dl)
+    #     for i, batch in enumerate(pbar):
+    #         loss, acc,_ = self.train_batch(batch, device, conf)
+    #         train_loss.append(loss.item())   
+    #         pbar.set_description(f"train_acc: {acc}, train_loss:  {loss.item()}")
+    #         all_accs = all_accs + acc
+    #         if i > self.max_iter:
+    #             break
+    #         if self.range_update is not None and (i % self.range_update == 0):
+    #             self.train_dl.dataset.expand_label_range()
+    #             print("range: ", y.min(dim=0).values, y.max(dim=0).values)
+    #     return train_loss, all_accs/len(self.train_dl.dataset)
     
-    def train_batch(self, batch, device, conf):
+    def train_batch(self, batch, batch_idx, device):
         x,_,y,_,info,_ = batch
         x1, x2 = x[:,-1,:], x[:,:-1,:]
         x1 = x1.to(device)
@@ -1571,56 +1608,56 @@ class DoubleInputTrainer(Trainer):
         y_pred = self.model(x1.float(), x2.float())
         if isinstance(y_pred, tuple):
             y_pred = y_pred[0]
-        if conf:        
-            y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-            conf_y = torch.abs(y - y_pred)
+        # if conf:        
+        #     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+        #     conf_y = torch.abs(y - y_pred)
         if self.num_classes > 1:
             loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
             loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
             loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
-            if conf:
-                loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
-                loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
-                loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+            # if conf:
+            #     loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+            #     loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+            #     loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
         else:
             y_pred = y_pred.squeeze()
             # print("nans: ", y_pred.isnan().sum(), y.isnan().sum())
             loss = self.criterion(y_pred, y)
-            if conf:
-                loss += self.criterion(conf_pred, conf_y)
+            # if conf:
+            #     loss += self.criterion(conf_pred, conf_y)
         loss.backward()
         self.optimizer.step()
         diff = torch.abs(y_pred - y)
         acc = (diff < (y/10)).sum(0)
         return loss, acc, y_pred
     
-    def eval_epoch(self, device, epoch=None, only_p=False ,plot=False, conf=False):
-        """
-        Evaluates the model for one epoch.
-        """
-        self.model.eval()
-        val_loss = []
-        val_acc = 0
-        all_accs = torch.zeros(self.num_classes, device=device)
-        if self.val_sampler is not None:
-            try:
-                self.train_sampler.set_epoch(epoch)
-            except AttributeError:
-                pass
-        pbar = tqdm(self.val_dl)
-        targets = np.zeros((0, self.num_classes))
-        for i, batch in enumerate(pbar):
-            loss, acc,_ = self.eval_batch(batch, device, conf)
-            val_loss.append(loss.item())
-            all_accs = all_accs + acc  
-            pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item()}")
-            if i > self.max_iter:
-                break
-            if self.range_update is not None and (i % self.range_update == 0):
-                self.train_dl.dataset.expand_label_range()
-        return val_loss, all_accs/len(self.val_dl.dataset)
+    # def eval_epoch(self, batch_idx, device):
+    #     """
+    #     Evaluates the model for one epoch.
+    #     """
+    #     self.model.eval()
+    #     val_loss = []
+    #     val_acc = 0
+    #     all_accs = torch.zeros(self.num_classes, device=device)
+    #     if self.val_sampler is not None:
+    #         try:
+    #             self.train_sampler.set_epoch(epoch)
+    #         except AttributeError:
+    #             pass
+    #     pbar = tqdm(self.val_dl)
+    #     targets = np.zeros((0, self.num_classes))
+    #     for i, batch in enumerate(pbar):
+    #         loss, acc,_ = self.eval_batch(batch, device, conf)
+    #         val_loss.append(loss.item())
+    #         all_accs = all_accs + acc  
+    #         pbar.set_description(f"val_acc: {acc}, val_loss:  {loss.item()}")
+    #         if i > self.max_iter:
+    #             break
+    #         if self.range_update is not None and (i % self.range_update == 0):
+    #             self.train_dl.dataset.expand_label_range()
+    #     return val_loss, all_accs/len(self.val_dl.dataset)
     
-    def eval_batch(self, batch, device, conf):
+    def eval_batch(self, batch, batch_idx, device):
         x,_,y,_,info,_ = batch
         x1, x2 = x[:,-1,:], x[:,:-1,:]
         x1 = x1.to(device)
@@ -1630,9 +1667,84 @@ class DoubleInputTrainer(Trainer):
             y_pred = self.model(x1.float(), x2.float())
             if isinstance(y_pred, tuple):
                 y_pred = y_pred[0]
-            if conf:
-                y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
-                conf_y = torch.abs(y - y_pred) 
+            # if conf:
+            #     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            #     conf_y = torch.abs(y - y_pred) 
+            # if self.cos_inc:
+            #     inc_idx = 0
+            #     y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
+            #     y[:, inc_idx] = torch.cos(y[:, inc_idx]*np.pi/2)
+            if self.num_classes > 1:
+                loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+                loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+                loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
+                # if conf:
+                #     loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+                #     loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+                #     loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+            else:
+                y_pred = y_pred.squeeze()
+                loss = self.criterion(y_pred, y)
+                # if conf:
+                #     loss += self.criterion(conf_pred, conf_y)
+            diff = torch.abs(y_pred - y)
+            acc = (diff < (y/10)).sum(0)
+        return loss, acc, y_pred
+
+
+class DoubleInputTrainer2(Trainer):
+    def __init__(self, num_classes=2, eta=0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.eta = eta
+    
+    def train_batch(self, batch, batch_idx, device):
+        lc,spectra,y,_,info,_ = batch
+        x1, x2 = x[:,-1,:], x[:,:-1,:]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+        self.optimizer.zero_grad()
+        y_pred = self.model(x1.float(), x2.float())
+        if isinstance(y_pred, tuple):
+            y_pred = y_pred[0]
+        # if conf:        
+        #     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+        #     conf_y = torch.abs(y - y_pred)
+        if self.num_classes > 1:
+            loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
+            loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
+            loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
+            # if conf:
+            #     loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+            #     loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+            #     loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+        else:
+            y_pred = y_pred.squeeze()
+            # print("nans: ", y_pred.isnan().sum(), y.isnan().sum())
+            loss = self.criterion(y_pred, y)
+            # if conf:
+            #     loss += self.criterion(conf_pred, conf_y)
+        loss.backward()
+        self.optimizer.step()
+        diff = torch.abs(y_pred - y)
+        acc = (diff < (y/10)).sum(0)
+        return loss, acc, y_pred
+    
+    
+    def eval_batch(self, batch, batch_idx, device):
+        x,_,y,_,info,_ = batch
+        x1, x2 = x[:,-1,:], x[:,:-1,:]
+        x1 = x1.to(device)
+        x2 = x2.to(device)
+        y = y.to(device)
+        with torch.no_grad():
+            y_pred = self.model(x1.float(), x2.float())
+            if isinstance(y_pred, tuple):
+                y_pred = y_pred[0]
+            # if conf:
+            #     y_pred, conf_pred = y_pred[:, :self.num_classes], y_pred[:, self.num_classes:]
+            #     conf_y = torch.abs(y - y_pred) 
             if self.cos_inc:
                 inc_idx = 0
                 y_pred[:, inc_idx] = torch.cos(y_pred[:, inc_idx]*np.pi/2)
@@ -1641,15 +1753,15 @@ class DoubleInputTrainer(Trainer):
                 loss_i = self.criterion(y_pred[:, 0], y[:, 0])  # Loss for inclination
                 loss_p = self.criterion(y_pred[:, 1], y[:, 1])  # Loss for period
                 loss = (self.eta * loss_i) + ((1-self.eta) * loss_p)
-                if conf:
-                    loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
-                    loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
-                    loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
+                # if conf:
+                #     loss_conf_i = self.criterion(conf_pred[:, 0], conf_y[:, 0])
+                #     loss_conf_p = self.criterion(conf_pred[:, 1], conf_y[:, 1])
+                #     loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
             else:
                 y_pred = y_pred.squeeze()
                 loss = self.criterion(y_pred, y)
-                if conf:
-                    loss += self.criterion(conf_pred, conf_y)
+                # if conf:
+                #     loss += self.criterion(conf_pred, conf_y)
             diff = torch.abs(y_pred - y)
             acc = (diff < (y/10)).sum(0)
         return loss, acc, y_pred

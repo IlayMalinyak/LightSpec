@@ -14,10 +14,15 @@ from torch import Size, Tensor
 
 
 def get_activation(args):
+    
     if args.activation == 'silu':
         return nn.SiLU()
     elif args.activation == 'sine':
         return Sine(w0=args.sine_w0)
+    elif args.activation == 'relu':
+        return nn.ReLU()
+    elif args.activation == 'gelu':
+        return nn.GELU()
     else:
         return nn.ReLU()
 
@@ -346,8 +351,10 @@ class MultiTaskRegressor(nn.Module):
             self.activation = Sine(w0=args.sine_w0)
         else:
             self.activation = nn.ReLU()
-        
+
+        self.avg_output = args.avg_output
         encoder_dim = conformer_args.encoder_dim
+        self.output_dim = encoder_dim
         self.regressor = nn.Sequential(
             nn.Linear(encoder_dim, encoder_dim//2),
             nn.BatchNorm1d(encoder_dim//2),
@@ -358,9 +365,10 @@ class MultiTaskRegressor(nn.Module):
     
     def forward(self, x, y=None):
         x_enc, x = self.encoder(x)
+        x = x.permute(0,2,1)
         output_reg = self.regressor(x_enc)
         output_dec = self.decoder(x)
-        return output_reg, output_dec
+        return output_reg, output_dec, x_enc
 
 class SimpleRegressor(nn.Module):
     def __init__(self, encoder, args):
@@ -373,7 +381,7 @@ class SimpleRegressor(nn.Module):
             nn.Dropout(p=0.3),
             nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
         )
-    def forward(self, x):
+    def forward(self, x, x_dual=None, w_tune=None):
         x_enc = self.encoder(x)
         if isinstance(x_enc, tuple):
             x_enc = x_enc[0]
@@ -396,19 +404,21 @@ class MultiTaskSimSiam(nn.Module):
         # self.backbone = MultiEncoder(args, conformer_args)
         self.simsiam = SimSiam(encoder) 
         encoder_dim = self.simsiam.output_dim * 2
+        self.output_dim = encoder_dim
         # print("encoder_dim: ", encoder_dim, 'conformer_encoder: ', conformer_args.encoder_dim)
         self.regressor = nn.Sequential(
-            nn.Linear(encoder_dim, encoder_dim//2),
-            nn.BatchNorm1d(encoder_dim//2),
+            nn.Linear(self.output_dim, self.output_dim//2),
+            nn.BatchNorm1d(self.output_dim//2),
             self.activation,
             nn.Dropout(args.dropout_p),
-            nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
+            nn.Linear(self.output_dim//2, args.output_dim*args.num_quantiles)
         )
 
     def forward(self, x1, x2, y=None):
         out = self.simsiam(x1, x2)
         z = torch.cat([out['z1'], out['z2']], dim=1)
         output_reg = self.regressor(z)
+        out['z'] = z
         out['preds'] = output_reg
         return out
 
@@ -430,6 +440,7 @@ class DoubleInputRegressor(nn.Module):
         self.dims1 = self.encoder1.in_channels
         self.stacked_input = args.stacked_input
         self.output_dim = encoder1.output_dim + encoder2.output_dim
+        print("output_dim: ", self.output_dim, "encoder1: ", encoder1.output_dim, "encoder2: ", encoder2.output_dim)
         if not args.encoder_only:
             self.regressor = nn.Sequential(
                 nn.Linear(self.output_dim, self.output_dim//2),
@@ -466,27 +477,17 @@ class MultiEncoder(nn.Module):
         self.pe = RotaryEmbedding(self.rotary_ndims)
         self.encoder = ConformerEncoder(conformer_args)
         self.output_dim = conformer_args.encoder_dim
-        self.avg_output = args.avg_output
+        # self.avg_output = args.avg_output
         
     def forward(self, x):
-        if torch.isnan(x).sum() > 0:
-            print("nans in x: ", torch.isnan(x).sum(), x.shape)
         backbone_out = self.backbone(x)
-        if torch.isnan(backbone_out).sum() > 0:
-            print("nans in backbone: ", torch.isnan(backbone_out).sum(), backbone_out.shape)
         if len(backbone_out.shape) == 2:
             x_enc = backbone_out.unsqueeze(1)
         else:
             x_enc = backbone_out
         RoPE = self.pe(x_enc, x_enc.shape[1]).nan_to_num(0)
-        if torch.isnan(x_enc).sum() > 0:
-            print("nans in rope x_enc: ", torch.isnan(x_enc).sum(), x_enc.shape)
-        if torch.isnan(RoPE).sum() > 0:
-            print("nans in rope: ", torch.isnan(x_enc).sum(), x_enc.shape)
         x_enc = self.encoder(x_enc, RoPE)
-        if torch.isnan(x_enc).sum() > 0:
-            print("nans in x_enc: ", torch.isnan(x_enc).sum(), x_enc.shape)
-        if len(x_enc.shape) == 3:
+        if (len(x_enc.shape) == 3):
             x_enc = x_enc.sum(dim=1)
         return x_enc, backbone_out
 

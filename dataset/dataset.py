@@ -32,6 +32,7 @@ plt.rcParams.update({'legend.fontsize': 22})
 T_sun = 5778
 VSINI_MAX = 100
 P_MAX = 70
+MAX_AGE = 10
 
 def pad_with_last_element(tensor, seq_len):
     """
@@ -63,86 +64,79 @@ def pad_with_last_element(tensor, seq_len):
     
     return padded
 
+def create_boundary_values_dict(df):
+  boundary_values_dict = {}
+  for c in df.columns:
+    if isinstance(df[c].values[0], str):
+      continue
+    if c not in boundary_values_dict.keys():
+      if c == 'Butterfly':
+        boundary_values_dict[c] = bool(df[c].values[0])
+      else:
+        min_val, max_val = df[c].min(), df[c].max()
+        boundary_values_dict[f'min {c}'] = float(min_val)
+        boundary_values_dict[f'max {c}'] = float(max_val)
+  return boundary_values_dict
 
 class DualDataset(Dataset):
-    def __init__(self, data_dir,
-                    labels_path,
-                    labels_names=['Period', 'Inclination'],
-                    lc_transforms=None,
-                    use_acf=False,
-                    use_fft=False,
-                    spec_seq_len=4096,
-                    lc_seq_len=13506,
-                    spectra_transforms=None,
-                    example_wv_path='/data/lamost/example_wv.npy'
+    def __init__(self,
+                 df,
+                labels=['Period', 'Inclination'],
+                light_transforms=None,
+                spec_transforms=None,
+                npy_path = None,
+                spec_path = None,
+                use_acf=False,
+                use_fft=False,
+                scale_flux=False,
+                meta_columns=None,
+                spec_seq_len=4096,
+                light_seq_len=34560,
+                example_wv_path='/data/lamost/example_wv.npy'
                 ):
-        self.data_dir = data_dir
-        self.labels = pd.read_csv(labels_path)
-        self.labels_names = labels_names
+        self.df = df
         self.spec_seq_len = spec_seq_len
-        self.lc_seq_len = lc_seq_len
+        self.lc_seq_len = light_seq_len
         self.use_acf = use_acf
         self.use_fft = use_fft
         self.range_dict = dict()
+        self.labels = labels
+        # self.labels_df = self.df[labels]
         self.update_range_dict()
         # self.lc_dir = os.path.join(data_dir, 'lc')
-        self.spectra_dir = os.path.join(data_dir, 'lamost')
-        self.lc_transforms = lc_transforms
-        self.spectra_transforms = spectra_transforms
-        self.path_list = os.listdir(self.data_dir)
+        # self.spectra_dir = os.path.join(data_dir, 'lamost')
+        self.lc_transforms = light_transforms
+        self.spectra_transforms = spec_transforms
         self.example_wv = np.load(example_wv_path)
-        self.Nlc = len(self.path_list)
+        self.Nlc = len(self.df)
+        self.scale_flux = scale_flux
+        self.meta_columns = meta_columns
+        self.boundary_values_dict = create_boundary_values_dict(self.df)
+
         
     def update_range_dict(self):
-        for name in self.labels_names:
-            min_val = self.labels[name].min()
-            max_val = self.labels[name].max()
+        for name in self.labels:
+            min_val = self.df[name].min()
+            max_val = self.df[name].max()
             self.range_dict[name] = (min_val, max_val)
         
     def __len__(self):
-        return len(self.path_list)
+        return len(self.df)
 
-    def _normalize(self, x, key):
-        min_val = float(self.range_dict[key][0])
-        max_val = float(self.range_dict[key][1])
-        return (x - min_val) / (max_val - min_val)
+    def _normalize(self, x, label):
+        # min_val = float(self.range_dict[key][0])
+        # max_val = float(self.range_dict[key][1])
+        # return (x - min_val) / (max_val - min_val)
+        if 'period' in label.lower():
+            x = x / P_MAX
+        elif 'age' in label.lower():
+            x = x / MAX_AGE
+        return x
 
-    def get_rv(self, row):
-        r_km = row['radius'] * 6.96e5
-        p_sec = row['Period'] * 24 * 3600 
-        return np.sin(np.radians(row['Inclination'])) * (2*np.pi*r_km / p_sec)
+        # min_val, max_val = self.boundary_values_dict[f'min {label}'], self.boundary_values_dict[f'max {label}']
+        # return (x - min_val)/(max_val - min_val)
 
-    def __getitem__(self, idx):
-        padded_idx = f'{idx:d}'.zfill(int(np.log10(self.Nlc))+1)
-        try:
-            spec = pd.read_parquet(os.path.join(self.spectra_dir, f'{idx}.pqt')).values
-        except (FileNotFoundError, OSError) as e:   
-            # print("Error reading file ", idx, e)
-            spec = np.zeros((3909, 1))
-        try:    
-            lc = pd.read_parquet(os.path.join(self.data_dir, f'{idx}.pqt')).values
-            max_val = np.max(np.abs(lc))
-            if max_val > 1e2:
-                lc[np.abs(lc) > 1e2] = np.random.uniform(0, 2, size=lc[np.abs(lc) > 1e2].shape)
-        except (FileNotFoundError, OSError) as e:
-            print("Error reading file ", idx, e)
-            lc = np.zeros((48000, 2))
-        
-        spectra = spec[:,-1]
-        flux = lc[:,-1]
-        info_s = dict()
-        info_lc = {'data_dir': self.data_dir}
-        try:
-            label = self.labels.iloc[idx].to_dict()
-        except IndexError:
-            label = {name: 0 for name in self.labels_names}
-        # L = label['L']
-        # lc -= L
-
-        # info_s['RV'] = self.get_rv(label)
-        info_s['wavelength'] = self.example_wv
-        if self.spectra_transforms:
-            spectra, _,info_s = self.spectra_transforms(spectra, info=info_s)
+    def transform_lc_flux(self, flux, info_lc):
         if self.lc_transforms:
             flux,_,info_lc = self.lc_transforms(flux, info=info_lc)
             if self.use_acf:
@@ -151,20 +145,62 @@ class DualDataset(Dataset):
             if self.use_fft:
                 fft = torch.tensor(info_lc['fft']).nan_to_num(0)
                 flux = torch.cat((flux, fft), dim=0)
-        if spectra.shape[-1] < self.spec_seq_len:
-            spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
         if flux.shape[-1] < self.lc_seq_len:
             flux = F.pad(flux, ((0, self.lc_seq_len - flux.shape[-1],0,0)), "constant", value=0)
+        return flux, info_lc
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        padded_idx = f'{idx:d}'.zfill(int(np.log10(self.Nlc))+1)
+        try:
+            spec = pd.read_parquet(row['spec_data_path']).values
+        except (FileNotFoundError, OSError, IndexError) as e:   
+            # print("Error reading file ", idx, e)
+            spec = np.zeros((3909, 1))
+        try: 
+            # print(idx, row['lc_data_path'])
+            lc = pd.read_parquet(row['lc_data_path']).values
+            max_val = np.max(np.abs(lc[:, 1]))
+            if max_val > 1e2:
+                lc[np.abs(lc[:, 1]) > 1e2, 1] = np.random.uniform(0, 2, size=lc[np.abs(lc[:, 1]) > 1e2, 1].shape)
+        except (FileNotFoundError, OSError, IndexError) as e:
+            print("Error reading file ", idx, e)
+            lc = np.zeros((48000, 2))
+        
+        spectra = spec[:,-1]
+        target_spectra = spectra.copy()
+        flux = lc[:,-1]
+        target_flux = flux.copy()
+        info_s = dict()
+        info_lc = dict()
+        try:
+            # label = row[self.labels].to_dict()
+            # print(label)
+            # label = {k: self._normalize(v, k) for k, v in label.items()}
+            y = torch.tensor([self._normalize(row[k], k) for k in self.labels], dtype=torch.float32)
+
+        except IndexError:
+            y = torch.zeros(len(self.labels))
+    
+        info_s['wavelength'] = self.example_wv
+        if self.spectra_transforms:
+            spectra, _,info_s = self.spectra_transforms(spectra, info=info_s)
+        if spectra.shape[-1] < self.spec_seq_len:
+            spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
         spectra = torch.nan_to_num(spectra, nan=0)
+
+        flux, info_lc = self.transform_lc_flux(flux, info_lc)
+        target_flux, _ = self.transform_lc_flux(target_flux, info_lc)
         info = {'spectra': info_s, 'lc': info_lc}
-        if 'L' in label:
-            info['KMAG'] = label['L']
+        if 'L' in row.keys():
+            info['KMAG'] = row['L']
         else:
             info['KMAG'] = 1
-        y = torch.tensor([self._normalize(label[name], name) for name in self.labels_names], dtype=torch.float32)
+        
         flux = flux.nan_to_num(0).float()
         spectra = spectra.nan_to_num(0).float()
-        return flux, spectra, y.squeeze() , torch.zeros_like(flux),  info, info
+        target_flux = target_flux.nan_to_num(0).float()
+        return flux, spectra, y , target_flux,  spectra, info
 
 class SpectraDataset(Dataset):
     """
@@ -679,7 +715,7 @@ class LightSpecDataset(KeplerDataset):
         else:
             y = light_target
         return (light.float().squeeze(0), spectra.float().squeeze(0), y,
-         masked_spectra.float().squeeze(0), info, info)
+         light_target.float().squeeze(0), masked_spectra.float().squeeze(0), info)
     
 
 class LightSpecDatasetV2(KeplerDataset):
@@ -783,7 +819,7 @@ class FineTuneDataset(LightSpecDataset):
         self.labels = labels
     
     def __getitem__(self, idx):
-        light, spectra, light_target, spectra_target, info, _ = super().__getitem__(idx)
+        light, spectra, _, light_target, spectra_target, info = super().__getitem__(idx)
         row = self.df.iloc[idx]
         y = torch.tensor([row[label] for label in self.labels], dtype=torch.float32)
         # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")

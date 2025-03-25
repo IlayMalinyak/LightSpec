@@ -7,6 +7,7 @@ from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR
 from astropy.io import fits
+from astropy.table import Table
 import numpy as np
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
@@ -35,6 +36,10 @@ from nn.utils import deepnorm_init, load_checkpoints_ddp
 from nn.optim import CQR
 from util.utils import *
 from features import create_umap
+import generator
+
+R_SUN_KM = 6.957e5
+
 
 def priority_merge_prot(dataframes, target_df):
     """
@@ -71,6 +76,31 @@ def priority_merge_prot(dataframes, target_df):
     
     return result
 
+def create_train_test_dfs(meta_columns):
+    kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
+    berger_cat = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
+    kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+    activity_cat = pd.read_csv('/data/logs/activity_proxies/proxies_full_dist.csv')
+    kepler_df = kepler_df.merge(berger_cat, on='KID').merge(kepler_meta[['KID', 'KMAG']], on='KID', how='left').merge(activity_cat, on='KID', how='left')
+    kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
+
+    lightpred_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
+    lightpred_df['Prot_ref'] = 'lightpred'
+    lightpred_df.rename(columns={'predicted period': 'Prot'}, inplace=True)
+
+    santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
+    santos_df['Prot_ref'] = 'santos'
+    mcq14_df = pd.read_csv('/data/lightPred/tables/Table_1_Periodic.txt')
+    mcq14_df['Prot_ref'] = 'mcq14'
+    reinhold_df = pd.read_csv('/data/lightPred/tables/reinhold2023.csv')
+    reinhold_df['Prot_ref'] = 'reinhold'
+
+    p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
+    kepler_df = priority_merge_prot(p_dfs, kepler_df)
+
+    train_df, test_df = train_test_split(kepler_df, test_size=0.2, random_state=1234)
+    return train_df, test_df
+
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
@@ -81,129 +111,37 @@ current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"light_{current_date}"
 
 local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/config_lc_ssl.yaml'
+args_dir = '/data/lightSpec/nn/full_config.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-model_name = data_args.model_name
-astroconf_args = Container(**yaml.safe_load(open(args_dir, 'r'))['AstroConformer'])
-cnn_args = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNEncoder'])
 exp_num = data_args.exp_num
-model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[model_name])
-optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization SSL'])
-os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
-
-model_args.num_quantiles = len(optim_args.quantiles)
-model_args.output_dim = len(data_args.labels)
-
-transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
-                        MovingAvg(13),
-                        ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
-                        FFT(seq_len=int(data_args.max_len_lc)),
-                        Normalize(['dist_median','std']),
-                        # RandomMasking(0.1, mask_value=-999),
-                        ToTensor(), ])
 
 
-kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
-berger_cat = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
-kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
-activity_cat = pd.read_csv('/data/logs/activity_proxies/proxies_full_dist.csv')
-kepler_df = kepler_df.merge(berger_cat, on='KID').merge(kepler_meta[['KID', 'KMAG']], on='KID', how='left').merge(activity_cat, on='KID', how='left')
-kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
+train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args, data_generation_fn=create_train_test_dfs, dataset_name='Kepler')
 
-lightpred_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
-lightpred_df['Prot_ref'] = 'lightpred'
-lightpred_df.rename(columns={'predicted period': 'Prot'}, inplace=True)
-
-santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
-santos_df['Prot_ref'] = 'santos'
-mcq14_df = pd.read_csv('/data/lightPred/tables/Table_1_Periodic.txt')
-mcq14_df['Prot_ref'] = 'mcq14'
-reinhold_df = pd.read_csv('/data/lightPred/tables/reinhold2023.csv')
-reinhold_df['Prot_ref'] = 'reinhold'
-
-p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
-kepler_df = priority_merge_prot(p_dfs, kepler_df)
-# kepler_df.dropna(subset=data_args.labels, inplace=True)
-print("number of samples: ", len(kepler_df))
-print("number of periods: ", kepler_df['Prot'].notna().sum())
-train_dataset = KeplerDataset(df=kepler_df, transforms=transforms,
-                                target_transforms=transforms,
-                                npy_path = '/data/lightPred/data/raw_npy',
-                                seq_len=int(data_args.max_len_lc),
-                                masked_transforms = data_args.masked_transform,
-                                use_acf=data_args.use_acf,
-                                use_fft=data_args.use_fft,
-                                scale_flux=data_args.scale_flux,
-                                labels=data_args.labels,
-                                dims=model_args.in_channels,
-                                )
-start = time.time()
-for i in range(100):
-    x1,x2,y,_,info1,info2 = train_dataset[i]
-    print(x1.shape, x1.max(), x1.min(), x2.max(), x2.min(),x1[:, x1[0]==-999].shape, x2[:, x2[0]==-999].shape)
-    if i % 10 == 0:
-        fig, axes = plt.subplots(x1.shape[0],1)
-        for j in range(x2.shape[0]):
-            axes[j].plot(x1[j, :1800].numpy())
-        plt.savefig(f"/data/lightSpec/images/lc_ssl_{i}.png")
-print("average time taken per iteration: ", (time.time()-start)/100)
-indices = list(range(len(train_dataset)))
-train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
-val_indices, test_indices = train_test_split(val_indices, test_size=0.5, random_state=42)
-train_subset = Subset(train_dataset, train_indices)
-val_subset = Subset(train_dataset, val_indices)
-test_subset = Subset(train_dataset, test_indices)
-
-train_sampler = torch.utils.data.distributed.DistributedSampler(train_subset, num_replicas=world_size, rank=local_rank)
-train_dataloader = DataLoader(train_subset,
+train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+train_dataloader = DataLoader(train_dataset,
                               batch_size=int(data_args.batch_size), \
                               num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
                               collate_fn=kepler_collate_fn,
                               sampler=train_sampler)
 
 
-val_sampler = torch.utils.data.distributed.DistributedSampler(val_subset, num_replicas=world_size, rank=local_rank)
-val_dataloader = DataLoader(val_subset,
+val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
+val_dataloader = DataLoader(val_dataset,
                             batch_size=int(data_args.batch_size),
                             collate_fn=kepler_collate_fn,
                             sampler=val_sampler, \
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
-test_dataloader = DataLoader(test_subset,
+test_dataloader = DataLoader(test_dataset,
                             batch_size=int(data_args.batch_size),
                             collate_fn=kepler_collate_fn,
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
-# backbone = Astroconformer(model_args)
-# backbone.pred_layer = torch.nn.Identity()
-# backbone = CNNEncoder(model_args)
-# backbone = MambaEncoder(model_args)
-encoder1 = CNNEncoder(cnn_args)
-# encoder1 = LSTMEncoder(lstm_args)
-encoder2 = Astroconformer(astroconf_args)
-backbone = DoubleInputRegressor(encoder1, encoder2, model_args)
-# backbone = models[model_name](model_args, conformer_args=conformer_args)
-# model = SimSiam(backbone)
-model = MultiTaskSimSiam(backbone, model_args)
+_, optim_args, complete_config, model, _ = generator.get_model(data_args, args_dir, complete_config, local_rank)
+
 model = model.to(local_rank)
-
-model_suffix = 0
-checkpoint_dir = datetime_dir
-checkpoint_exp = exp_num
-if model_args.load_checkpoint:
-    checkpoint_dir = os.path.basename(os.path.dirname(model_args.checkpoint_path))
-    checkpoint_exp = os.path.basename(model_args.checkpoint_path).split('.')[0].split('_')[-1]
-    print(datetime_dir)
-    print("loading checkpoint from: ", model_args.checkpoint_path)
-    model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix='', load_backbone=False)
-    print("loaded checkpoint from: ", model_args.checkpoint_path)
-else:
-    deepnorm_init(model, model_args)
-
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
-
-num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Number of parameters: {num_params}")
 
 if data_args.create_umap:
     umap_df = create_umap(model.module.simsiam.encoder, test_dataloader, local_rank, use_w=False, dual=False)
@@ -211,7 +149,6 @@ if data_args.create_umap:
     umap_df.to_csv(f"{data_args.log_dir}/{checkpoint_dir}/umap_{checkpoint_exp}_ssl.csv", index=False)
     print(f"umap saved at {data_args.log_dir}/{checkpoint_dir}/umap_{checkpoint_exp}_ssl.csv")
     exit()
-
     
 loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
 ssl_loss_fn = torch.nn.MSELoss()
@@ -251,39 +188,50 @@ else:
                             criterion=loss_fn, output_dim=1, scaler=scaler,
                         scheduler=scheduler, train_dataloader=train_dataloader,
                         val_dataloader=val_dataloader, device=local_rank, ssl_weight=data_args.ssl_weight,
-                                weight_decay=True, num_quantiles=len(optim_args.quantiles),
+                                weight_decay=True, num_quantiles=len(optim_args.quantiles), stack_pairs=False,
                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                             accumulation_step=1, max_iter=np.inf,
-                            exp_name=f"{model_name}_lc_{exp_num}") 
+                            exp_name=f"test_prot_lc_{exp_num}") 
 
 
-complete_config = {
-    "model_name": model_name,
-    "data_args": data_args.__dict__,
-    "model_args": model_args.__dict__,
-    "astroconf_args": astroconf_args.__dict__,
-    "cnn_args": cnn_args.__dict__,
-    "optim_args": optim_args.__dict__,
-    "num_params": num_params,
-    "model_structure": str(model),  # Add the model structure to the configuration
-    "transforms": str(transforms),
-    'trainer': trainer.__dict__
-}
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.json"
+complete_config.update(
+    {"trainer": trainer.__dict__,
+    "loss_fn": str(loss_fn),
+    "optimizer": str(optimizer)}
+)
+   
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/finetune_sim{exp_num}_complete_config.yaml"
 with open(config_save_path, "w") as config_file:
-     json.dump(complete_config, config_file, indent=2, default=str)
-print(f"Configuration (with model structure) saved at {config_save_path}.")
-# fig, axes = plot_lr_schedule(scheduler, optim_args.steps_per_epoch, data_args.num_epochs)
-# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lr_schedule.png")
+    json.dump(complete_config, config_file, indent=2, default=str)
 
-# fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-#                         early_stopping=40, best='loss', conf=True) 
-# output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}.json'
-# with open(output_filename, "w") as f:
-#     json.dump(fit_res, f, indent=2)
-# fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_lc_{exp_num}.png")
-# plt.clf()
+print(f"Configuration (with model structure) saved at {config_save_path}.")
+
+
+# complete_config = {
+#     "model_name": model_name,
+#     "data_args": data_args.__dict__,
+#     "model_args": model_args.__dict__,
+#     "astroconf_args": astroconf_args.__dict__,
+#     "cnn_args": cnn_args.__dict__,
+#     "optim_args": optim_args.__dict__,
+#     "num_params": num_params,
+#     "model_structure": str(model),  # Add the model structure to the configuration
+#     "transforms": str(transforms),
+#     'trainer': trainer.__dict__
+# }
+# config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.json"
+# with open(config_save_path, "w") as config_file:
+#      json.dump(complete_config, config_file, indent=2, default=str)
+# print(f"Configuration (with model structure) saved at {config_save_path}.")
+
+fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+                        early_stopping=40, best='loss', conf=True) 
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}.json'
+with open(output_filename, "w") as f:
+    json.dump(fit_res, f, indent=2)
+fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_lc_{exp_num}.png")
+plt.clf()
 
 preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
 

@@ -13,7 +13,7 @@ Data:
   num_epochs: 1000
   max_len_spectra: 4096
   max_days_lc: 270
-  max_len_lc: 13056
+  max_len_lc: 34560
   lc_freq: 0.0208
   continuum_norm: True
   meta_columns: ['KMAG']
@@ -200,7 +200,7 @@ reg_predictor:
 
 Tuner:
   in_dim: 128
-  hidden_dim: 512
+  hidden_dim: 64
   out_dim: 1
   w_dim: 1
   

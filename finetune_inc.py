@@ -103,6 +103,7 @@ def create_train_test_dfs(meta_columns):
     final_df['norm_vsini'] = (final_df['vsini'] - final_df['vsini'].min()) / (final_df['vsini'].max() - final_df['vsini'].min())
     final_df['norm_Prot'] = (final_df['Prot'] - final_df['Prot'].min()) / (final_df['Prot'].max() - final_df['Prot'].min())
     final_df = final_df[~final_df['inc'].isna()]
+    final_df['Prot'] /= 70
     print("prot nans: ", final_df['Prot'].isna().sum(), " Rstar nans: ", final_df['Rstar'].isna().sum(), "VSINI nans: ", final_df['vsini'].isna().sum(), "inc nans: ", final_df['inc'].isna().sum())
     
     train_df, val_df  = train_test_split(final_df, test_size=0.2, random_state=42)
@@ -130,7 +131,7 @@ current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"inc_finetune_{current_date}"
 
 local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/config_finetune_inc.yaml'
+args_dir = '/data/lightSpec/nn/full_config.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
 light_model_name = data_args.light_model_name
@@ -138,6 +139,9 @@ spec_model_name = data_args.spec_model_name
 combined_model_name = data_args.combined_model_name
 if data_args.test_run:
     datetime_dir = f"test_{current_date}"
+
+os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
+
 
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
                                                                                  create_train_test_dfs,
@@ -165,12 +169,19 @@ test_dataloader = DataLoader(test_dataset,
 
 
 for i in range(10):
-    light, spec, y, _, _, info = train_dataset[i]
-    print("train dataset: ", light.shape, spec.shape, y)
+    light, spec, y, light2, spec2, info = train_dataset[i]
+    print("train dataset: ", light.shape, light2.shape,  spec.shape, spec2.shape, y)
 
-model, optim_args, complete_config = generator.get_model(data_args, args_dir, complete_config, local_rank)
+_, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
+test_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Test_Tuner'])
+
+light_model = light_model.to(local_rank)
+model = DDP(light_model, device_ids=[local_rank], find_unused_parameters=True)
+# model = SimpleRegressor(light_model.simsiam.encoder, test_args).to(local_rank)
+# model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 loss_fn = CQR(quantiles=optim_args.quantiles)
+# loss_fn = torch.nn.L1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 
 # kfold_trainer = KFoldTrainer(
@@ -207,13 +218,23 @@ trainer = RegressorTrainer(
     train_dataloader=train_dataloader,
     val_dataloader=val_dataloader,
     device=local_rank,
-    output_dim=len(data_args.prediction_labels),
+    output_dim=len(data_args.prediction_labels_finetune),
     num_quantiles=len(optim_args.quantiles),
-    use_w = True,
+    use_w = False,
+    only_lc=True,
     log_path=data_args.log_dir,
     exp_num=datetime_dir,
     exp_name=f"inc_finetune_{exp_num}",
 )
+
+# trainer = ContrastiveTrainer(model=model, optimizer=optimizer, stack_pairs=False,
+#                             criterion=loss_fn, output_dim=1, scaler=None,
+#                         scheduler=None, train_dataloader=train_dataloader,
+#                         val_dataloader=val_dataloader, device=local_rank, ssl_weight=0,
+#                                 weight_decay=True, num_quantiles=len(optim_args.quantiles),
+#                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+#                             accumulation_step=1, max_iter=np.inf,
+#                             exp_name=f"test_prot_lc_{exp_num}")
 
 
 complete_config.update(

@@ -11,6 +11,9 @@ from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.scheduler import WarmupScheduler
 from util.utils import Container
 import yaml
+import os
+os.system('pip install torchinfo')
+import torchinfo
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'SimCLR': SimCLR, 'SimSiam': SimSiam,
            'MultiModalSimSiam': MultiModalSimSiam, 'MultimodalMoCo': MultimodalMoCo,
@@ -46,12 +49,62 @@ def load_checkpoints_ddp(model, checkpoint_path, prefix='', load_backbone=False)
   print("unexpected keys: ", unexpected)
   return model
 
+def compare_model_architectures(model1, model2):
+    """
+    Compare two PyTorch model architectures
+    
+    Args:
+        model1 (torch.nn.Module): First PyTorch model
+        model2 (torch.nn.Module): Second PyTorch model
+    """
+    print("Model 1 Architecture:")
+    print(model1)
+    print("\n" + "="*50 + "\n")
+    
+    print("Model 2 Architecture:")
+    print(model2)
+    print("\n" + "="*50 + "\n")
+    
+    # Detailed summary using torchinfo
+    print("Detailed Model 1 Summary:")
+    torchinfo.summary(model1, input_size=(1, input_shape))
+    print("\n" + "="*50 + "\n")
+    
+    print("Detailed Model 2 Summary:")
+    torchinfo.summary(model2, input_size=(1, input_shape))
+    
+    # Compare number of parameters
+    def count_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    print("\nParameter Comparison:")
+    print(f"Model 1 Total Trainable Parameters: {count_parameters(model1):,}")
+    print(f"Model 2 Total Trainable Parameters: {count_parameters(model2):,}")
+    
+    # Compare layer types
+    def get_layer_types(model):
+        layer_types = {}
+        for name, module in model.named_modules():
+            layer_type = type(module).__name__
+            layer_types[layer_type] = layer_types.get(layer_type, 0) + 1
+        return layer_types
+    
+    print("\nLayer Type Comparison:")
+    print("Model 1 Layer Types:")
+    for layer, count in get_layer_types(model1).items():
+        print(f"  {layer}: {count}")
+    
+    print("\nModel 2 Layer Types:")
+    for layer, count in get_layer_types(model2).items():
+        print(f"  {layer}: {count}")
+
 def init_model(model, model_args, prefix='', load_backbone=False):
   if model_args.load_checkpoint:
-      model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix=prefix, load_backbone=load_backbone)
+        model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix=prefix, load_backbone=load_backbone)
   else:
-      print("****deepnorm init****")
-      deepnorm_init(model, model_args)
+    #   print("****deepnorm init****")
+    #   deepnorm_init(model, model_args)
+        pass
   return model
 
 def deepnorm_init(model, args):

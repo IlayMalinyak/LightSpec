@@ -187,14 +187,16 @@ def kepler_collate_fn(batch:List):
     Collate function for the Kepler dataset.        
     """
     # Separate the elements of each sample tuple (x, y, mask, info) into separate lists
-    xs, ys, masks, masks_y, infos, infos_y = zip(*batch)
+    x1, x2, y, x1_target, x2_target, infos = zip(*batch)
 
     # Convert lists to tensors
-    xs_tensor = torch.stack(xs, dim=0)
-    ys_tensor = torch.stack(ys, dim=0)
-    masks_tensor = torch.stack(masks, dim=0)
-    masks_y_tensor = torch.stack(masks_y, dim=0)
-    return xs_tensor, ys_tensor, masks_tensor, masks_y_tensor, infos, infos_y
+    x1_tensor = torch.stack(x1, dim=0)
+    x2_tensor = torch.stack(x2, dim=0)
+    y_tensor = torch.stack(y, dim=0)
+    x1_target_tensor = torch.stack(x1_target, dim=0)
+    x2_target_tensor = torch.stack(x2_target, dim=0)
+
+    return x1_tensor, x2_tensor, y_tensor, x1_target_tensor, x2_target_tensor, infos
 
 def multi_quarter_kepler_df(root_kepler_path:str, Qs:List, table_path:str=None):
     """

@@ -67,14 +67,16 @@ class MultimodalMoCo(nn.Module):
         self.spectra_proj_q = nn.Linear(spectra_encoder.output_dim, projection_dim)
         self.lightcurve_proj_q = nn.Linear(lightcurve_encoder.output_dim, projection_dim)
         
-        # self.shared_encoder_q = Transformer(projection_args)
+        self.shared_encoder_q = Transformer(projection_args)
         
-        # self.shared_encoder_k = copy.deepcopy(self.shared_encoder_q)
+        self.shared_encoder_k = copy.deepcopy(self.shared_encoder_q)
+        
         self.spectra_proj_k = copy.deepcopy(self.spectra_proj_q)
         self.lightcurve_proj_k = copy.deepcopy(self.lightcurve_proj_q)
         
     
-        # self._freeze_encoder(self.shared_encoder_k)
+        self._freeze_encoder(self.shared_encoder_k)
+        
         self._freeze_encoder(self.spectra_proj_k)
         self._freeze_encoder(self.lightcurve_proj_k)
 
@@ -317,14 +319,14 @@ class PredictiveMoco(MultimodalMoCo):
         loss = loss.nan_to_num(0)
         return loss
     
-    def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
+    def forward(self, lightcurves, spectra, lightcurves2=None, spectra2=None, w=None, pred_coeff=1):
 
-        spectra_feat = self.spectra_encoder_q(spectra)
+        spectra_feat = self.spectra_encoder_q(spectra, spectra2)
         if isinstance(spectra_feat, tuple):
-            spectra_feat = spectra_feat[0]
-        lightcurve_feat = self.lightcurve_encoder_q(lightcurves)
-        if isinstance(lightcurve_feat, tuple):
-            lightcurve_feat = lightcurve_feat[0]
+            spectra_feat = spectra_feat[-1]
+        lightcurve_feat = self.lightcurve_encoder_q(lightcurves, lightcurves2)['z']
+        # if isinstance(lightcurve_feat, tuple):
+        #     lightcurve_feat = lightcurve_feat[0]
         
         if self.combined_encoder is not None:
             spectra = torch.nn.functional.pad(spectra, (0, lightcurves.shape[-1] - spectra.shape[-1], 0,0))
@@ -332,11 +334,11 @@ class PredictiveMoco(MultimodalMoCo):
             combined_embed = self.combined_encoder(combined_input)
             spectra_feat = torch.cat((spectra_feat, combined_embed),dim=-1)
             lightcurve_feat = torch.cat((lightcurve_feat, combined_embed), dim=-1)
-        # q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
-        # q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
+        q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
+        q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
 
-        q_s = self.spectra_proj_q(spectra_feat)
-        q_l = self.lightcurve_proj_q(lightcurve_feat)
+        # q_s = self.spectra_proj_q(spectra_feat)
+        # q_l = self.lightcurve_proj_q(lightcurve_feat)
 
         q_s = q_s.nan_to_num(0)
         q_l = q_l.nan_to_num(0)
@@ -344,6 +346,11 @@ class PredictiveMoco(MultimodalMoCo):
             return {
                     'q': torch.cat((q_l, q_s),dim=-1)
                     }
+            # print("stopping here")
+            # return {
+            #     'q_s': q_s,
+            #     'q': lightcurve_feat
+            # }
 
 
 
@@ -352,11 +359,11 @@ class PredictiveMoco(MultimodalMoCo):
         
 
         with torch.no_grad():
-            # k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
-            # k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
+            k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
+            k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
 
-            k_s = self.spectra_proj_k(spectra_feat)
-            k_l = self.lightcurve_proj_k(lightcurve_feat)
+            # k_s = self.spectra_proj_k(spectra_feat)
+            # k_l = self.lightcurve_proj_k(lightcurve_feat)
         
         loss_s_pred = self.vicreg_loss(q_s_vicreg, q_l_vicreg)
 
@@ -426,8 +433,10 @@ class MultiTaskMoCo(nn.Module):
         super(MultiTaskMoCo, self).__init__()
         self.moco_model = moco_model
         self.predictor = Predictor(**predictor_args)
-    def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
-        moco_out = self.moco_model(lightcurves, spectra, w=w, pred_coeff=pred_coeff)
+    def forward(self, lightcurves, spectra, lightcurves2=None, spectra2=None, w=None, pred_coeff=1):
+        moco_out = self.moco_model(lightcurves, spectra,
+                                     lightcurves2=lightcurves2, spectra2=spectra2,
+                                      w=w, pred_coeff=pred_coeff)
         q = moco_out['q']
         preds = self.predictor(q)
         moco_out['preds'] = preds
@@ -486,11 +495,18 @@ class MocoTuner(nn.Module):
             for name, parameter in self.moco_model.named_parameters():
                 parameter.requires_grad = False
         self.tune_args = tune_args
-        self.predictor = Predictor(**tune_args)
+        # self.predictor = Predictor(**tune_args)
+        self.pred_layer = nn.Sequential(
+        nn.Linear(tune_args['in_dim'], tune_args['hidden_dim']),
+        nn.GELU(),
+        nn.Dropout(p=0.3),
+        nn.Linear(tune_args['hidden_dim'], tune_args['out_dim'])
+        )
+
 
     def forward(self, lightcurves, spectra, w=None, w_tune=None, pred_coeff=1):
         moco_out = self.moco_model(lightcurves, spectra, w=w, pred_coeff=pred_coeff)
         q = moco_out['q']
-        preds = self.predictor(q, w=w_tune)
+        preds = self.pred_layer(q)
         return preds
 
