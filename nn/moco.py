@@ -450,14 +450,28 @@ class Predictor(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, w_dim=0):
         super(Predictor, self).__init__()
         in_dim += w_dim
+        
+        # Mark the first layer for proper initialization
+        self.input_layer = nn.Linear(in_dim, hidden_dim)
+        self.input_layer.is_first_layer = True
+        
+        self.norm1 = nn.LayerNorm(hidden_dim)
+        self.activation1 = nn.SiLU()
+        
+        self.hidden_layer = nn.Linear(hidden_dim, hidden_dim)
+        self.norm2 = nn.LayerNorm(hidden_dim)
+        self.activation2 = nn.SiLU()
+        
+        self.output_layer = nn.Linear(hidden_dim, out_dim)
+        
         self.predictor = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, out_dim)
+                self.input_layer,
+                self.norm1,
+                self.activation1,
+                self.hidden_layer,
+                self.norm2,
+                self.activation2,
+                self.output_layer
             )
     
     def forward(self, x, w=None):

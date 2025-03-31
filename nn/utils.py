@@ -102,16 +102,76 @@ def init_model(model, model_args, prefix='', load_backbone=False):
   if model_args.load_checkpoint:
         model = load_checkpoints_ddp(model, model_args.checkpoint_path, prefix=prefix, load_backbone=load_backbone)
   else:
-    #   print("****deepnorm init****")
-    #   deepnorm_init(model, model_args)
-        pass
+      print("****applying deepnorm initialization****")
+      # Apply DeepNorm initialization for transformer-based models
+      if hasattr(model, 'encoder') and any(
+          'transformer' in str(type(module)).lower() 
+          or 'conformer' in str(type(module)).lower()
+          or 'mhsa' in str(type(module)).lower() 
+          for name, module in model.named_modules()):
+          deepnorm_init(model, model_args)
   return model
 
 def deepnorm_init(model, args):
-
+  """
+  Apply DeepNorm initialization to transformer-based models.
+  This helps with stability and training of deep transformer networks.
+  
+  Args:
+      model (nn.Module): Model to initialize
+      args: Configuration arguments with beta parameter
+  """
+  # Handle shared encoders in MoCo models (Transformer instances)
+  from nn.models import Transformer
+  if isinstance(model, Transformer):
+    print(f"Applying DeepNorm initialization to Transformer with {len(model.layers)} layers")
+    beta = getattr(args, 'beta', 1)
+    
+    # Initialize encoder (first layer)
+    if hasattr(model, 'encoder'):
+      nn.init.xavier_normal_(model.encoder.weight, gain=1)
+      if model.encoder.bias is not None:
+        nn.init.zeros_(model.encoder.bias)
+        
+    # Initialize all attention blocks
+    for i, layer in enumerate(model.layers):
+      if hasattr(layer, 'attn'):
+        # Initialize attention components
+        if hasattr(layer.attn, 'query_proj'):
+          nn.init.xavier_normal_(layer.attn.query_proj.weight, gain=1)
+          nn.init.xavier_normal_(layer.attn.key_proj.weight, gain=1)
+          nn.init.xavier_normal_(layer.attn.value_proj.weight, gain=beta)
+          nn.init.xavier_normal_(layer.attn.output_proj.weight, gain=beta)
+          
+          if hasattr(layer.attn.query_proj, 'bias') and layer.attn.query_proj.bias is not None:
+            nn.init.zeros_(layer.attn.query_proj.bias)
+            nn.init.zeros_(layer.attn.key_proj.bias)
+            nn.init.zeros_(layer.attn.value_proj.bias)
+            nn.init.zeros_(layer.attn.output_proj.bias)
+      
+      # Initialize FFN components
+      if hasattr(layer, 'ffn'):
+        nn.init.xavier_normal_(layer.ffn.linear1.weight, gain=beta)
+        nn.init.xavier_normal_(layer.ffn.linear2.weight, gain=beta)
+        if hasattr(layer.ffn.linear1, 'bias') and layer.ffn.linear1.bias is not None:
+          nn.init.zeros_(layer.ffn.linear1.bias)
+          nn.init.zeros_(layer.ffn.linear2.bias)
+    
+    # Initialize output projection
+    if hasattr(model, 'head'):
+      if hasattr(model.head, 'linear1'):
+        nn.init.xavier_normal_(model.head.linear1.weight, gain=beta)
+      if hasattr(model.head, 'linear2'):
+        nn.init.xavier_normal_(model.head.linear2.weight, gain=beta)
+    
+    return
+  
+  # For other model types, use the apply method
   def init_func(m):
     beta = getattr(args, 'beta', 1)
-    if isinstance(m, MHA_rotary):  # adjust as necessary for your use case
+    
+    # Handle MHA_rotary for Conformer/Astroconformer models
+    if isinstance(m, MHA_rotary):
       nn.init.xavier_normal_(m.query.weight, gain=1)
       nn.init.xavier_normal_(m.key.weight, gain=1)
       nn.init.xavier_normal_(m.value.weight, gain=beta)
@@ -126,7 +186,37 @@ def deepnorm_init(model, args):
         nn.init.xavier_normal_(m.ffn.linear2.weight, gain=beta)
         nn.init.zeros_(m.ffn.linear1.bias)
         nn.init.zeros_(m.ffn.linear2.bias)
-        
+    
+    # Handle Flash_Mha for regular Transformer models
+    elif hasattr(m, 'attn') and hasattr(m.attn, 'query_proj'):
+      nn.init.xavier_normal_(m.attn.query_proj.weight, gain=1)
+      nn.init.xavier_normal_(m.attn.key_proj.weight, gain=1)
+      nn.init.xavier_normal_(m.attn.value_proj.weight, gain=beta)
+      nn.init.xavier_normal_(m.attn.output_proj.weight, gain=beta)
+      
+      if hasattr(m.attn.query_proj, 'bias') and m.attn.query_proj.bias is not None:
+        nn.init.zeros_(m.attn.query_proj.bias)
+        nn.init.zeros_(m.attn.key_proj.bias)
+        nn.init.zeros_(m.attn.value_proj.bias)
+        nn.init.zeros_(m.attn.output_proj.bias)
+    
+    # Handle Block's FFN
+    elif hasattr(m, 'ffn') and hasattr(m.ffn, 'linear1'):
+      nn.init.xavier_normal_(m.ffn.linear1.weight, gain=beta)
+      nn.init.xavier_normal_(m.ffn.linear2.weight, gain=beta)
+      if hasattr(m.ffn.linear1, 'bias') and m.ffn.linear1.bias is not None:
+        nn.init.zeros_(m.ffn.linear1.bias)
+        nn.init.zeros_(m.ffn.linear2.bias)
+    
+    # Handle general MLP layers
+    elif isinstance(m, nn.Linear):
+      # For the first layer in the sequence
+      if getattr(m, 'is_first_layer', False):
+        nn.init.xavier_normal_(m.weight, gain=1)
+      else:
+        nn.init.xavier_normal_(m.weight, gain=beta)
+      if m.bias is not None:
+        nn.init.zeros_(m.bias)
 
   model.apply(init_func)
 

@@ -537,13 +537,27 @@ class Block(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, args):
         super().__init__()
+        # Set first layer flag for initialization purposes
         self.encoder = nn.Linear(args.in_channels, args.encoder_dim)
+        self.encoder.is_first_layer = True
+        
+        # Create transformer blocks
         self.layers = torch.nn.ModuleList()
         for layer_id in range(args.num_layers):
             self.layers.append(Block(args))
+        
         self.norm = RMSNorm(args.encoder_dim)
         self.head = MLP(args.encoder_dim, out_features=args.output_dim*args.num_quantiles, dtype=torch.get_default_dtype())
         self.output_dim = args.output_dim*args.num_quantiles
+        
+        # Calculate and store scaling factors for DeepNorm if needed
+        if getattr(args, 'deepnorm', False) and args.num_layers >= 6:
+            layer_coeff = args.num_layers / 6.0
+            self.alpha = layer_coeff ** 0.5  
+            self.beta = layer_coeff ** -0.5
+        else:
+            self.alpha = 1.0
+            self.beta = 1.0
     def forward(self, x, y=None):
         if len(x.shape)==2:
             x = x.unsqueeze(-1)
