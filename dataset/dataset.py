@@ -30,6 +30,12 @@ plt.rcParams.update({'xtick.labelsize': 22, 'ytick.labelsize': 22})
 plt.rcParams.update({'legend.fontsize': 22})
 
 T_sun = 5778
+T_MIN =3483.11
+T_MAX = 7500.0
+LOGG_MIN = -0.22
+LOGG_MAX = 4.9
+FEH_MIN = -2.5
+FEH_MAX = 0.964
 VSINI_MAX = 100
 P_MAX = 70
 MAX_AGE = 10
@@ -264,9 +270,12 @@ class SpectraDataset(Dataset):
                      df=None,
                     max_len=3909,
                     use_cache=True,
-                    id='combined_obsid'):
+                    id='combined_obsid',
+                    target_norm='solar'
+                    ):
         self.data_dir = Path(data_dir)
         self.transforms = transforms
+        self.target_norm = target_norm
         self.df = df
         self.id = id
         if df is None:
@@ -333,7 +342,21 @@ class SpectraDataset(Dataset):
         info['snri'] = row['combined_snri'] / 1000
         info['snrr'] = row['combined_snrr'] / 1000
         info['snrz'] = row['combined_snrz'] / 1000
-        target = torch.tensor([-999, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
+        
+        # Add joint probability information if available
+        if 'joint_prob' in row:
+            info['joint_prob'] = row['joint_prob']
+            info['joint_weight'] = row['joint_weight']
+            
+        if self.target_norm =='solar':
+            target = torch.tensor([-999, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
+        elif self.target_norm == 'minmax':
+            teff = (info['Teff'] - T_MIN) / (T_MAX - T_MIN)
+            logg = (info['logg'] - LOGG_MIN) / (LOGG_MAX - LOGG_MIN)
+            feh = (info['FeH'] - FEH_MIN) / (FEH_MAX - FEH_MIN)
+            target = torch.tensor([-999, teff, logg, feh], dtype=torch.float32)
+        else:
+            raise ValueError("Unknown target normalization method")
         return target, info
     
     def create_apogee_target(self, row, info):
@@ -382,7 +405,7 @@ class SpectraDataset(Dataset):
                     torch.zeros(self.max_len),
                     torch.zeros(target_size),\
                     torch.zeros(self.max_len, dtype=torch.bool),
-                    info,
+                    torch.zeros(self.max_len, dtype=torch.bool),
                     info)
         meta[self.id] = obsid
         if self.transforms:
@@ -409,7 +432,7 @@ class SpectraDataset(Dataset):
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
         
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
-         target.float(), mask.squeeze(0), info, info)
+         target.float(), mask.squeeze(0), mask.squeeze(0), info)
 
 
 class KeplerDataset():
@@ -701,6 +724,7 @@ class LightSpecDataset(KeplerDataset):
         self.meta_columns = meta_columns
         self.masked_transform = RandomMasking()
         self.labels = labels
+
 
     def read_spectra(self, filename):
         with fits.open(filename) as hdulist:

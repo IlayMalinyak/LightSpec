@@ -1233,7 +1233,7 @@ class MaskedRegressorTrainer(Trainer):
         
     def train_batch(self, batch, batch_idx, device):
         const = self.w_init_val/(1+self.epoch)
-        x_masked, x, y, mask, info, _ = batch
+        x_masked, x, y, mask, _, info= batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
         
@@ -1297,7 +1297,7 @@ class MaskedRegressorTrainer(Trainer):
 
     def eval_batch(self, batch, batch_idx, device):
         const = self.w_init_val/(1+self.epoch)
-        x_masked, x, y, mask, info, _ = batch
+        x_masked, x, y, mask, _, info = batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
         
@@ -1349,7 +1349,7 @@ class MaskedRegressorTrainer(Trainer):
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
-        for i,(x_masked, x, y, mask, info, _) in enumerate(pbar):
+        for i,(x_masked, x, y, mask, _ , info) in enumerate(pbar):
             x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
             b = x_masked.shape[0]
             for item in info:

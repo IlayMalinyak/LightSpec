@@ -212,25 +212,25 @@ else:
 scaler = GradScaler()
 
 accumulation_step = 1
-# trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-#                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-#                          scaler=scaler, grad_clip=True,
-#                        scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
-#                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-#                              exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-#                              accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
-#                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
-#                         exp_name=f"{exp_num}") 
-
-trainer = JEPATrainer(
-                        model=model, optimizer=optimizer,
+trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-                        train_dataloader=train_dataloader,
+                         scaler=scaler, grad_clip=True,
+                       scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                             exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
-                             accumulation_step=accumulation_step, max_iter=np.inf, use_w=True,
-                        exp_name=f"{exp_num}"
-                        )
+                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                             accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
+                           use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
+                        exp_name=f"{exp_num}") 
+
+# trainer = JEPATrainer(
+#                         model=model, optimizer=optimizer,
+#                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+#                         train_dataloader=train_dataloader,
+#                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+#                              exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
+#                              accumulation_step=accumulation_step, max_iter=np.inf, use_w=True,
+#                         exp_name=f"{exp_num}"
+#                         )
 
 complete_config.update(
     {"trainer": trainer.__dict__,
