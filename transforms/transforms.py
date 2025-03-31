@@ -34,7 +34,7 @@ class Compose:
         # print(f"Initial type: {out.dtype}")
         for t in self.transforms:
             out, mask, info = t(out, mask=mask, info=info)
-            # print(f"{t} took {time.time() - t0}, type: {out.dtype}, shape: {out.shape}")
+            # print(f"{t}  shape: {out.shape}")
             # if mask is not None:
             #     print("mask shape: ", mask.shape)
             # else:
@@ -122,6 +122,45 @@ class RandomCrop:
 
     def __repr__(self):
         return f"RandomCrop(crop_size={self.crop_size})"
+
+class TrendRemover:
+    """
+    Remove long-term trends using moving average transformation.
+    """
+    def __init__(self, window_size=100*48):
+        self.window_size = window_size
+
+    def __call__(self, x, mask=None, info=dict()):
+        if isinstance(x, np.ndarray):
+            return self._remove_trend_numpy(x, mask=mask, info=info)
+        elif isinstance(x, torch.Tensor):
+            return self._remove_trend_torch(x, mask=mask, info=info)
+        else:
+            raise TypeError("Input must be either a numpy array or a PyTorch tensor")
+
+    def _remove_trend_numpy(self, x, mask=None, info=dict()):
+        # Compute moving average
+        cumsum = np.cumsum(np.insert(x, 0, 0)) 
+        moving_avg = (cumsum[self.window_size:] - cumsum[:-self.window_size]) / float(self.window_size)
+        
+        # Pad the moving average to match original length
+        pad_left = np.mean(moving_avg[:self.window_size//2])
+        pad_right = np.mean(moving_avg[-self.window_size//2:])
+        moving_avg = np.pad(moving_avg, 
+                             (self.window_size//2, self.window_size - self.window_size//2 - 1), 
+                             mode='constant', 
+                             constant_values=(pad_left, pad_right))
+        
+        # Remove trend
+        detrended = x - moving_avg + 1
+        print(np.isnan(detrended).sum(), moving_avg)
+        return detrended, mask, info
+
+    def _remove_trend_torch(self, x, mask=None, info=dict()):
+        # Convert to numpy, process, then convert back to torch
+        x_np = x.numpy() if torch.is_tensor(x) else x
+        detrended_np, mask, info = self._remove_trend_numpy(x_np, mask, info)
+        return torch.tensor(detrended_np), mask, info
 
 
 class MovingAvg():
@@ -369,20 +408,20 @@ class AvgDetrend:
     def _detrend_numpy(self, x, mask=None, info=dict()):
         if len(x.shape) > 1:
             x = x.squeeze()
+        x = x.astype(np.float64)
         if self.kernel_size % 2 == 0:
             self.kernel_size += 1
     
         # Calculate the moving average
         weights = np.ones(self.kernel_size) / self.kernel_size
         ma = np.convolve(x, weights, mode='same')
-        
         # Handle edge effects
         half_window = self.kernel_size // 2
         ma[:half_window] = ma[half_window]
         ma[-half_window:] = ma[-half_window-1]
-        
+        res = (x - ma) + 1
         # Subtract moving average from the original series
-        return (x - ma)[np.newaxis, :], mask, info
+        return res, mask, info
 
     def _detrend_torch(self, x, mask=None, info=dict()):
         if mask is None:
@@ -774,6 +813,8 @@ class ACF():
 
     def __call__(self, x, mask=None, info=None, step=None):
         if isinstance(x, np.ndarray):
+            if len(x.shape) > 1:
+                x = x.squeeze()
             if self.max_lag_day is None:
                 acf = A(x, nlags=len(x))
             else:

@@ -520,3 +520,69 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
     
     return df
 
+def predict_results(trainer, val_dataloader, test_dataloader, loss_fn, labels,
+                     data_args, optim_args, model_name, exp_num,
+                      datetime_dir, local_rank, world_size, info_keys=['Prot_ref']):
+    preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
+
+    preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
+
+    print(info.keys())
+
+    low_q = preds[:, :, 0] 
+    high_q = preds[:, :, -1]
+    coverage = np.mean((targets >= low_q) & (targets <= high_q))
+    print('coverage: ', coverage)
+
+    cqr_errs = loss_fn.calibrate(preds_val, targets_val)
+    print(targets.shape, preds.shape)
+    preds_cqr = loss_fn.predict(preds, cqr_errs)
+
+    low_q = preds_cqr[:, :, 0]
+    high_q = preds_cqr[:, :, -1]
+    coverage = np.mean((targets >= low_q) & (targets <= high_q))
+    print('coverage after calibration: ', coverage)
+
+    df = save_predictions_to_dataframe(preds, targets, info, labels, optim_args.quantiles,
+    id_name='KID', info_keys=info_keys)
+
+    df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_{exp_num}.csv", index=False)
+    print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_{exp_num}.csv")
+
+    df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, labels, optim_args.quantiles,
+    id_name='KID', info_keys=info_keys)
+
+    df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_{exp_num}_cqr.csv", index=False)
+    print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_{exp_num}_cqr.csv")
+
+
+def convert_to_onnx(model, dataloader, output_path, output_names=['output']):
+    """
+    Converts a PyTorch model (.pth) to ONNX format.
+
+    Parameters:
+        model_path (str): Path to the .pth file containing the PyTorch model.
+        input_shapes (list of tuples): List of shapes for each input tensor.
+        output_path (str): Path to save the ONNX model.
+        input_names (list of str, optional): Names of the input tensors in ONNX. Defaults to ['input_0', 'input_1', 'input_2', 'input_3'].
+        output_names (list of str, optional): Names of the output tensors in ONNX. Defaults to ['output'].
+    """
+
+    model.eval()  # Set to evaluation mode
+
+    # Create example input
+    batch = next(iter(dataloader))
+    lc, spec, y, lc2, spec2, info = batch
+    example_inputs = (lc, spec, lc2, spec2)
+    # Default input names if not provided
+    input_names = ['lc', 'spec', 'lc2', 'spec2']
+
+    # Export the model to ONNX
+    torch.onnx.export(model,                             # PyTorch model
+                      example_inputs,                    # Tuple of input tensors
+                      output_path,                       # Output ONNX file path
+                      input_names=input_names,           # Input names in ONNX model
+                      output_names=output_names,         # Output names in ONNX model
+                      dynamic_axes={name: {0: 'batch_size'} for name in input_names})  # Make batch size dynamic
+
+    print(f"ONNX model saved at {output_path}")

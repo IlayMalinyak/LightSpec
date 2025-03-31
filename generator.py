@@ -33,6 +33,7 @@ from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.models import *
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
 from nn.moco import *
+from nn.multi_modal import *
 from nn.simsiam import SimSiam, projection_MLP
 from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp, deepnorm_init
@@ -45,7 +46,7 @@ MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEnco
             'MultiTaskRegressor': MultiTaskRegressor,
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
-DATASETS = {'LightSpec': LightSpecDataset, 'FineTune': FineTuneDataset, 'Simulation': DualDataset, 'Kepler':
+DATASETS = {'LightSpec': LightSpecDataset, 'FineTune': FineTuneDataset, 'Simulation': SimulationDataset, 'Kepler':
                 KeplerDataset, 'Spectra': SpectraDataset}
 
 SIMULATION_DATA_DIR = '/data/simulations/dataset_big/lc'
@@ -54,16 +55,17 @@ SIMULATION_LABELS_PATH = '/data/simulations/dataset_big/simulation_properties.cs
 
 def get_kepler_data(data_args, df, transforms):
 
-    return KeplerDataset(df=df, transforms=transforms,
-                                target_transforms=transforms,
-                                npy_path = '/data/lightPred/data/raw_npy',
-                                seq_len=int(data_args.max_len_lc),
-                                masked_transforms = data_args.masked_transform,
-                                use_acf=data_args.use_acf,
-                                use_fft=data_args.use_fft,
-                                scale_flux=data_args.scale_flux,
-                                labels=data_args.prediction_labels_lc,
-                                dims=data_args.in_channels,
+    return KeplerDataset(df=df,
+                        transforms=transforms,
+                        target_transforms=transforms,
+                        npy_path = '/data/lightPred/data/raw_npy',
+                        seq_len=int(data_args.max_len_lc),
+                        masked_transforms = data_args.masked_transform,
+                        use_acf=data_args.use_acf,
+                        use_fft=data_args.use_fft,
+                        scale_flux=data_args.scale_flux,
+                        labels=data_args.prediction_labels_lc,
+                        dims=data_args.dim_lc,
                                 )
 def get_lamost_data(data_args, df, transforms):
 
@@ -103,7 +105,7 @@ def get_finetune_data(data_args, df, light_transforms, spec_transforms):
                             )
 
 def get_simulation_data(data_args, df, light_transforms, spec_transforms):
-    return DualDataset(df=df,
+    return SimulationDataset(df=df,
                         light_transforms=light_transforms,
                         spec_transforms=spec_transforms,
                         npy_path = '/data/lightPred/data/raw_npy',
@@ -163,6 +165,14 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
         test_dataset = get_finetune_data(data_args, test_df, light_transforms, spec_transforms)
     
     elif dataset_name == 'Simulation':
+        light_transforms = Compose([
+                            # AvgDetrend(100*48),
+                            RandomCrop(int(data_args.max_len_lc)),
+                            MovingAvg(13),
+                            ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
+                            # FFT(seq_len=int(data_args.max_len_lc)),
+                            Normalize(['std']),
+                            ToTensor(), ])
         spec_transforms = Compose([LAMOSTSpectrumPreprocessor(rv_norm=False, continuum_norm=data_args.continuum_norm, plot_steps=False),
                                 ToTensor()
                             ])
@@ -191,6 +201,7 @@ def get_model(data_args,
             args_dir,
             config,
              local_rank,
+             load_individuals=False,
              freeze=False):
     
     light_model_name = data_args.light_model_name
@@ -203,6 +214,7 @@ def get_model(data_args,
     # lstm_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['LSTMEncoder_lc'])
     lightspec_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiEncoder_lightspec'])
     transformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer_lightspec'])
+    transformer_args_jepa = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer_jepa'])
     projector_args = Container(**yaml.safe_load(open(args_dir, 'r'))['projector'])
     predictor_args = Container(**yaml.safe_load(open(args_dir, 'r'))['predictor'])
     moco_pred_args = Container(**yaml.safe_load(open(args_dir, 'r'))['reg_predictor'])
@@ -212,7 +224,7 @@ def get_model(data_args,
     tuner_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Tuner'])
 
     tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
-    light_model_args.in_channels = data_args.in_channels
+    # light_model_args.in_channels = data_args.in_channels_lc
     predictor_args.w_dim = len(data_args.meta_columns_lightspec)
     # lstm_args_lc.seq_len = int(data_args.max_len_lc)
     light_encoder1 = CNNEncoder(cnn_args_lc)
@@ -240,28 +252,43 @@ def get_model(data_args,
     light_model_state = light_model.state_dict()
     spec_model_state = spec_model.state_dict()
 
-    moco = PredictiveMoco(spec_model, light_model,
-                            transformer_args_lightspec,
-                            predictor_args.get_dict(),
-                            loss_args,
-                            **moco_args.get_dict()).to(local_rank)
+    # moco = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
+    #                         transformer_args_lightspec,
+    #                         predictor_args.get_dict(),
+    #                         loss_args,
+    #                         **moco_args.get_dict()).to(local_rank)
 
-    model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
+    # model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
+
+    lc_reg_args = predictor_args.get_dict().copy()
+    lc_reg_args['in_dim'] = light_model.simsiam.encoder.output_dim
+    lc_reg_args['out_dim'] = len(data_args.prediction_labels_lc) * len(optim_args.quantiles)
+    lc_reg_args['w_dim'] = 0
+    spectra_reg_args = predictor_args.get_dict().copy()
+    spectra_reg_args['in_dim'] = spec_model.encoder.output_dim
+    spectra_reg_args['out_dim'] = len(data_args.prediction_labels_spec) * len(optim_args.quantiles)
+    spectra_reg_args['w_dim'] = 0
+
+
+    model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
+     lc_reg_args, spectra_reg_args, loss_args).to(local_rank)
 
     if data_args.load_checkpoint:
         datetime_dir = os.path.basename(os.path.dirname(data_args.checkpoint_path))
         exp_num = os.path.basename(data_args.checkpoint_path).split('.')[0].split('_')[-1]
         print(datetime_dir)
         print("loading checkpoint from: ", data_args.checkpoint_path)
-        moco = load_checkpoints_ddp(moco, data_args.checkpoint_path)
+        moco = load_checkpoints_ddp(model, data_args.checkpoint_path)
         print("loaded checkpoint from: ", data_args.checkpoint_path)
+        
 
     if data_args.approach=='finetune':
         model = MocoTuner(model.moco_model, tuner_args.get_dict(), freeze_moco=freeze).to(local_rank)
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-
-    light_model.load_state_dict(light_model_state)
-    spec_model.load_state_dict(spec_model_state)
+    
+    if load_individuals:
+        light_model.load_state_dict(light_model_state)
+        spec_model.load_state_dict(spec_model_state)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainble parameters: {num_params}")

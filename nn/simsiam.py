@@ -171,6 +171,7 @@ class SimSiam(nn.Module):
             self.backbone,
             self.projector
         )
+        self.encoder.output_dim = backbone.output_dim // 4
         self.output_dim = backbone.output_dim // 4
         self.predictor = prediction_MLP(backbone.output_dim // 4, backbone.output_dim // 4, backbone.output_dim // 4)
     

@@ -30,6 +30,7 @@ class MultimodalMoCo(nn.Module):
         projection_dim=128,  # Final projection dimension
         hidden_dim=512,  # Hidden dimension of projection MLP
         num_layers=8,
+        shared_dim=128,
         K=65536,  # Queue size
         m=0.999,  # Momentum coefficient
         T=0.07,  # Temperature
@@ -45,6 +46,7 @@ class MultimodalMoCo(nn.Module):
         self.K = K
         self.m = m
         self.T = T
+        self.shared_dim = shared_dim
         self.bidirectional = bidirectional
         self.criterion = nn.CrossEntropyLoss()
         self.calc_loss = calc_loss
@@ -64,21 +66,20 @@ class MultimodalMoCo(nn.Module):
         #     spectra_out_dim = spectra_encoder.output_dim
         #     lightcurve_out_dim = lightcurve_encoder.output_dim
        
-        self.spectra_proj_q = nn.Linear(spectra_encoder.output_dim, projection_dim)
-        self.lightcurve_proj_q = nn.Linear(lightcurve_encoder.output_dim, projection_dim)
+        # self.spectra_proj_q = nn.Linear(spectra_encoder.output_dim, projection_dim)
+        # self.lightcurve_proj_q = nn.Linear(lightcurve_encoder.output_dim // 2, projection_dim)
         
         self.shared_encoder_q = Transformer(projection_args)
         
         self.shared_encoder_k = copy.deepcopy(self.shared_encoder_q)
         
-        self.spectra_proj_k = copy.deepcopy(self.spectra_proj_q)
-        self.lightcurve_proj_k = copy.deepcopy(self.lightcurve_proj_q)
+        # self.spectra_proj_k = copy.deepcopy(self.spectra_proj_q)
+        # self.lightcurve_proj_k = copy.deepcopy(self.lightcurve_proj_q)
         
-    
         self._freeze_encoder(self.shared_encoder_k)
         
-        self._freeze_encoder(self.spectra_proj_k)
-        self._freeze_encoder(self.lightcurve_proj_k)
+        # self._freeze_encoder(self.spectra_proj_k)
+        # self._freeze_encoder(self.lightcurve_proj_k)
 
         self.register_buffer("lightcurve_queue", torch.randn(projection_dim, K))
         self.lightcurve_queue = F.normalize(self.lightcurve_queue, dim=0)
@@ -281,9 +282,11 @@ class PredictiveMoco(MultimodalMoCo):
         )
         
         self.vicreg_predictor = Predictor(**predictor_args)
+        # self.vicreg_predictor = Transformer(projection_args)
         predictor_args['w_dim'] = 0
         # self.moco_predictor = Predictor(**predictor_args)
         self.loss_args = loss_args
+        self.pool = nn.AdaptiveAvgPool1d(self.shared_dim)
     
     def off_diagonal(self, x):
         n, m = x.shape
@@ -319,106 +322,103 @@ class PredictiveMoco(MultimodalMoCo):
         loss = loss.nan_to_num(0)
         return loss
     
-    def forward(self, lightcurves, spectra, lightcurves2=None, spectra2=None, w=None, pred_coeff=1):
-
-        spectra_feat = self.spectra_encoder_q(spectra, spectra2)
-        if isinstance(spectra_feat, tuple):
-            spectra_feat = spectra_feat[-1]
-        lightcurve_feat = self.lightcurve_encoder_q(lightcurves, lightcurves2)['z']
-        # if isinstance(lightcurve_feat, tuple):
-        #     lightcurve_feat = lightcurve_feat[0]
-        
-        if self.combined_encoder is not None:
-            spectra = torch.nn.functional.pad(spectra, (0, lightcurves.shape[-1] - spectra.shape[-1], 0,0))
-            combined_input = torch.cat((lightcurves, spectra.unsqueeze(1)),dim=1)
-            combined_embed = self.combined_encoder(combined_input)
-            spectra_feat = torch.cat((spectra_feat, combined_embed),dim=-1)
-            lightcurve_feat = torch.cat((lightcurve_feat, combined_embed), dim=-1)
-        q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
-        q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
-
-        # q_s = self.spectra_proj_q(spectra_feat)
-        # q_l = self.lightcurve_proj_q(lightcurve_feat)
-
-        q_s = q_s.nan_to_num(0)
-        q_l = q_l.nan_to_num(0)
-        if not self.calc_loss:
-            return {
-                    'q': torch.cat((q_l, q_s),dim=-1)
-                    }
-            # print("stopping here")
-            # return {
-            #     'q_s': q_s,
-            #     'q': lightcurve_feat
-            # }
-
-
-
-        q_s_vicreg = self.vicreg_predictor(q_s, w=w)
-        q_l_vicreg = self.vicreg_predictor(q_l, w=w)
-        
-
-        with torch.no_grad():
-            k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
-            k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
-
-            # k_s = self.spectra_proj_k(spectra_feat)
-            # k_l = self.lightcurve_proj_k(lightcurve_feat)
-        
-        loss_s_pred = self.vicreg_loss(q_s_vicreg, q_l_vicreg)
-
-        loss_s, logits_s, labels = self.contrastive_loss(
-            q_s, k_l, self.lightcurve_queue
-        )
-        cont_loss = loss_s
-
-        loss_s = pred_coeff * loss_s_pred + (1 - pred_coeff) * loss_s
-
-
-        self.lightcurve_queue, self.lightcurve_queue_ptr = self._dequeue_and_enqueue(
-            k_l, self.lightcurve_queue, self.lightcurve_queue_ptr
-        )
-
-        if self.bidirectional:
-            loss_l_pred = self.vicreg_loss(q_l_vicreg, q_s_vicreg)
-            loss_l, logits_l, labels_l = self.contrastive_loss(
-                q_l, k_s, self.spectra_queue
-            )
-
-            cont_loss = (cont_loss + loss_l) / 2
-
-            loss_l = pred_coeff * loss_l_pred + (1 - pred_coeff) * loss_l
-            
-            self.spectra_queue, self.spectra_queue_ptr = self._dequeue_and_enqueue(
-                k_s, self.spectra_queue, self.spectra_queue_ptr
-            )
-            
-            loss = (loss_s + loss_l) / 2
-            loss_pred = (loss_s_pred + loss_l_pred) / 2
-            logits = torch.cat((logits_l, logits_s), dim=-1)
-            q = torch.cat((q_l, q_s), dim=-1)
-            k = torch.cat((k_l, k_s), dim=-1)
-        else:
-            loss = loss_s
-            loss_l = None
-            logits = logits_s
-            loss_pred = loss_s_pred
-            q = q_l
-            k = k_s
-        loss = loss.nan_to_num(0)
-        return {
-            'loss': loss,
-            'logits': logits,
-            'loss_pred': loss_pred,
-            'loss_contrastive': cont_loss,
-            'loss_s': loss_s,
-            'loss_l': loss_l,
-            'loss_l_pred': loss_l_pred,
-            'loss_s_pred': loss_s_pred,
-            'labels': labels,
-            'q': q,
-            'k': k
-        }
+    def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
+ 
+         spectra_feat = self.spectra_encoder_q(spectra)
+         if isinstance(spectra_feat, tuple):
+             spectra_feat = spectra_feat[0]
+         lightcurve_feat = self.lightcurve_encoder_q(lightcurves)
+         if isinstance(lightcurve_feat, tuple):
+             lightcurve_feat = lightcurve_feat[0]
+ 
+         if self.combined_encoder is not None:
+             spectra = torch.nn.functional.pad(spectra, (0, lightcurves.shape[-1] - spectra.shape[-1], 0,0))
+             combined_input = torch.cat((lightcurves, spectra.unsqueeze(1)),dim=1)
+             combined_embed = self.combined_encoder(combined_input)
+             spectra_feat = torch.cat((spectra_feat, combined_embed),dim=-1)
+             lightcurve_feat = torch.cat((lightcurve_feat, combined_embed), dim=-1)
+ 
+         q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
+         q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
+ 
+        #  q_s = self.spectra_proj_q(spectra_feat)
+        #  q_l = self.lightcurve_proj_q(lightcurve_feat)
+ 
+         q_s = q_s.nan_to_num(0)
+         q_l = q_l.nan_to_num(0)
+         if not self.calc_loss:
+             return {
+                     'q': torch.cat((q_l, q_s),dim=-1)
+                     }
+ 
+         q_s_vicreg = self.vicreg_predictor(q_s, w=w)
+         q_l_vicreg = self.vicreg_predictor(q_l, w=w)
+        #  q_s_moco = self.moco_predictor(q_s)
+        #  q_l_moco = self.moco_predictor(q_l)
+ 
+         with torch.no_grad():
+             k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
+             k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
+ 
+            #  k_s = self.spectra_proj_k(spectra_feat)
+            #  k_l = self.lightcurve_proj_k(lightcurve_feat)
+ 
+         loss_s_pred = self.vicreg_loss(q_s_vicreg, q_l_vicreg)
+ 
+         loss_s, logits_s, labels = self.contrastive_loss(
+             q_s, k_l, self.lightcurve_queue
+         )
+        #  print("loss_s", loss_s, "loss_s_pred", loss_s_pred)
+         cont_loss = loss_s
+ 
+         loss_s = pred_coeff * loss_s_pred + (1 - pred_coeff) * loss_s
+ 
+ 
+         self.lightcurve_queue, self.lightcurve_queue_ptr = self._dequeue_and_enqueue(
+             k_l, self.lightcurve_queue, self.lightcurve_queue_ptr
+         )
+ 
+         if self.bidirectional:
+             loss_l_pred = self.vicreg_loss(q_l_vicreg, q_s_vicreg)
+             loss_l, logits_l, labels_l = self.contrastive_loss(
+                 q_l, k_s, self.spectra_queue
+             )
+            #  print("loss_l", loss_l, "loss_l_pred", loss_l_pred)
+ 
+             cont_loss = (cont_loss + loss_l) / 2
+ 
+             loss_l = pred_coeff * loss_l_pred + (1 - pred_coeff) * loss_l
+ 
+             self.spectra_queue, self.spectra_queue_ptr = self._dequeue_and_enqueue(
+                 k_s, self.spectra_queue, self.spectra_queue_ptr
+             )
+ 
+             loss = (loss_s + loss_l) / 2
+             loss_pred = (loss_s_pred + loss_l_pred) / 2
+             logits = torch.cat((logits_l, logits_s), dim=-1)
+             q = torch.cat((q_l, q_s), dim=-1)
+             k = torch.cat((k_l, k_s), dim=-1)
+         else:
+             loss = loss_s
+             loss_l = None
+             logits = logits_s
+             loss_pred = loss_s_pred
+             q = q_l
+             k = k_s
+         loss = loss.nan_to_num(0)
+         return {
+             'loss': loss,
+             'logits': logits,
+             'loss_pred': loss_pred,
+             'loss_contrastive': cont_loss,
+             'loss_s': loss_s,
+             'loss_l': loss_l,
+             'loss_l_pred': loss_l_pred,
+             'loss_s_pred': loss_s_pred,
+             'labels': labels,
+             'q': q,
+             'k': k
+         }
 
 
 class MultiTaskMoCo(nn.Module):
@@ -433,12 +433,12 @@ class MultiTaskMoCo(nn.Module):
         super(MultiTaskMoCo, self).__init__()
         self.moco_model = moco_model
         self.predictor = Predictor(**predictor_args)
-    def forward(self, lightcurves, spectra, lightcurves2=None, spectra2=None, w=None, pred_coeff=1):
+    def forward(self, lightcurves, spectra, w=None, pred_coeff=1):
         moco_out = self.moco_model(lightcurves, spectra,
-                                     lightcurves2=lightcurves2, spectra2=spectra2,
                                       w=w, pred_coeff=pred_coeff)
-        q = moco_out['q']
-        preds = self.predictor(q)
+        features = moco_out['q']
+        # features = torch.cat([moco_out['lightcurve_feat'], moco_out['spectra_feat']], dim=-1)
+        preds = self.predictor(features)
         moco_out['preds'] = preds
         return moco_out
        

@@ -340,6 +340,7 @@ class CNNRegressor(nn.Module):
 
 class MultiTaskRegressor(nn.Module):
     def __init__(self, args, conformer_args):
+        
         super().__init__()
         self.encoder = MultiEncoder(args, conformer_args)
         self.decoder = CNNDecoder(args)
@@ -440,7 +441,7 @@ class DoubleInputRegressor(nn.Module):
         self.dims1 = self.encoder1.in_channels
         self.stacked_input = args.stacked_input
         self.output_dim = encoder1.output_dim + encoder2.output_dim
-        print("output_dim: ", self.output_dim, "encoder1: ", encoder1.output_dim, "encoder2: ", encoder2.output_dim)
+        # print("output_dim: ", self.output_dim, "encoder1: ", encoder1.output_dim, "encoder2: ", encoder2.output_dim)
         if not args.encoder_only:
             self.regressor = nn.Sequential(
                 nn.Linear(self.output_dim, self.output_dim//2),
@@ -461,7 +462,7 @@ class DoubleInputRegressor(nn.Module):
         x2 = self.encoder2(x2)
         if isinstance(x2, tuple):
             x2 = x2[0]
-        x = torch.cat([x1, x2], dim=1)
+        x = torch.cat([x1.nan_to_num(0), x2.nan_to_num(0)], dim=1)
         out = self.regressor(x)
         return out, x
 

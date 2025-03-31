@@ -78,7 +78,7 @@ def create_boundary_values_dict(df):
         boundary_values_dict[f'max {c}'] = float(max_val)
   return boundary_values_dict
 
-class DualDataset(Dataset):
+class SimulationDataset(Dataset):
     def __init__(self,
                  df,
                 labels=['Period', 'Inclination'],
@@ -113,7 +113,43 @@ class DualDataset(Dataset):
         self.meta_columns = meta_columns
         self.boundary_values_dict = create_boundary_values_dict(self.df)
 
+    def fill_nan_inf_np(self, x: np.ndarray, interpolate: bool = True):
+        """
+        Fill NaN and Inf values in a numpy array
+
+        Args:
+            x (np.ndarray): array to fill
+            interpolate (bool): whether to interpolate or not
+
+        Returns:
+            np.ndarray: filled array
+        """
+        # Create a copy to avoid modifying the original array
+        x_filled = x.copy()
         
+        # Identify indices of finite and non-finite values
+        finite_mask = np.isfinite(x_filled)
+        non_finite_indices = np.where(~finite_mask)[0]
+
+        finite_indices = np.where(finite_mask)[0]
+        
+        # If there are non-finite values and some finite values
+        if len(non_finite_indices) > 0 and len(finite_indices) > 0:
+            if interpolate:
+                # Interpolate non-finite values using linear interpolation
+                interpolated_values = np.interp(
+                    non_finite_indices, 
+                    finite_indices, 
+                    x_filled[finite_mask]
+                )
+                # Replace non-finite values with interpolated values
+                x_filled[non_finite_indices] = interpolated_values
+            else:
+                # Replace non-finite values with zero
+                x_filled[non_finite_indices] = 0
+        
+        return x_filled
+
     def update_range_dict(self):
         for name in self.labels:
             min_val = self.df[name].min()
@@ -145,28 +181,35 @@ class DualDataset(Dataset):
             if self.use_fft:
                 fft = torch.tensor(info_lc['fft']).nan_to_num(0)
                 flux = torch.cat((flux, fft), dim=0)
-        if flux.shape[-1] < self.lc_seq_len:
-            flux = F.pad(flux, ((0, self.lc_seq_len - flux.shape[-1],0,0)), "constant", value=0)
+        if flux.shape[-1] == 1:
+            flux = flux.squeeze(-1)
+        if len(flux.shape) == 1:
+            flux = flux.unsqueeze(0)
+        flux = pad_with_last_element(flux, self.lc_seq_len)
         return flux, info_lc
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         padded_idx = f'{idx:d}'.zfill(int(np.log10(self.Nlc))+1)
+        s = time.time()
         try:
             spec = pd.read_parquet(row['spec_data_path']).values
+            # spec = self.fill_nan_np(spec)
         except (FileNotFoundError, OSError, IndexError) as e:   
             # print("Error reading file ", idx, e)
             spec = np.zeros((3909, 1))
         try: 
             # print(idx, row['lc_data_path'])
             lc = pd.read_parquet(row['lc_data_path']).values
-            max_val = np.max(np.abs(lc[:, 1]))
-            if max_val > 1e2:
-                lc[np.abs(lc[:, 1]) > 1e2, 1] = np.random.uniform(0, 2, size=lc[np.abs(lc[:, 1]) > 1e2, 1].shape)
+            # lc[:, 1] = self.fill_nan_inf_np(lc[:, 1])
+            # max_val = np.max(np.abs(lc[:, 1]))
+            # if max_val > 1e2:
+            #     lc[np.abs(lc[:, 1]) > 1e2, 1] = np.random.uniform(0, 2, size=lc[np.abs(lc[:, 1]) > 1e2, 1].shape)
+            
+            # lc[:, 1] = lc[:, 1] / lc[:, 1].max()
         except (FileNotFoundError, OSError, IndexError) as e:
             print("Error reading file ", idx, e)
             lc = np.zeros((48000, 2))
-        
         spectra = spec[:,-1]
         target_spectra = spectra.copy()
         flux = lc[:,-1]
@@ -181,14 +224,15 @@ class DualDataset(Dataset):
 
         except IndexError:
             y = torch.zeros(len(self.labels))
-    
+        s1 = time.time()
         info_s['wavelength'] = self.example_wv
         if self.spectra_transforms:
             spectra, _,info_s = self.spectra_transforms(spectra, info=info_s)
-        if spectra.shape[-1] < self.spec_seq_len:
-            spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
+        spectra = pad_with_last_element(spectra, self.spec_seq_len)
         spectra = torch.nan_to_num(spectra, nan=0)
-
+        s2 = time.time()
+        # print("nans in spectra: ", np.sum(np.isnan(spectra)))
+        # spectra = torch.tensor(spectra).float()
         flux, info_lc = self.transform_lc_flux(flux, info_lc)
         target_flux, _ = self.transform_lc_flux(target_flux, info_lc)
         info = {'spectra': info_s, 'lc': info_lc}
@@ -196,10 +240,12 @@ class DualDataset(Dataset):
             info['KMAG'] = row['L']
         else:
             info['KMAG'] = 1
-        
+        s3 = time.time()
         flux = flux.nan_to_num(0).float()
         spectra = spectra.nan_to_num(0).float()
         target_flux = target_flux.nan_to_num(0).float()
+        # print(flux.shape, target_flux.shape, spectra.shape, y.shape)
+        # print(s1-s, s2-s1, s3-s2)
         return flux, spectra, y , target_flux,  spectra, info
 
 class SpectraDataset(Dataset):
@@ -583,22 +629,6 @@ class KeplerDataset():
         mask = None
         x, mask, info= self.transform_data(x, self.transforms, info, idx) 
         target, mask_y, info_y = self.transform_data(target, self.target_transforms, info_y, idx)       
-       # # if self.transforms is not None:
-       #  else:
-       #      x = torch.tensor(x)
-       #  if self.target_transforms is not None:
-       #  else:
-       #      target = x.clone()
-       #      mask_y = mask
-       #      if self.mask_transform is not None:
-       #          to_mask = x if not self.use_acf else x[0]
-       #          x, mask, info = self.mask_transform(to_mask, mask=None, info=info)
-       #          if self.use_acf:
-       #              acf = torch.tensor(info['acf']).nan_to_num(0)
-       #              x = torch.cat((x.unsqueeze(0), acf), dim=0)
-       #          if self.use_fft:
-       #              fft = torch.tensor(info['fft']).nan_to_num(0)
-       #              x = torch.cat((x, fft), dim=0)
         x = x.nan_to_num(0)
         target = target.nan_to_num(0)
         info['Teff'] = info['TEFF']
@@ -623,14 +653,14 @@ class KeplerDataset():
         # Ensure info and info_y are always dictionaries
         info = info if isinstance(info, dict) else {}
         info_y = info_y if isinstance(info_y, dict) else {}
-        result = (x.float(), target.float(), y, mask, info, info_y)
+        result = (x.float(), mask, y, target.float(), mask, info)
         if any(item is None for item in result):
             print(f"Warning: None value in result for index {idx}")
             print(f"x: {x.shape if x is not None else None}")
             print(f"target: {target.shape if target is not None else None}")
             print(f"mask: {mask.shape if mask is not None else None}")
             print(f"mask_y: {mask_y.shape if mask_y is not None else None}")
-            print(f"info: {info}")
+            print(f"mask copy: {mask.shape if mask is not None else None}")
             print(f"info_y: {info_y}")
         return result
 
@@ -684,7 +714,7 @@ class LightSpecDataset(KeplerDataset):
 
     def __getitem__(self, idx):
         start = time.time()
-        light, light_target, _, _, info, _ = super().__getitem__(idx)
+        light, _, _, light_target, _ ,info = super().__getitem__(idx)
         light_time = time.time() - start
         kid = int(info['KID'])
         obsid = int(self.df.iloc[idx]['ObsID'])

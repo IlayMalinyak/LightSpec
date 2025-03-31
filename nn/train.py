@@ -149,6 +149,10 @@ class Trainer(object):
         self.train_aux_loss_2 = []
         self.val_aux_loss_1 = []
         self.val_aux_loss_2 = []
+        self.train_logits_mean = []
+        self.train_logits_std = []
+        self.val_logits_mean = []
+        self.val_logits_std = []
         # self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
         main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
@@ -202,7 +206,9 @@ class Trainer(object):
                 res = {"epochs": epochs, "train_loss": train_loss, "val_loss": val_loss,
                         "train_acc": train_acc, "val_acc": val_acc, "train_aux_loss_1": self.train_aux_loss_1,
                         "train_aux_loss_2":self.train_aux_loss_2, "val_aux_loss_1":self.val_aux_loss_1,
-                        "val_aux_loss_2": self.val_aux_loss_2, "lrs": lrs}
+                        "val_aux_loss_2": self.val_aux_loss_2, "train_logits_mean": self.train_logits_mean,
+                         "train_logits_std": self.train_logits_std, "val_logits_mean": self.val_logits_mean,
+                          "val_logits_std": self.val_logits_std, "lrs": lrs}
 
                 current_lr = self.optimizer.param_groups[0]['lr'] if self.scheduler is None \
                             else self.scheduler.get_last_lr()[0]
@@ -233,7 +239,9 @@ class Trainer(object):
                  "val_loss": val_loss, "train_acc": train_acc,
                 "val_acc": val_acc, "train_aux_loss_1": self.train_aux_loss_1,
                 "train_aux_loss_2": self.train_aux_loss_2, "val_aux_loss_1":self.val_aux_loss_1,
-                "val_aux_loss_2": self.val_aux_loss_2, "lrs": lrs}
+                "val_aux_loss_2": self.val_aux_loss_2, "train_logits_mean": self.train_logits_mean,
+                 "train_logits_std": self.train_logits_std, "val_logits_mean": self.val_logits_mean,
+                  "val_logits_std": self.val_logits_std, "lrs": lrs}
 
     def process_loss(self, acc, loss_mean):
         if  torch.cuda.is_available() and torch.distributed.is_initialized():
@@ -717,8 +725,87 @@ class MaskedSSLTrainer(Trainer):
         return s / inverse_token_mask.sum()
 
 
+class JEPATrainer(Trainer):
+    def __init__(self, use_w=True, lc_reg_idx=-1, alpha=0.5, **kwargs):
+        super().__init__(**kwargs)
+        self.use_w = use_w
+        self.lc_reg_idx = lc_reg_idx
+        self.alpha = alpha
+        self.lc_losses = []
+        self.spec_losses = []
+        self.jepa_losses = []
+        
+    def train_batch(self,batch, batch_idx, device):
+        lc, spectra, y, lc_target, spectra_target, info = batch 
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        out = self.model(lc ,spectra, w=w)
+        y_lc = y[:, self.lc_reg_idx:]
+        y_spec = y[:, :self.lc_reg_idx]
+        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles)
+        pred_spec = out['spectra_pred'].view(lc.shape[0], -1, self.num_quantiles)
+        lc_loss = self.criterion(pred_lc, y_lc)
+        lc_loss = lc_loss.nan_to_num(0).mean()
+        spec_loss = self.criterion(pred_spec, y_spec)
+        spec_loss = spec_loss.nan_to_num(0).mean()
+        reg_loss = lc_loss + spec_loss
+        self.lc_losses.append(lc_loss)
+        self.spec_losses.append(spec_loss)
+        
+        jepa_loss = out['loss']
+        self.jepa_losses.append(jepa_loss)
+        loss = reg_loss * self.alpha + jepa_loss * (1 - self.alpha)
+        loss.backward()
+        self.optimizer.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+        
+        if batch_idx % 200 == 0:
+            print('separate losses - ', lc_loss.item(), spec_loss.item(), jepa_loss.item())
+        self.train_aux_loss_1.append(loss.item())
+        self.train_aux_loss_2.append(reg_loss.item())
+
+        lc_pred_med = pred_lc[: ,:, self.num_quantiles // 2]
+        spec_pred_med = pred_spec[: ,:, self.num_quantiles // 2]
+        pred_med = torch.cat([spec_pred_med, lc_pred_med], dim=-1)
+        acc = (torch.abs(pred_med - y) < y * 0.1).sum(0)
+
+        return loss, acc, y
+    
+    def eval_batch(self,batch, batch_idx, device):
+        lc, spectra, y, lc_target, spectra_target, info = batch 
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        with torch.no_grad():
+            out = self.model(lc ,spectra, w=w)
+        y_lc = y[:, self.lc_reg_idx:]
+        y_spec = y[:, :self.lc_reg_idx]
+        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles)
+        pred_spec = out['spectra_pred'].view(lc.shape[0], -1, self.num_quantiles)
+        lc_loss = self.criterion(pred_lc, y_lc)
+        lc_loss = lc_loss.nan_to_num(0).mean()
+        spec_loss = self.criterion(pred_spec, y_spec)
+        spec_loss = spec_loss.nan_to_num(0).mean()
+        reg_loss = lc_loss + spec_loss
+        jepa_loss = out['loss']
+        loss = reg_loss * self.alpha + jepa_loss * (1 - self.alpha)
+
+        self.val_aux_loss_1.append(loss.item())
+        self.val_aux_loss_2.append(reg_loss.item())
+
+        lc_pred_med = pred_lc[: ,:, self.num_quantiles // 2]
+        spec_pred_med = pred_spec[: ,:, self.num_quantiles // 2]
+        pred_med = torch.cat([spec_pred_med, lc_pred_med], dim=-1)
+        acc = (torch.abs(pred_med - y) < y * 0.1).sum(0)
+
+        return loss, acc, y
+
 class ContrastiveTrainer(Trainer):
-    def __init__(self, temperature=1, full_input=False, stack_pairs=True,
+    def __init__(self, temperature=1, full_input=False, stack_pairs=True, only_lc=True,
                  use_w=False, use_pred_coeff=False, pred_coeff_val=None, ssl_weight=0.5,
                  weight_decay=False,   **kwargs):
         super().__init__(**kwargs)
@@ -730,37 +817,46 @@ class ContrastiveTrainer(Trainer):
         self.ssl_weight = ssl_weight
         self.weight_decay = weight_decay
         self.full_input = full_input
+        self.only_lc = only_lc
         
         
     def train_batch(self, batch, batch_idx, device):
         self.optimizer.zero_grad()  # Add this if not done elsewhere
         
-        x1, x2, y, x1_target, x2_target, info = batch 
-        x1, x2, y, x1_target, x2_target = x1.to(device), x2.to(device), y.to(device), x1_target.to(device), x2_target.to(device)
+        lc, spectra, y, lc_target, spectra_target, info = batch 
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
         # Forward pass
         if self.stack_pairs:
-            x = torch.cat((x1, x2), dim=0)
+            x = torch.cat((lc, lc_target), dim=0)
             out = self.model(x, temperature=self.temperature)
+        elif self.only_lc:
+            out = self.model(lc, lc_target) 
         elif self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
             pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
             if self.full_input:
-                out = self.model(lightcurves=x1, spectra=x2,
-                                 lightcurves2=x1_target, spectra2=x2_target,
+                out = self.model(lightcurves=lc, spectra=spectra,
+                                 lightcurves2=lc_target, spectra2=spectra_target,
                                   w=w, pred_coeff=pred_coeff)
             else:
-                out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
+                out = self.model(lc, spectra, w=w, pred_coeff=pred_coeff)
         else:
-            out = self.model(x1, x2)    
+            out = self.model(lc, spectra)
 
         loss = out['loss']
        
         acc = 0
         if self.criterion is not None:
             preds = out['preds']
-            preds = preds.view(x1.shape[0], -1, self.num_quantiles)
+            preds = preds.view(lc.shape[0], -1, self.num_quantiles)
             reg_loss = self.criterion(preds, y)
-            # print("shapes ", preds.shape, y.shape, reg_loss.shape, "nans in y: ", y.isnan().sum(), "nans in loss: ", reg_loss.isnan().sum())
+
+            # print("shapes ", preds.shape, y.shape,
+            #  reg_loss.shape, "nans in y: ",
+            #  "nans in preds: ", preds.isnan().sum(),
+            #   y.isnan().sum(), "nans in loss: ",
+            #    reg_loss.isnan().sum())
+
             reg_loss = reg_loss.nan_to_num(0).mean()
             self.train_aux_loss_1.append(loss.item())
             self.train_aux_loss_2.append(reg_loss.item())
@@ -774,6 +870,15 @@ class ContrastiveTrainer(Trainer):
                 self.train_aux_loss_1.append(out['loss_pred'].item())
             if 'loss_contrastive' in out.keys():
                 self.train_aux_loss_2.append(out['loss_contrastive'].item())
+        if ('z' in out.keys()) or ('q' in out.keys()):
+            logits_key = 'z' if 'z' in out.keys() else 'q'
+            logits = out[logits_key]
+            norm = torch.norm(logits, dim=1, keepdim=True)
+            norm_logits = logits / norm
+            logits_mean = norm_logits.mean(-1)
+            logits_std = norm_logits.std(-1)
+            self.train_logits_mean.extend(logits_mean.cpu().tolist())
+            self.train_logits_std.extend(logits_std.cpu().tolist())
         
 
         # Backward pass with gradient scaling
@@ -801,34 +906,34 @@ class ContrastiveTrainer(Trainer):
         return loss, acc, y
 
     def eval_batch(self,batch, batch_idx, device):
-        x1, x2, y, x1_target, x2_target, info = batch 
-        x1, x2, y, x1_target, x2_target = x1.to(device), x2.to(device), y.to(device), x1_target.to(device), x2_target.to(device)
+        lc, spectra, y, lc_target, spectra_target, info = batch 
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
         with torch.no_grad():
             if self.stack_pairs:
-                x = torch.cat((x1, x2), dim=0)
+                x = torch.cat((lc, lc_target), dim=0)
                 out = self.model(x, temperature=self.temperature)
-            if self.use_w:
+            elif self.only_lc:
+                out = self.model(lc, lc_target) 
+            elif self.use_w:
                 w = torch.stack([i['w'] for i in info]).to(device)
                 pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
                 if self.full_input:
-                    out = self.model(lightcurves=x1, spectra=x2,
-                                 lightcurves2=x1_target, spectra2=x2_target,
+                    out = self.model(lightcurves=lc, spectra=spectra,
+                                 lightcurves2=lc_target, spectra2=spectra_target,
                                   w=w, pred_coeff=pred_coeff)
                 else:
-                    out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
+                    out = self.model(lc, spectra, w=w, pred_coeff=pred_coeff)
             else:
-                out = self.model(x1, x2)
+                out = self.model(lc, spectra)   
         loss = out['loss']
         acc = 0
         if self.criterion is not None:
             preds = out['preds']
-            preds = preds.view(x1.shape[0], -1, self.num_quantiles)
+            preds = preds.view(lc.shape[0], -1, self.num_quantiles)
             reg_loss = self.criterion(preds, y)
             reg_loss = reg_loss.nan_to_num(0).mean()
             self.val_aux_loss_1.append(loss.item())
             self.val_aux_loss_2.append(reg_loss.item())
-            # if self.weight_decay:
-            #    cur_weight = self.ssl_weight - 0.025 * self.epoch
             loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
             preds_med = preds[: ,:, self.num_quantiles // 2]
             acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
@@ -837,6 +942,13 @@ class ContrastiveTrainer(Trainer):
                 self.val_aux_loss_1.append(out['loss_pred'].item())
             if 'loss_contrastive' in out.keys():
                 self.val_aux_loss_2.append(out['loss_contrastive'].item())
+        if ('z' in out.keys()) or ('q' in out.keys()):
+            logits_key = 'z' if 'z' in out.keys() else 'q'
+            logits = out[logits_key]
+            logits_mean = logits.mean(-1)
+            logits_std = logits.std(-1)
+            self.val_logits_mean.extend(logits_mean.cpu().tolist())
+            self.val_logits_std.extend(logits_std.cpu().tolist())
         return loss, acc, y
     
     def predict(self, test_dataloader, device, load_best=False):
@@ -851,9 +963,9 @@ class ContrastiveTrainer(Trainer):
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
-        for i,(x1, x2, y, _, info, _) in enumerate(pbar):
-            x1, x2, y = x1.to(device), x2.to(device), y.to(device)
-            b = x1.shape[0]
+        for i,(lc, spectra, y, lc_target, spectra_target, info) in enumerate(pbar):
+            lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+            b = lc.shape[0]
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
@@ -863,28 +975,38 @@ class ContrastiveTrainer(Trainer):
                         aggregated_info[key].append(value)
             with torch.no_grad():
                 if self.stack_pairs:
-                    x = torch.cat((x1, x2), dim=0)
+                    x = torch.cat((lc, lc_target), dim=0)
                     out = self.model(x, temperature=self.temperature)
-                if self.use_w:
+                elif self.only_lc:
+                    out = self.model(lc, lc_target) 
+                elif self.use_w:
                     w = torch.stack([i['w'] for i in info]).to(device)
-                    if self.use_pred_coeff:                    
-                        if self.pred_coeff_val != 'None':
-                            pred_coeff = float(self.pred_coeff_val)
-                        else:
-                            pred_coeff = max(1 - i / (3 * len(self.train_dl)), 0.5)
-                        out = self.model(x1, x2, w=w, pred_coeff=pred_coeff)
+                    pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - i / (3 * len(self.train_dl)), 0.5)
+                    if self.full_input:
+                        out = self.model(lightcurves=lc, spectra=spectra,
+                                    lightcurves2=lc_target, spectra2=spectra_target,
+                                    w=w, pred_coeff=pred_coeff)
                     else:
-                        out = self.model(x1, x2, w=w)
+                        out = self.model(lc, spectra, w=w, pred_coeff=pred_coeff)
                 else:
-                    out = self.model(x1, x2)
+                    out = self.model(lc, spectra)
+            acc = 0
+            loss = out['loss'] if 'loss' in out.keys() else 0
             if self.criterion is not None:
                 y_pred = out['preds']
-                y_pred = y_pred.view(x1.shape[0], -1, self.num_quantiles)
-                # print(y_pred.shape)
+                y_pred = y_pred.view(lc.shape[0], -1, self.num_quantiles)
                 preds = np.concatenate((preds, y_pred.cpu().numpy()))
+                reg_loss = self.criterion(y_pred, y)
+                reg_loss = reg_loss.nan_to_num(0).mean()
+                # self.val_aux_loss_1.append(loss.item())
+                # self.val_aux_loss_2.append(reg_loss.item())
+                loss = loss  * self.ssl_weight + reg_loss * (1 - self.ssl_weight)
+                preds_med = y_pred[: ,:, self.num_quantiles // 2]
+                acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
             targets = np.concatenate((targets, y.cpu().numpy()))
             if i > self.max_iter:
                 break
+            pbar.set_description(f"test_loss: {loss.item():.4f}, test_acc: {acc}")
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, aggregated_info
 
@@ -979,7 +1101,7 @@ class RegressorTrainer(Trainer):
         lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
         b = lc.shape[0]
         w = None
-        # print("lcs: ", lc.shape, lc2.shape, lc.isnan().sum(), lc2.isnan().sum())
+        print("lcs: ", lc.shape, lc2.shape, lc.isnan().sum(), lc2.isnan().sum())
         if self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
             out = self.model(lc, spectra, w_tune=w) 
@@ -1693,14 +1815,15 @@ class DoubleInputTrainer(Trainer):
 
 
 class DoubleInputTrainer2(Trainer):
-    def __init__(self, num_classes=2, eta=0.5, **kwargs):
+    def __init__(self, num_classes=2, num_quantiles=5, eta=0.5, **kwargs):
         super().__init__(**kwargs)
         self.num_classes = num_classes
+        self.num_quantiles = num_quantiles
         self.eta = eta
     
     def train_batch(self, batch, batch_idx, device):
         lc,spectra,y,_,info,_ = batch
-        x1, x2 = x[:,-1,:], x[:,:-1,:]
+        x1, x2 = lc[:,-1,:], lc[:,:-1,:]
         x1 = x1.to(device)
         x2 = x2.to(device)
         y = y.to(device)
@@ -1721,6 +1844,9 @@ class DoubleInputTrainer2(Trainer):
             #     loss += (self.eta * loss_conf_i) + ((1-self.eta) * loss_conf_p)
         else:
             y_pred = y_pred.squeeze()
+            if isinstance(y_pred, tuple):
+                y_pred = y_pred[0]
+            y_pred = y_pred.reshape(y_pred.shape[0], -1, self.num_quantiles)
             # print("nans: ", y_pred.isnan().sum(), y.isnan().sum())
             loss = self.criterion(y_pred, y)
             # if conf:

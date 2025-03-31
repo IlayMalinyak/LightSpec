@@ -38,7 +38,7 @@ from nn.simsiam import SimSiam, projection_MLP
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
 from nn.optim import CQR
-from nn.train import ContrastiveTrainer
+from nn.train import ContrastiveTrainer, JEPATrainer
 from tests.test_unique_sampler import run_sampler_tests
 from features import create_umap
 import generator
@@ -212,15 +212,25 @@ else:
 scaler = GradScaler()
 
 accumulation_step = 1
-trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+# trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+#                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+#                          scaler=scaler, grad_clip=True,
+#                        scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
+#                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+#                              exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+#                              accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
+#                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
+#                         exp_name=f"{exp_num}") 
+
+trainer = JEPATrainer(
+                        model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-                         scaler=scaler, grad_clip=True,
-                       scheduler=None, train_dataloader=train_dataloader, full_input=True,
+                        train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                             accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
-                           use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
-                        exp_name=f"lightspec_{exp_num}") 
+                             exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
+                             accumulation_step=accumulation_step, max_iter=np.inf, use_w=True,
+                        exp_name=f"{exp_num}"
+                        )
 
 complete_config.update(
     {"trainer": trainer.__dict__,
@@ -228,7 +238,7 @@ complete_config.update(
     "optimizer": str(optimizer)}
 )
    
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{exp_num}_complete_config.yaml"
 with open(config_save_path, "w") as config_file:
     json.dump(complete_config, config_file, indent=2, default=str)
 
@@ -236,52 +246,28 @@ print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=20, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_fit_res.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{exp_num}_fit_res.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/lightspec_fit_{exp_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{exp_num}.png")
 plt.clf()
 
+trainer.model.module.moco_model.calc_loss = False
 
-model.module.moco_model.calc_loss = False
-model.eval()
-
-preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
-
-preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
-
-print(info.keys())
-
-low_q = preds[:, :, 0] 
-high_q = preds[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage: ', coverage)
-
-cqr_errs = loss_fn.calibrate(preds_val, targets_val)
-print(targets.shape, preds.shape)
-preds_cqr = loss_fn.predict(preds, cqr_errs)
-
-low_q = preds_cqr[:, :, 0]
-high_q = preds_cqr[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage after calibration: ', coverage)
-df = save_predictions_to_dataframe(preds, targets, info, data_args.labels, optim_args.quantiles,
- id_name='KID', info_keys=['Prot_ref', 'kmag_abs', 'Dist', 'Mstar', 'Lstar'])
-print(df.columns)
-df.to_csv(f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}.csv") 
-df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, data_args.labels, optim_args.quantiles,
- id_name='KID', info_keys=['Prot_ref', 'kmag_abs', 'Dist', 'Mstar', 'Lstar'])
-df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_cqr.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/lightspec_{exp_num}_cqr.csv")
+predict_results(trainer, val_dataloader, test_dataloader, loss_fn,
+                 data_args.prediction_labels_lightspec,
+                 data_args, optim_args, 'lightspec', exp_num,
+                  datetime_dir, local_rank, world_size)
 
 
-umap_df = create_umap(model, test_dataloader, local_rank, use_w=True, dual=True, logits_key='q')
+umap_df = create_umap(model, test_dataloader, local_rank, use_w=True, full_input=False, logits_key='q')
 print("umap created: ", umap_df.shape)
 print(umap_df.head())
-umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
-print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
+umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}.csv", index=False)
+print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}.csv")
+
+# convert_to_onnx(model, )
 exit()
 
 

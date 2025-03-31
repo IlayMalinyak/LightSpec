@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: lightspec_ssl
+  exp_num: lightspec_jepa
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -25,7 +25,7 @@ Data:
   prediction_labels_lc: ['Prot']
   prediction_labels_spec: ['Teff', 'logg', 'FeH']
   prediction_labels_finetune: ['Prot']
-  prediction_labels_simulation: ['Period', 'age']
+  prediction_labels_simulation: ['Period']
   test_run: False
   create_umap: False
   load_checkpoint: False
@@ -34,16 +34,17 @@ Data:
   use_fft: True
   scale_flux: False
   combined_embed: False
-  in_channels: 3
-  ssl_weight: 0
+  dim_lc: 4
+  ssl_weight: 0.5
+  alpha: 0.9
   pred_coeff_val: None
-  approach: "ssl"
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-23/lightspec_freeze.pth'
+  approach: "multitask"
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-25/lightspec_.pth'
 
 DoubleInputRegressor_lc:
   encoder_only: True
   stacked_input: True
-  in_channels: 3
+  in_channels: 2
   load_checkpoint: True
   output_dim: 1
   num_quantiles: 5
@@ -252,6 +253,18 @@ Transformer_lightspec:
   checkpoint_num: 1
   load_checkpoint: False
 
+Transformer_jepa:
+  in_channels: 1
+  num_layers: 4
+  encoder_dim: 256
+  dropout_p: 0.2
+  num_heads: 8
+  dropout: 0.0
+  output_dim: 256
+  num_quantiles: 1
+  checkpoint_num: 1
+  load_checkpoint: False
+
 
 Conformer_lightspec:
   encoder: ["mhsa_pro", "conv", "ffn"]
@@ -310,8 +323,9 @@ MoCo:
   hidden_dim: 512
   projection_dim: 64
   num_layers: 6
-  freeze_lightcurve: True
-  freeze_spectra: True
+  shared_dim: 64
+  freeze_lightcurve: False
+  freeze_spectra: False
   freeze_combined: False
   bidirectional: True
 
@@ -331,7 +345,6 @@ reg_predictor:
   hidden_dim: 512
   out_dim: 20
   w_dim: 0
-
 
 loss:
   sim_coeff: 25

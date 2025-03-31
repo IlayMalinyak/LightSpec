@@ -101,6 +101,35 @@ def create_train_test_dfs(meta_columns):
     train_df, test_df = train_test_split(kepler_df, test_size=0.2, random_state=1234)
     return train_df, test_df
 
+def create_raw_samples(data_args, num_samples=10):
+    train_df, test_df = create_train_test_dfs(data_args.meta_columns_lc)
+    transforms = Compose([MovingAvg(13), ToTensor()])
+    ds = KeplerDataset(df=train_df,
+                        transforms=transforms,
+                        target_transforms=transforms,
+                        npy_path = '/data/lightPred/data/raw_npy',
+                        seq_len=int(data_args.max_len_lc),
+                        masked_transforms = False,
+                        use_acf=False,
+                        use_fft=False,
+                        scale_flux=False,
+                        labels=data_args.prediction_labels_lc,
+                        dims=data_args.dim_lc,
+                                )
+    for i in range(num_samples):
+        lc, _, y, _, _, info = ds[i]
+        lc = lc[0]
+        t = np.linspace(0, len(lc)/48, len(lc))
+        print(lc.shape)
+        plt.plot(t, lc)
+        plt.xlabel('Time (days)')
+        plt.ylabel('Flux')
+        plt.title('KID: ' + str(info['KID']))
+        plt.savefig(f'/data/lightSpec/images/raw_kepler_{i}.png')
+        plt.close()
+
+
+
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 torch.cuda.empty_cache()
 
@@ -114,9 +143,19 @@ local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/full_config.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
+os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
+create_raw_samples(data_args, num_samples=10)
 
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args, data_generation_fn=create_train_test_dfs, dataset_name='Kepler')
+
+nans = 0
+for i in range(100):
+    lc, target_lc, y, _,_, info = train_dataset[i]
+    if y.isnan().any():
+        nans += 1
+    print(lc.shape, target_lc.shape, y)
+print(nans)
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,
@@ -172,57 +211,30 @@ scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer,
 #         final_div_factor=100.0
 #     )
 
+
+trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+                        criterion=loss_fn, output_dim=1, scaler=scaler,
+                    scheduler=scheduler, train_dataloader=train_dataloader,
+                    val_dataloader=val_dataloader, device=local_rank, ssl_weight=0,
+                            weight_decay=True, num_quantiles=len(optim_args.quantiles), stack_pairs=False,
+                        exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                        accumulation_step=1, max_iter=np.inf,
+                        exp_name=f"test_prot_lc_{exp_num}") 
+
+
 # Save the complete configuration to a YAML file
-
-
-if data_args.masked_transform:
-    trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, ssl_criterion=ssl_loss_fn, output_dim=1, scaler=scaler,
-                       scheduler=scheduler, train_dataloader=train_dataloader,
-                       val_dataloader=val_dataloader, device=local_rank,
-                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                           accumulation_step=1, max_iter=np.inf,
-                        exp_name=f"{model_name}_lc_{exp_num}")  
-else:
-    trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                            criterion=loss_fn, output_dim=1, scaler=scaler,
-                        scheduler=scheduler, train_dataloader=train_dataloader,
-                        val_dataloader=val_dataloader, device=local_rank, ssl_weight=data_args.ssl_weight,
-                                weight_decay=True, num_quantiles=len(optim_args.quantiles), stack_pairs=False,
-                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                            accumulation_step=1, max_iter=np.inf,
-                            exp_name=f"test_prot_lc_{exp_num}") 
-
-
 complete_config.update(
     {"trainer": trainer.__dict__,
     "loss_fn": str(loss_fn),
     "optimizer": str(optimizer)}
 )
    
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/finetune_sim{exp_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/{exp_num}_complete_config.yaml"
 with open(config_save_path, "w") as config_file:
     json.dump(complete_config, config_file, indent=2, default=str)
 
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
-
-# complete_config = {
-#     "model_name": model_name,
-#     "data_args": data_args.__dict__,
-#     "model_args": model_args.__dict__,
-#     "astroconf_args": astroconf_args.__dict__,
-#     "cnn_args": cnn_args.__dict__,
-#     "optim_args": optim_args.__dict__,
-#     "num_params": num_params,
-#     "model_structure": str(model),  # Add the model structure to the configuration
-#     "transforms": str(transforms),
-#     'trainer': trainer.__dict__
-# }
-# config_save_path = f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_{exp_num}_complete_config.json"
-# with open(config_save_path, "w") as config_file:
-#      json.dump(complete_config, config_file, indent=2, default=str)
-# print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=40, best='loss', conf=True) 
@@ -233,34 +245,10 @@ fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
 plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_lc_{exp_num}.png")
 plt.clf()
 
-preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
-
-preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
-
-print(info.keys())
-
-low_q = preds[:, :, 0] 
-high_q = preds[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage: ', coverage)
-
-cqr_errs = loss_fn.calibrate(preds_val, targets_val)
-print(targets.shape, preds.shape)
-preds_cqr = loss_fn.predict(preds, cqr_errs)
-
-low_q = preds_cqr[:, :, 0]
-high_q = preds_cqr[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage after calibration: ', coverage)
-df = save_predictions_to_dataframe(preds, targets, info, data_args.labels, optim_args.quantiles,
- id_name='KID', info_keys=['Prot_ref'])
-print(df.columns)
-df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_decode2_{exp_num}.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_decode2_{exp_num}.csv") 
-df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, data_args.labels, optim_args.quantiles,
- id_name='KID', info_keys=['Prot_ref'])
-df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_decode2_{exp_num}_cqr.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_lc_decode2_{exp_num}_cqr.csv")
+predict_results(trainer, val_dataloader, test_dataloader, loss_fn,
+                 data_args.prediction_labels_lc,
+                 data_args, optim_args, 'light', exp_num,
+                  datetime_dir, local_rank, world_size)
 
 umap_df = create_umap(model.module.simsiam.encoder, test_dataloader, local_rank, use_w=False, dual=False)
 print("umap created: ", umap_df.shape)

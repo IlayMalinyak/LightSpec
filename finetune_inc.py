@@ -174,7 +174,7 @@ for i in range(10):
 
 _, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
-test_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Test_Tuner'])
+# test_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Test_Tuner'])
 
 light_model = light_model.to(local_rank)
 model = DDP(light_model, device_ids=[local_rank], find_unused_parameters=True)

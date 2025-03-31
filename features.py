@@ -14,7 +14,7 @@ def create_umap(model,
                 stack_pairs=False,
                 temperature=1,
                 use_w=True,
-                dual=True,
+                full_input=True,
                 logits_key='logits',
                 combine=False,
                 return_predictions=False,
@@ -30,44 +30,54 @@ def create_umap(model,
     for i, batch in enumerate(tqdm(dl)):
         if i >= max_iter:
             break
-        if combine:
-            lc, spec, lc2, spec2, info1, info2 = batch 
-            lc, lc2, spec, spec2 = lc.to(device), lc2.to(device), spec.to(device), spec2.to(device)
-            spec = torch.nn.functional.pad(spec, (0, lc.shape[-1] - spec.shape[-1], 0,0))
-            spec2 = torch.nn.functional.pad(spec2, (0, lc2.shape[-1] - spec2.shape[-1], 0,0))
-            x1 = torch.cat((lc, spec.unsqueeze(1)), dim=1)
-            x2 = torch.cat((lc2, spec2.unsqueeze(1)), dim=1)
-        else:
-            x1, x2, _, _, info1, info2 = batch
-            x1, x2 = x1.to(device), x2.to(device)
+        # if combine:
+        #     lc, spec, lc2, spec2, info1, info2 = batch 
+        #     lc, lc2, spec, spec2 = lc.to(device), lc2.to(device), spec.to(device), spec2.to(device)
+        #     spec = torch.nn.functional.pad(spec, (0, lc.shape[-1] - spec.shape[-1], 0,0))
+        #     spec2 = torch.nn.functional.pad(spec2, (0, lc2.shape[-1] - spec2.shape[-1], 0,0))
+        #     x1 = torch.cat((lc, spec.unsqueeze(1)), dim=1)
+        #     x2 = torch.cat((lc2, spec2.unsqueeze(1)), dim=1)
+        # else:
+        #     x1, x2, _, _, info1, info2 = batch
+        #     x1, x2 = x1.to(device), x2.to(device)
+        lc, spectra, y, lc_target, spectra_target, info = batch
+        lc, spectra, lc_target, spectra_target = lc.to(device), spectra.to(device), lc_target.to(device), spectra_target.to(device)
         
         # Process model outputs
         with torch.no_grad():
             if stack_pairs:
-                x = torch.cat((x1, x2), dim=0)
-                out = model(x, temperature=temperature)
-            else:
-                if use_w:
-                    w = torch.stack([i['w'] for i in info1]).to(device)
-
-                    out = model(x1, x2, w)
-                elif dual:
-                    out = model(x1, x2)
+                x = torch.cat((lc, lc_target), dim=0)
+                out = model(x, temperature=self.temperature)
+            elif use_w:
+                w = torch.stack([i['w'] for i in info]).to(device)
+                if full_input:
+                    out = model(lightcurves=lc, spectra=spectra,
+                                 lightcurves2=lc_target, spectra2=spectra_target,
+                                  w=w)
                 else:
-                    out = model(x1)
+                    out = model(lc, spectra, w=w)
+            else:
+                out = model(lc, lc_target)
         
         # Extract logits and apply UMAP
-        logits = out[logits_key] if dual else out
+        if isinstance(out, dict):
+            logits = out[logits_key]
+        elif isinstance(out, tuple):
+            logits = out[0]
+        else:
+            logits = out
         if isinstance(logits, tuple):
             logits = logits[0]
         if logits.dim() > 2:
             logits = logits.mean(dim=1)
-        # print(logits.shape)
+        # print(logits.shape, logits[:, 10])
         reduced_data = reducer.fit_transform(logits.cpu().numpy())
-        
+
+        norm = torch.norm(logits, dim=1, keepdim=True)
+        norm_logits = logits / norm
         # Aggregate metadata
         batch_metadata = []
-        for sample_info in info1:
+        for sample_info in info:
             
             # Flatten dictionary, handling nested structures if needed
             flat_info = {}
@@ -81,8 +91,8 @@ def create_umap(model,
         for metadata, umap_coords, logit in zip(batch_metadata, reduced_data, logits):
             metadata['umap_x'] = umap_coords[0]
             metadata['umap_y'] = umap_coords[1]
-            metadata['logits_std'] = logit.squeeze().cpu().numpy().std()
-            metadata['logits_mean'] = logits.squeeze().cpu().numpy().mean()
+            metadata['logits_std'] = norm_logits.squeeze().cpu().numpy().std()
+            metadata['logits_mean'] = norm_logits.squeeze().cpu().numpy().mean()
             data_list.append(metadata)
     
     # Create DataFrame
