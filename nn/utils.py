@@ -12,7 +12,6 @@ from nn.scheduler import WarmupScheduler
 from util.utils import Container
 import yaml
 import os
-os.system('pip install torchinfo')
 import torchinfo
 
 models = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'SimCLR': SimCLR, 'SimSiam': SimSiam,
@@ -151,18 +150,18 @@ def deepnorm_init(model, args):
       
       # Initialize FFN components
       if hasattr(layer, 'ffn'):
-        nn.init.xavier_normal_(layer.ffn.linear1.weight, gain=beta)
-        nn.init.xavier_normal_(layer.ffn.linear2.weight, gain=beta)
-        if hasattr(layer.ffn.linear1, 'bias') and layer.ffn.linear1.bias is not None:
-          nn.init.zeros_(layer.ffn.linear1.bias)
-          nn.init.zeros_(layer.ffn.linear2.bias)
+        nn.init.xavier_normal_(layer.ffn.fc1.weight, gain=beta)
+        nn.init.xavier_normal_(layer.ffn.fc2.weight, gain=beta)
+        if hasattr(layer.ffn.fc1, 'bias') and layer.ffn.fc1.bias is not None:
+          nn.init.zeros_(layer.ffn.fc1.bias)
+          nn.init.zeros_(layer.ffn.fc2.bias)
     
     # Initialize output projection
     if hasattr(model, 'head'):
       if hasattr(model.head, 'linear1'):
-        nn.init.xavier_normal_(model.head.linear1.weight, gain=beta)
+        nn.init.xavier_normal_(model.head.fc1.weight, gain=beta)
       if hasattr(model.head, 'linear2'):
-        nn.init.xavier_normal_(model.head.linear2.weight, gain=beta)
+        nn.init.xavier_normal_(model.head.fc2.weight, gain=beta)
     
     return
   

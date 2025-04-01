@@ -24,7 +24,6 @@ import sys
 from os import path
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
-print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
 from dataset.dataset import *
@@ -39,7 +38,6 @@ from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp, deepnorm_init
 from util.utils import *
 from nn.train import *
-from tests.test_unique_sampler import run_sampler_tests
 from features import multimodal_umap, create_umap
 
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder,
@@ -69,7 +67,7 @@ def get_kepler_data(data_args, df, transforms):
                                 )
 def get_lamost_data(data_args, df, transforms):
 
-    return SpectraDataset(data_args.data_dir, transforms=transforms, df=df, 
+    return SpectraDataset(data_args.spectra_dir, transforms=transforms, df=df, 
                                  max_len=int(data_args.max_len_spectra),
                                  target_norm=data_args.target_norm,)
 
@@ -121,7 +119,7 @@ def get_simulation_data(data_args, df, light_transforms, spec_transforms):
                         )
 
 
-def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None):
+def get_data(data_args, logger, data_generation_fn, dataset_name='FineTune', config=None):
 
 
     light_transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
@@ -134,14 +132,14 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
                                 ToTensor()
                             ])
     if dataset_name == 'Kepler':
-        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lc)
+        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lc, logger=logger)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         spec_transforms = None
         train_dataset = get_kepler_data(data_args, train_df, light_transforms)
         val_dataset = get_kepler_data(data_args, val_df, light_transforms)
         test_dataset = get_kepler_data(data_args, test_df, light_transforms)
     elif dataset_name == 'Spectra':
-        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_spec)
+        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_spec, logger=logger)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                                 ToTensor()
@@ -152,14 +150,14 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
         test_dataset = get_lamost_data(data_args, test_df, spec_transforms)
 
     elif dataset_name == 'LightSpec':
-        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lightspec)
+        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lightspec, logger=logger)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         train_dataset = get_lightspec_data(data_args, train_df, light_transforms, spec_transforms)
         val_dataset = get_lightspec_data(data_args, val_df, light_transforms, spec_transforms)
         test_dataset = get_lightspec_data(data_args, test_df, light_transforms, spec_transforms)
     
     elif dataset_name == 'FineTune':
-        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_finetune)
+        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_finetune, logger=logger)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         train_dataset = get_finetune_data(data_args, train_df, light_transforms, spec_transforms)
         val_dataset = get_finetune_data(data_args, val_df, light_transforms, spec_transforms)
@@ -177,7 +175,7 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
         spec_transforms = Compose([LAMOSTSpectrumPreprocessor(rv_norm=False, continuum_norm=data_args.continuum_norm, plot_steps=False),
                                 ToTensor()
                             ])
-        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_simulation)
+        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_simulation, logger=logger)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         train_dataset = get_simulation_data(data_args, train_df, light_transforms, spec_transforms)
         val_dataset = get_simulation_data(data_args, val_df, light_transforms, spec_transforms)

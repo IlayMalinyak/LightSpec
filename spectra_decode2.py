@@ -1,5 +1,5 @@
 import os
-# os.system("pip install mamba-ssm[causal-conv1d]")
+import torch.multiprocessing as mp
 import torch
 from torch.cuda.amp import GradScaler
 from torch.utils.data import DataLoader, Subset
@@ -21,7 +21,6 @@ import sys
 from os import path
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
-print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
 from dataset.dataset import SpectraDataset
@@ -32,7 +31,7 @@ from nn.train import *
 from nn.utils import deepnorm_init, load_checkpoints_ddp, load_scheduler
 from nn.scheduler import WarmupScheduler
 from nn.optim import QuantileLoss, CQR
-from util.utils import Container, plot_fit, plot_lr_schedule, kepler_collate_fn, save_predictions_to_dataframe
+from util.utils import *
 from features import create_umap
 import generator
 
@@ -48,9 +47,6 @@ prediction_labels = ['teff', 'logg', 'feh']
           
 # schedulers = {'WarmupScheduler': WarmupScheduler, 'OneCycleLR': OneCycleLR,
 #  'CosineAnnealingLR': CosineAnnealingLR, 'none': None}
-
-current_date = datetime.date.today().strftime("%Y-%m-%d")
-datetime_dir = f"spec_decode2_{current_date}"
 
 def plot_joint_prob(lamost_catalog):
     # Create a multi-panel figure to show different views of the distribution
@@ -208,24 +204,24 @@ def plot_joint_prob(lamost_catalog):
     
     plt.close('all')  # Close all figures to free memory
 
-def test_dataset_samples(dataset, num_iters=10):
+def test_dataset_samples(dataset, logger, num_iters=10):
     start_time = time.time()
     for i in range(num_iters):
-        x_masked, x, y, mask, info, _ = dataset[i]
-        print('y: ', len(y))
+        x_masked, x, y, mask, _, info = dataset[i]
+        logger.info(len(y))
         if 'rv2' in info.keys():
-            print(info['snrg'], info['snri'], info['snrr'], info['snrz'])
-    print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.2f} seconds." \
+            logger.info(info['snrg'], info['snri'], info['snrr'], info['snrz'])
+    logger.info(f"Time taken for {num_iters} iterations: {time.time() - start_time:.2f} seconds." \
         f"avg per iteration: {(time.time() - start_time)/num_iters:.2f} seconds")
 
-def create_train_test_dfs(meta_columns):
-    lamost_catalog = pd.read_csv('/data/lamost/lamost_afgkm_teff_3000_7500_catalog_updated.csv')
+def create_train_test_dfs(meta_columns, logger):
+    lamost_catalog = pd.read_csv('/mnt/walkure_public/users/ilaykamai/tables//lamost_afgkm_teff_3000_7500_catalog.csv', sep='|')
     lamost_catalog = lamost_catalog.drop_duplicates(subset=['combined_obsid'])
     lamost_catalog = lamost_catalog[lamost_catalog['combined_snrg'] > 0]
     lamost_catalog = lamost_catalog.dropna(subset=['combined_teff', 'combined_logg', 'combined_feh'])
-    print("values ranges: ")
+    logger.info("values ranges: ")
     for c in ['combined_teff', 'combined_logg', 'combined_feh']:
-        print(c, lamost_catalog[c].min(), lamost_catalog[c].max())
+        logger.info(f'{c}, {lamost_catalog[c].min()}, {lamost_catalog[c].max()}')
     
     # Calculate joint probability distribution for target variables
     # First, bin the continuous values to create discrete categories
@@ -255,150 +251,177 @@ def create_train_test_dfs(meta_columns):
     lamost_catalog['joint_weight'] = lamost_catalog['joint_weight'] / mean_weight
     
     # Print some statistics about the joint distribution
-    print(f"Number of unique joint bins: {len(joint_probs)}")
-    print(f"Min joint probability: {lamost_catalog['joint_prob'].min():.6f}")
-    print(f"Max joint probability: {lamost_catalog['joint_prob'].max():.6f}")
-    print(f"Min weight: {lamost_catalog['joint_weight'].min():.2f}")
-    print(f"Max weight: {lamost_catalog['joint_weight'].max():.2f}")
+    logger.info(f"Number of unique joint bins: {len(joint_probs)}")
+    logger.info(f"Min joint probability: {lamost_catalog['joint_prob'].min():.6f}")
+    logger.info(f"Max joint probability: {lamost_catalog['joint_prob'].max():.6f}")
+    logger.info(f"Min weight: {lamost_catalog['joint_weight'].min():.2f}")
+    logger.info(f"Max weight: {lamost_catalog['joint_weight'].max():.2f}")
 
     
     train_df, test_df = train_test_split(lamost_catalog, test_size=0.2, random_state=1234)
     return train_df, test_df
 
-def setup():
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    jobid         = int(os.environ["SLURM_JOBID"])
-    gpus_per_node = torch.cuda.device_count()
-    print('jobid ', jobid)
-    print('gpus per node ', gpus_per_node)
-    print(f"Hello from rank {rank} of {world_size} where there are" \
-          f" {gpus_per_node} allocated GPUs per node. ", flush=True)
 
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+def main_worker(local_rank, gpu_indices, world_size):
+    current_date = datetime.date.today().strftime("%Y-%m-%d")
+    datetime_dir = f"spec_decode2_{current_date}"
+
+    gpu_id = gpu_indices[local_rank]
     
-    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
-    torch.cuda.set_device(local_rank)
-    print(f"rank: {rank}, local_rank: {local_rank}")
-    return local_rank, world_size, gpus_per_node
+    # Set environment variables
+    os.environ["RANK"] = str(local_rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    
+    # Initialize process group
+    dist.init_process_group(
+        "nccl",
+        init_method="env://",
+        rank=local_rank,
+        world_size=world_size
+    )
+
+    cpu_count = mp.cpu_count()
+    workers_per_gpu = max(1, (cpu_count - 2) // world_size)
+    
+    # Set the device to the selected GPU
+    torch.cuda.set_device(gpu_id)
+    logger = setup_dist_logger(local_rank)
+    logger.info(f"Process {local_rank}/{world_size} initialized, using GPU {gpu_id}: {torch.cuda.get_device_name()}")
+
+    args_dir = 'nn/full_config.yaml'
+    data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
+    exp_num = data_args.exp_num
+    model_name = data_args.spec_model_name
+    os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
+
+    # if data_args.test_run:
+    #     datetime_dir = f"test_{current_date}"
 
 
-local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/full_config.yaml'
-data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-exp_num = data_args.exp_num
-model_name = data_args.spec_model_name
-os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
+    train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args, logger,
+    data_generation_fn=create_train_test_dfs, dataset_name='Spectra')
 
-# if data_args.test_run:
-#     datetime_dir = f"test_{current_date}"
+    test_dataset_samples(train_dataset, logger, 100)
 
-
-train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
- data_generation_fn=create_train_test_dfs, dataset_name='Spectra')
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+    train_dataloader = DataLoader(train_dataset,
+                                batch_size=int(data_args.batch_size) * 6, \
+                                num_workers=workers_per_gpu,
+                                collate_fn=kepler_collate_fn,
+                                sampler=train_sampler)
 
 
-train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
-train_dataloader = DataLoader(train_dataset,
-                              batch_size=int(data_args.batch_size) * 6, \
-                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                              collate_fn=kepler_collate_fn,
-                              sampler=train_sampler)
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
+    val_dataloader = DataLoader(val_dataset,
+                                batch_size=int(data_args.batch_size) * 8,
+                                collate_fn=kepler_collate_fn,
+                                sampler=val_sampler, \
+                                num_workers=workers_per_gpu)
+
+    test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
+    test_dataloader = DataLoader(test_dataset,
+                                batch_size=int(data_args.batch_size) * 8,
+                                collate_fn=kepler_collate_fn,
+                                sampler=test_sampler, \
+                                num_workers=workers_per_gpu)
+
+    _, optim_args, complete_config, _, model = generator.get_model(data_args, args_dir, complete_config, local_rank)
+
+    model = model.to(local_rank)
+
+    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+
+    num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Number of parameters: {num_params}")
+
+    if data_args.create_umap:
+        umap_df = create_umap(model.module.encoder, val_dataloader, local_rank, use_w=False, dual=False, max_iter=800)
+        logger.info("umap created: ", umap_df.shape)
+        umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
+        logger.info(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
+        exit()
+    # loss_fn = torch.nn.L1Loss(reduction='none')
+    loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
+    ssl_loss_fn = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
+
+    trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
+                            criterion=loss_fn, ssl_criterion=ssl_loss_fn,
+                            output_dim=len(data_args.prediction_labels_spec), scaler=None, grad_clip=True,
+                        scheduler=None, train_dataloader=train_dataloader, logger=logger,
+                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                                    accumulation_step=1, max_iter=np.inf, w_name='snrg',
+                            w_init_val=1,  exp_name=f"spectra_decode_{exp_num}") 
+
+    complete_config.update(
+        {"trainer": trainer.__dict__,
+        "loss_fn": str(loss_fn),
+        "optimizer": str(optimizer)}
+    )
+    
+    config_save_path = f"{data_args.log_dir}/{datetime_dir}/spec_decode_{exp_num}_complete_config.yaml"
+    with open(config_save_path, "w") as config_file:
+        json.dump(complete_config, config_file, indent=2, default=str)
+
+    # print(f"Configuration (with model structure) saved at {config_save_path}.")
+
+    fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+                        early_stopping=40, best='loss', conf=True) 
+    output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_{exp_num}.json'
+    with open(output_filename, "w") as f:
+        json.dump(fit_res, f, indent=2)
+    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_{exp_num}.png")
+    plt.clf()
 
 
-val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
-val_dataloader = DataLoader(val_dataset,
-                            batch_size=int(data_args.batch_size) * 8,
-                            collate_fn=kepler_collate_fn,
-                            sampler=val_sampler, \
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+    preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
 
-test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
-test_dataloader = DataLoader(test_dataset,
-                            batch_size=int(data_args.batch_size) * 8,
-                            collate_fn=kepler_collate_fn,
-                            sampler=test_sampler, \
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+    preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
 
-_, optim_args, complete_config, _, model = generator.get_model(data_args, args_dir, complete_config, local_rank)
+    low_q = preds[:, :, 0] 
+    high_q = preds[:, :, -1]
+    coverage = np.mean((targets >= low_q) & (targets <= high_q))
+    logger.info('coverage: ', coverage)
 
-model = model.to(local_rank)
+    cqr_errs = loss_fn.calibrate(preds_val, targets_val)
+    logger.info(targets.shape, preds.shape)
+    preds_cqr = loss_fn.predict(preds, cqr_errs)
 
-model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+    low_q = preds_cqr[:, :, 0]
+    high_q = preds_cqr[:, :, -1]
+    coverage = np.mean((targets >= low_q) & (targets <= high_q))
+    logger.info('coverage after calibration: ', coverage)
+    df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
+    df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv", index=False)
+    logger.info('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv") 
+    df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, prediction_labels, optim_args.quantiles)
+    df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv", index=False)
+    logger.info('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv")
 
-num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(f"Number of parameters: {num_params}")
-
-if data_args.create_umap:
-    umap_df = create_umap(model.module.encoder, val_dataloader, local_rank, use_w=False, dual=False, max_iter=800)
-    print("umap created: ", umap_df.shape)
+    umap_df = create_umap(model.module.encoder, test_dataloader, local_rank, use_w=False, dual=False)
+    logger.info("umap created: ", umap_df.shape)
     umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
-    print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
-    exit()
-# loss_fn = torch.nn.L1Loss(reduction='none')
-loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
-ssl_loss_fn = torch.nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
+    logger.info(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
 
-trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, ssl_criterion=ssl_loss_fn,
-                         output_dim=len(data_args.prediction_labels_spec), scaler=None,
-                       scheduler=None, train_dataloader=train_dataloader,
-                       val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                           exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                                 accumulation_step=1, max_iter=np.inf, w_name='snrg',
-                           w_init_val=1,  exp_name=f"spectra_decode_{exp_num}") 
+def main():
+    gpu_indices = [0, 1]  # For example, use only GPUs 0, 2, 4, and 6
+    
+    world_size = len(gpu_indices)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = "12355"  # Can be any free port
+    
+    print(f"Spawning {world_size} processes on GPUs {gpu_indices}")
+    
+    # Spawn processes for each selected GPU
+    mp.spawn(
+        main_worker, 
+        args=(gpu_indices, world_size),
+        nprocs=world_size, 
+        join=True
+    )
 
-complete_config.update(
-    {"trainer": trainer.__dict__,
-    "loss_fn": str(loss_fn),
-    "optimizer": str(optimizer)}
-)
-   
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/spec_decode_{exp_num}_complete_config.yaml"
-with open(config_save_path, "w") as config_file:
-    json.dump(complete_config, config_file, indent=2, default=str)
-
-# print(f"Configuration (with model structure) saved at {config_save_path}.")
-
-fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                       early_stopping=40, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_{exp_num}.json'
-with open(output_filename, "w") as f:
-    json.dump(fit_res, f, indent=2)
-fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_{exp_num}.png")
-plt.clf()
-
-
-preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
-
-preds, targets, info = trainer.predict(test_dataloader, device=local_rank)
-
-low_q = preds[:, :, 0] 
-high_q = preds[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage: ', coverage)
-
-cqr_errs = loss_fn.calibrate(preds_val, targets_val)
-print(targets.shape, preds.shape)
-preds_cqr = loss_fn.predict(preds, cqr_errs)
-
-low_q = preds_cqr[:, :, 0]
-high_q = preds_cqr[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage after calibration: ', coverage)
-df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
-df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv") 
-df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, prediction_labels, optim_args.quantiles)
-df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv")
-
-umap_df = create_umap(model.module.encoder, test_dataloader, local_rank, use_w=False, dual=False)
-print("umap created: ", umap_df.shape)
-umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
-print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
-exit(0)
+if __name__ == "__main__":
+    main()

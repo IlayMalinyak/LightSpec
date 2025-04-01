@@ -1,14 +1,14 @@
 Data:
   # Basics
-  log_dir: '/data/lightSpec/logs'
+  log_dir: 'logs'
   exp_num: spec_minmax_targets
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
   # Data
   dataset: "LightSpecDataset"
-  data_dir: '/data/lightPred/data'
-  spectra_dir: '/data/lamost/data'
+  data_dir: '/mnt/walkure_public/users/ilaykamai/npy'
+  spectra_dir: '/mnt/walkure_public/users/ilaykamai/lamost'
   batch_size: 16
   num_epochs: 1000
   max_len_spectra: 4096
@@ -21,36 +21,30 @@ Data:
   meta_columns_spec: []
   meta_columns_finetune: []
   meta_columns_simulation: []
-  prediction_labels_lightspec: ['Teff', 'logg', 'FeH', 'Prot']
-  prediction_labels_lc: ['Prot']
-  prediction_labels_spec: ['Teff', 'logg', 'FeH']
-  prediction_labels_finetune: ['Prot']
-  prediction_labels_simulation: ['Period']
   target_norm: 'minmax'
   test_run: False
   create_umap: False
   load_checkpoint: False
   masked_transform: False
-  use_acf: True
-  use_fft: True
+  use_acf: False
+  use_fft: False
   scale_flux: False
   combined_embed: False
   dim_lc: 4
-  ssl_weight: 0.5
   alpha: 0.9
   pred_coeff_val: None
   approach: "multitask"
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-25/lightspec_.pth'
+  checkpoint_path: ''
 
 DoubleInputRegressor_lc:
   encoder_only: True
   stacked_input: True
   in_channels: 2
-  load_checkpoint: True
+  load_checkpoint: False
   output_dim: 1
   num_quantiles: 5
   dropout_p: 0.3  
-  checkpoint_path: '/data/lightSpec/logs/light_2025-03-19/DoubleInputRegressor_lc_3_ssl.pth'
+  checkpoint_path: ''
 
 CNNEncoder_lc:
   # Model
@@ -67,7 +61,7 @@ CNNEncoder_lc:
   activation: "sine"
   sine_w0: 1.0
   avg_output: True
-  checkpoint_path: '/data/lightSpec/logs/light_2024-11-27/CNNEncoder_lc_1.pth'
+  checkpoint_path: ''
 
 
 AstroConformer_lc:
@@ -89,7 +83,7 @@ AstroConformer_lc:
   deepnorm: True
   beta: 0.913    # Calculated as (num_layers/6)^(-0.5) for 5 layers
   load_checkpoint: False
-  spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
+  spec_checkpoint_path: ''
 
 
 AstroEncoderDecoder:
@@ -109,7 +103,7 @@ AstroEncoderDecoder:
   output_dim: 3
   norm: "postnorm"
   load_spec_checkpoint: False
-  spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
+  spec_checkpoint_path: ''
 
 MultiEncoder_lc:
   # Model
@@ -122,11 +116,11 @@ MultiEncoder_lc:
   output_dim: 2
   beta: 1
   avg_output: True
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
-  checkpoint_path: '/data/lightSpec/logs/light_2025-02-11/MultiEncoder_lc_3.pth'
+  checkpoint_path: ''
 
 
 Conformer_lc:
@@ -152,11 +146,11 @@ MultiTaskSimSiam_lc:
   output_dim: 1
   num_quantiles: 5
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
-  checkpoint_path: "/data/lightSpec/logs/light_2025-03-03/MultiEncoder_lc_2.pth"
+  checkpoint_path: ""
 
 MultiTaskRegressor_spec:
   backbone: 'cnn'
@@ -174,7 +168,7 @@ MultiTaskRegressor_spec:
   load_checkpoint: False
   checkpoint_num: 1
   activation: "silu"
-  checkpoint_path: "/data/lightSpec/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra_decode_4.pth"
+  checkpoint_path: ""
 
 
 Conformer_spec:
@@ -201,11 +195,11 @@ MultiEncoder_combined:
   output_dim: 2
   beta: 1
   avg_output: True
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "sine"
   sine_w0: 1.0
-  checkpoint_path: '/data/lightSpec/logs/combined_2025-02-12/lightspec_1.pth'
+  checkpoint_path: ''
 
 
 Conformer_combined:
@@ -337,8 +331,8 @@ MoCo:
   freeze_spectra: False
   freeze_combined: False
   bidirectional: True
-  deepnorm: True
-  beta: 1.0  # Default beta value
+  # deepnorm: True
+  # beta: 1.0  # Default beta value
 
 projector:
   in_dim: 256

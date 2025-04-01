@@ -18,7 +18,6 @@ import sys
 from os import path
 ROOT_DIR = path.dirname(path.dirname(path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
-print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
 from dataset.sampler import DistributedUniqueLightCurveSampler, DistributedBalancedSampler, UniqueIDDistributedSampler
@@ -387,7 +386,9 @@ class SpectraDataset(Dataset):
             if 'APOGEE' in self.id:     
                 filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
             else:
-                filepath = self.df.iloc[idx]['data_path']
+                obsid = self.df.iloc[idx][self.id]
+                filepath = self.data_dir / f'{obsid}.fits'
+                # filepath = self.df.iloc[idx]['data_path']
             target_size = 4
         else: 
             filepath = self.path_list[idx]
@@ -400,7 +401,7 @@ class SpectraDataset(Dataset):
                 spectra, meta = self.read_lamost_spectra(filepath)
         except (OSError, FileNotFoundError) as e:
             info = self.create_empty_info({self.id: obsid})
-            # print("Error reading file ", filepath, "\n", e)
+            print("Error reading file ", filepath, "\n", e)
             return (torch.zeros(self.max_len),
                     torch.zeros(self.max_len),
                     torch.zeros(target_size),\

@@ -14,7 +14,7 @@ import umap
 from torch.profiler import profile, record_function, ProfilerActivity
 from sklearn.model_selection import KFold
 from torch.utils.data import Subset, DataLoader
-from util.utils import kepler_collate_fn
+from util.utils import kepler_collate_fn, setup_dist_logger 
 from pathlib import Path
 import io
 import zipfile
@@ -87,7 +87,7 @@ class Trainer(object):
     A class that encapsulates the training loop for a PyTorch model.
     """
     def __init__(self, model, optimizer, criterion, train_dataloader, device, world_size=1, output_dim=2,
-                 scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None,
+                 scheduler=None, val_dataloader=None,   max_iter=np.inf, scaler=None, logger=None,
                   grad_clip=False, exp_num=None, log_path=None, exp_name=None, plot_every=None,
                    cos_inc=False, range_update=None, accumulation_step=1, wandb_log=False, num_quantiles=1,
                    update_func=lambda x: x):
@@ -111,7 +111,7 @@ class Trainer(object):
         self.log_path = log_path
         self.best_state_dict = None
         self.plot_every = plot_every
-        self.logger = None
+        self.logger = logger
         self.range_update = range_update
         self.accumulation_step = accumulation_step
         self.wandb = wandb_log
@@ -155,10 +155,11 @@ class Trainer(object):
         self.val_logits_std = []
         # self.optim_params['lr_history'] = []
         epochs_without_improvement = 0
+        if self.logger is None:
+            self.logger = setup_dist_logger(device)
         main_proccess = (torch.distributed.is_initialized() and torch.distributed.get_rank() == 0) or self.device == 'cpu'
 
-        print(f"Starting training for {num_epochs} epochs")
-        print("is main process: ", main_proccess, flush=True)
+        self.logger.info(f"Starting training for {num_epochs} epochs")
         global_time = time.time()
         self.epoch = 0
         for epoch in range(start_epoch, start_epoch + num_epochs):
@@ -218,21 +219,21 @@ class Trainer(object):
                 output_filename = f'{self.log_path}/{self.exp_num}/{self.exp_name}.json'
                 with open(output_filename, "w") as f:
                     json.dump(res, f, indent=2)
-                print(f"saved results at {output_filename}")
+                logger.info(f"saved results at {output_filename}")
                 
-                print(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
+                logger.info(f'Epoch {epoch}, lr {current_lr}, Train Loss: {global_train_loss:.6f}, Val Loss:'\
                 
                         f'{global_val_loss:.6f}, Train Acc: {global_train_accuracy.round(decimals=4).tolist()}, '\
                 f'Val Acc: {global_val_accuracy.round(decimals=4).tolist()},'\
                   f'Time: {time.time() - start_time:.2f}s, Total Time: {(time.time() - global_time)/3600} hr', flush=True)
                 if epoch % 10 == 0:
-                    print(os.system('nvidia-smi'))
+                    logger.info(os.system('nvidia-smi'))
 
                 if epochs_without_improvement == early_stopping:
-                    print('early stopping!', flush=True)
+                    logger.info('early stopping!', flush=True)
                     break
                 if time.time() - global_time > (23.83 * 3600):
-                    print("time limit reached")
+                    logger.info("time limit reached")
                     break 
 
         return {"epochs":epochs, "train_loss": train_loss,
@@ -670,8 +671,9 @@ class MaskedSSLTrainer(Trainer):
             print("nan in y, idx: ", batch_idx)
         if out.isnan().sum() > 0:
             print("nan in out, idx: ", batch_idx)
+        self.logger(f'max vals {out.max()} , {y.max()}')
         loss = self.criterion(out, y)
-
+        
         if loss.isnan():
             print("nan in loss, idx: ", batch_idx)
             print("out range", out.min(), out.max())
@@ -1253,7 +1255,6 @@ class MaskedRegressorTrainer(Trainer):
             x = x[:, 0, :]
         ssl_loss = self.ssl_criterion(ssl_out, x)
         ssl_acc = self.mask_accuracy(ssl_out, x, mask)
-
         
         # Calculate regression loss
         reg_out = reg_out.view(b, -1, self.num_quantiles)

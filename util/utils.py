@@ -8,6 +8,8 @@ import pandas as pd
 import re
 import random
 from typing import List
+import logging
+
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -40,6 +42,44 @@ def setup():
     torch.cuda.set_device(local_rank)
     print(f"rank: {rank}, local_rank: {local_rank}")
     return local_rank, world_size, gpus_per_node
+
+
+def setup_dist_logger(rank):
+    """
+    Sets up a logger for distributed training that only prints messages from rank 0.
+    
+    Args:
+        rank (int): The rank of the current process
+        
+    Returns:
+        logging.Logger: Configured logger that only prints from rank 0
+    """
+    # Create logger
+    logger = logging.getLogger("distributed_training")
+    
+    # Set logging level
+    logger.setLevel(logging.INFO)
+    
+    # Configure logger to only print from rank 0
+    if rank == 0:
+        # Add handler for rank 0 process
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - [Rank 0] - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+        # Also add a file handler to save logs
+        os.makedirs("logs", exist_ok=True)
+        file_handler = logging.FileHandler(f"logs/training.log")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    else:
+        # For non-rank 0 processes, set a null handler
+        logger.addHandler(logging.NullHandler())
+        # Set high logging level to suppress output
+        logger.setLevel(logging.CRITICAL)
+    
+    return logger
 
 class Container(object):
   '''A container class that can be used to store any attributes.'''
