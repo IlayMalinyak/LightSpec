@@ -58,11 +58,13 @@ class ContinuousRotaryEmbedding(torch.nn.Module):
         return torch.stack([emb.cos(), emb.sin()])
     
 def rotate_half(x):
+    # print('in rotate half: ', x.shape)
     x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), -1)
 
 @torch.jit.script
 def apply_rotary_pos_emb(q, k, cos, sin):
+    # print('in apply_rotary_pos_emb: ', q.shape, k.shape, cos.shape, sin.shape)
     cos, sin = cos[...,:q.shape[2],:], sin[...,:q.shape[2],:]
     return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
 

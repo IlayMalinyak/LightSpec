@@ -3,6 +3,7 @@ from nn.models import Transformer
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from nn.DualFormer.dual_attention import DualFormer
 
 
 
@@ -105,3 +106,31 @@ class FullGatherLayer(torch.autograd.Function):
         all_gradients = torch.stack(grads)
         dist.all_reduce(all_gradients)
         return all_gradients[dist.get_rank()]
+
+
+class DualNet(nn.Module):
+    def __init__(self, lc_backbone, spectra_backbone, dual_former_args,
+     lc_reg_args, spectra_reg_args):
+        super(DualNet, self).__init__()
+        self.lc_backbone = lc_backbone
+        self.spectra_backbone = spectra_backbone
+        self.dual_former = DualFormer(**dual_former_args)
+        self.lc_head = MLPHead(**lc_reg_args)
+        self.spectra_head = MLPHead(**spectra_reg_args)
+        # self.loss_args = loss_args
+
+    def forward(self, lc, spectra, w=None):
+        lc_feat = self.lc_backbone(lc)
+        if isinstance(lc_feat, tuple):
+            lc_feat = lc_feat[0]
+        spectra_feat = self.spectra_backbone(spectra)
+        if isinstance(spectra_feat, tuple):
+            spectra_feat = spectra_feat[0]
+        lc_reg_pred = self.lc_head(lc_feat)
+        spectra_reg_pred = self.spectra_head(spectra_feat)
+        if w is not None:
+            w = w.nan_to_num(0)
+            spectra_feat = torch.cat((spectra_feat, w), dim=1)
+            lc_feat = torch.cat((lc_feat, w), dim=1)
+        dual_pred = self.dual_former(spectra_feat, lc_feat)
+        return {'dual_pred': dual_pred, 'lc_pred':lc_reg_pred, 'spec_pred':spectra_reg_pred}

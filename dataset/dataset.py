@@ -383,35 +383,50 @@ class SpectraDataset(Dataset):
         return info
 
     def __getitem__(self, idx):
-        if self.df is not None:
-            if 'APOGEE' in self.id:     
-                filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
-            else:
-                filepath = self.df.iloc[idx]['data_path']
-            target_size = 4
-        else: 
-            filepath = self.path_list[idx]
-            target_size = self.max_len    
-        obsid = os.path.basename(filepath)
+        start = time.time()
+        obsid = int(self.df.iloc[idx]['combined_obsid'])
+        obsdir = str(obsid)[:4]
+        spectra_filename = os.path.join(self.data_dir, f'{obsdir}/{obsid}.fits')
         try:
-            if 'APOGEE' in self.id:
-                spectra, meta = self.read_apogee_spectra(filepath)
-            else:
-                spectra, meta = self.read_lamost_spectra(filepath)
-        except (OSError, FileNotFoundError) as e:
-            info = self.create_empty_info({self.id: obsid})
-            # print("Error reading file ", filepath, "\n", e)
+            spectra, meta = self.read_lamost_spectra(spectra_filename)
+            spec_time = time.time() - start
+            meta['obsid'] = obsid
+        except OSError as e:
+            print("Error reading file ", obsid, e)
+            # spectra = np.zeros((self.spec_seq_len))
+            # meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
             return (torch.zeros(self.max_len),
                     torch.zeros(self.max_len),
-                    torch.zeros(target_size),\
+                    torch.zeros(4),
                     torch.zeros(self.max_len, dtype=torch.bool),
                     torch.zeros(self.max_len, dtype=torch.bool),
-                    info)
+                    {'obsid': obsid})
+            
+        # if self.df is not None:
+        #     if 'APOGEE' in self.id:     
+        #         filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
+        #     else:
+        #         filepath = self.df.iloc[idx]['data_path']
+        #         # filepath = filepath.replace('data', 'storage', 1)
+        #     target_size = 4
+        # else: 
+        #     filepath = self.path_list[idx]
+        #     target_size = self.max_len    
+        # obsid = os.path.basename(filepath)
+        # try:
+        #     if 'APOGEE' in self.id:
+        #         spectra, meta = self.read_apogee_spectra(filepath)
+        #     else:
+        #         spectra, meta = self.read_lamost_spectra(filepath)
+        # except (OSError, FileNotFoundError) as e:
+        #     info = self.create_empty_info({self.id: obsid})
+        #     print("Error reading file ", filepath, "\n", e)
         meta[self.id] = obsid
+        t1 = time.time()
         if self.transforms:
             spectra, _, info = self.transforms(spectra, None, meta)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, info)
-
+        t2 = time.time()
         if self.df is not None:
             row = self.df.iloc[idx]
             if 'APOGEE' in self.id:
@@ -420,7 +435,7 @@ class SpectraDataset(Dataset):
                 target, info = self.create_lamost_target(row, meta)
         else:
             target = torch.zeros_like(mask)
-            
+        t3 = time.time()
         if spectra_masked.shape[-1] < self.max_len:
             pad = torch.zeros(1, self.max_len - spectra_masked.shape[-1])
             spectra_masked = torch.cat([spectra_masked, pad], dim=-1)
@@ -430,7 +445,8 @@ class SpectraDataset(Dataset):
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
-        
+        t4 = time.time()
+        # print("read spectra: ", t1-start, "transform: ", t2-t1, "target: ", t3-t2, "pad: ", t4-t3)
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
          target.float(), mask.squeeze(0), mask.squeeze(0), info)
 
@@ -739,7 +755,7 @@ class LightSpecDataset(KeplerDataset):
     def __getitem__(self, idx):
         start = time.time()
         light, _, _, light_target, _ ,info = super().__getitem__(idx)
-        light_time = time.time() - start
+        t1 = time.time()
         kid = int(info['KID'])
         obsid = int(self.df.iloc[idx]['ObsID'])
         info['obsid'] = obsid
@@ -752,14 +768,17 @@ class LightSpecDataset(KeplerDataset):
             print("Error reading file ", obsid, e)
             spectra = np.zeros((self.spec_seq_len))
             meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
+        t2 = time.time()
         if self.spec_transforms:
             spectra, _, spec_info = self.spec_transforms(spectra, None, meta)
             spec_transform_time = time.time() - start
         if spectra.shape[-1] < self.spec_seq_len:
             spectra = F.pad(spectra, ((0, self.spec_seq_len - spectra.shape[-1],0,0)), "constant", value=0)
+        t3 = time.time()
         spectra = torch.nan_to_num(spectra, nan=0)
         masked_spectra, _, spec_info = self.masked_transform(spectra, None, spec_info)
         info.update(spec_info)
+        t4 = time.time()
         if self.meta_columns is not None:
             w = torch.tensor([info[c] for c in self.meta_columns], dtype=torch.float32)
             info['w'] = w
@@ -768,6 +787,8 @@ class LightSpecDataset(KeplerDataset):
             y = torch.tensor([info[label] for label in self.labels], dtype=torch.float32)
         else:
             y = light_target
+        t5 = time.time()
+        # print(f"Read lc: {t1-start:.4f}, read spec: {t2-t1:.4f}, spec transform: {t3-t2:.4f}, mask: {t4-t3:.4f}, target: {t5-t4:.4f}")
         return (light.float().squeeze(0), spectra.float().squeeze(0), y,
          light_target.float().squeeze(0), masked_spectra.float().squeeze(0), info)
     

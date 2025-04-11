@@ -12,6 +12,90 @@ import math
 from typing import Optional, Tuple, Union, Dict, List
 
 
+def rotate_half(x):
+    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), -1)
+
+@torch.jit.script
+def apply_rotary_pos_emb(q, k, cos_q, sin_q, cos_k, sin_k):
+    # print("in apply_rotary_pos_emb: ", q.shape, k.shape, cos.shape, sin.shape)
+    cos_q, sin_q = cos_q[...,:q.shape[2],:], sin_q[...,:q.shape[2],:]
+    cos_k, sin_k = cos_k[...,:k.shape[2],:], sin_k[...,:k.shape[2],:]
+    return (q * cos_q) + (rotate_half(q) * sin_q), (k * cos_k) + (rotate_half(k) * sin_k)
+
+class DualRotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, base=10000):
+        super().__init__()
+        # Create inverse frequencies for the rotary embeddings
+        inv_freq = 1. / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        
+        # Cache for efficiency
+        self.seq_len1_cached = None
+        self.seq_len2_cached = None
+        self.cos1_cached = None
+        self.sin1_cached = None
+        self.cos2_cached = None
+        self.sin2_cached = None
+
+    def forward(self, x1, x2):
+        """
+        Calculate rotary embeddings for cross-modal attention between two modalities.
+        
+        Args:
+            x1: First modality tensor [batch_size, seq_len_1, embed_dim]
+            x2: Second modality tensor [batch_size, seq_len_2, embed_dim]
+            
+        Returns:
+            Tuple of (cos1, sin1, cos2, sin2) for applying to attention heads
+        """
+        # Get sequence lengths and device
+        seq_len1 = x1.shape[1]
+        seq_len2 = x2.shape[1]
+        device = x1.device
+        
+        # Generate embeddings for first modality (for q1) if needed
+        if seq_len1 != self.seq_len1_cached:
+            self.seq_len1_cached = seq_len1
+            t1 = torch.arange(seq_len1, device=device)
+            freqs1 = torch.einsum('i,j->ij', t1, self.inv_freq)
+            # Create embeddings - expand to cover full rotary dimensions
+            emb1 = torch.cat((freqs1, freqs1), dim=-1)
+            self.cos1_cached = emb1.cos().unsqueeze(0)  # [1, seq_len1, rotary_dim]
+            self.sin1_cached = emb1.sin().unsqueeze(0)  # [1, seq_len1, rotary_dim]
+        
+        # Generate embeddings for second modality (for k2) if needed
+        if seq_len2 != self.seq_len2_cached:
+            self.seq_len2_cached = seq_len2
+            t2 = torch.arange(seq_len2, device=device)
+            freqs2 = torch.einsum('i,j->ij', t2, self.inv_freq)
+            # Create embeddings - expand to cover full rotary dimensions
+            emb2 = torch.cat((freqs2, freqs2), dim=-1)
+            self.cos2_cached = emb2.cos().unsqueeze(0)  # [1, seq_len2, rotary_dim]
+            self.sin2_cached = emb2.sin().unsqueeze(0)  # [1, seq_len2, rotary_dim]
+            
+        # Return embeddings for both modalities
+        return self.cos1_cached, self.sin1_cached, self.cos2_cached, self.sin2_cached
+
+class RotaryEmbedding(torch.nn.Module):
+    def __init__(self, dim, base=10000):
+        super().__init__()
+        inv_freq = 1. / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        self.seq_len_cached = None
+        self.cos_cached = None
+        self.sin_cached = None
+
+    def forward(self, x, seq_len=None):
+        if seq_len != self.seq_len_cached:
+            self.seq_len_cached = seq_len
+            t = torch.arange(seq_len, device=x.device)
+            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
+            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+            self.cos_cached = emb.cos()
+            self.sin_cached = emb.sin()
+        return torch.stack([self.cos_cached, self.sin_cached])
+
 class PositionalEncoding(nn.Module):
     """
     Positional encoding for the transformer model.
@@ -55,6 +139,7 @@ class DualAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
+        self.rotary_ndims = int(self.head_dim * 0.5)
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         self.bidirectional = bidirectional
         self.scaling = self.head_dim ** -0.5
@@ -113,6 +198,7 @@ class DualAttention(nn.Module):
         x2: torch.Tensor,
         x1_padding_mask: Optional[torch.Tensor] = None,
         x2_padding_mask: Optional[torch.Tensor] = None,
+        rope: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Cross-modal attention between two modalities.
@@ -143,6 +229,15 @@ class DualAttention(nn.Module):
         q1 = self._reshape_for_multihead(self.q1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
         k2 = self._reshape_for_multihead(self.k2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
         v2 = self._reshape_for_multihead(self.v2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
+
+        if rope is not None:
+            cos1, sin1, cos2, sin2 = rope
+            q1, query_pass_1 = q1[..., :self.rotary_ndims], q1[..., self.rotary_ndims:]
+            k2, key_pass_2 = k2[..., :self.rotary_ndims], k2[..., self.rotary_ndims:]
+            q1, k2 = apply_rotary_pos_emb(q1, k2, cos1, sin1, cos2, sin2) 
+            q1 = torch.cat((q1, query_pass_1), dim=-1)
+            k2 = torch.cat((k2, key_pass_2), dim=-1)
+
         
         attended_1 = self._attention(q1, k2, v2, x2_attn_mask)  # [batch, seq_len_1, embed_dim]
         attended_1 = self.out1_proj(attended_1)
@@ -152,6 +247,13 @@ class DualAttention(nn.Module):
             q2 = self._reshape_for_multihead(self.q2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
             k1 = self._reshape_for_multihead(self.k1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
             v1 = self._reshape_for_multihead(self.v1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
+
+            if rope is not None:
+                q2, query_pass_2 = q2[..., :self.rotary_ndims], q2[..., self.rotary_ndims:]
+                k1, key_pass_1 = k1[..., :self.rotary_ndims], k1[..., self.rotary_ndims:]
+                q2, k1 = apply_rotary_pos_emb(q2, k1, cos2, sin2, cos1, sin1)
+                q2 = torch.cat((q2, query_pass_2), dim=-1)
+                k1 = torch.cat((k1, key_pass_1), dim=-1) 
             
             attended_2 = self._attention(q2, k1, v1, x1_attn_mask)  # [batch, seq_len_2, embed_dim]
             attended_2 = self.out2_proj(attended_2)
@@ -277,7 +379,8 @@ class DualFormerBlock(nn.Module):
         x1: torch.Tensor, 
         x2: torch.Tensor,
         x1_padding_mask: Optional[torch.Tensor] = None,
-        x2_padding_mask: Optional[torch.Tensor] = None
+        x2_padding_mask: Optional[torch.Tensor] = None,
+        rope: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply attention with residual connection"""
         if self.norm_first:
@@ -285,12 +388,13 @@ class DualFormerBlock(nn.Module):
                 self.norm1_1(x1), 
                 self.norm1_2(x2),
                 x1_padding_mask,
-                x2_padding_mask
+                x2_padding_mask,
+                rope
             )
             x1 = x1 + self.dropout(attended_1)
             x2 = x2 + self.dropout(attended_2)
         else:
-            attended_1, attended_2 = self.attention(x1, x2, x1_padding_mask, x2_padding_mask)
+            attended_1, attended_2 = self.attention(x1, x2, x1_padding_mask, x2_padding_mask, rope)
             x1 = self.norm1_1(x1 + self.dropout(attended_1))
             x2 = self.norm1_2(x2 + self.dropout(attended_2))
         return x1, x2
@@ -312,7 +416,9 @@ class DualFormerBlock(nn.Module):
         x1: torch.Tensor,
         x2: torch.Tensor,
         x1_padding_mask: Optional[torch.Tensor] = None,
-        x2_padding_mask: Optional[torch.Tensor] = None
+        x2_padding_mask: Optional[torch.Tensor] = None,
+        rope: Optional[torch.Tensor] = None,
+        
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Process both modalities through attention and FFN.
@@ -327,7 +433,7 @@ class DualFormerBlock(nn.Module):
             Tuple of processed embeddings:
             [batch_size, seq_len_1, embed_dim], [batch_size, seq_len_2, embed_dim]
         """
-        x1, x2 = self._attention_block(x1, x2, x1_padding_mask, x2_padding_mask)
+        x1, x2 = self._attention_block(x1, x2, x1_padding_mask, x2_padding_mask, rope)
         x1, x2 = self._feedforward_block(x1, x2)
         
         return x1, x2
@@ -346,7 +452,9 @@ class DualFormer(nn.Module):
     """
     def __init__(
         self,
+        input_dim: int,
         embed_dim: int,
+        output_dim: int,
         num_layers: int = 6,
         num_heads: int = 8,
         ffn_dim: int = 2048,
@@ -359,6 +467,7 @@ class DualFormer(nn.Module):
         max_seq_len: int = 5000,
         pooling: str = "mean",  # Options: mean, max, cls, none
         use_cls_token: bool = False,
+        use_prediction_head: bool = False,
     ):
         super().__init__()
         
@@ -366,6 +475,27 @@ class DualFormer(nn.Module):
         self.use_positional_encoding = use_positional_encoding
         self.pooling = pooling
         self.use_cls_token = use_cls_token
+        self.use_prediction_head = use_prediction_head
+
+        self.embedding = nn.Linear(input_dim, embed_dim)
+
+        self.prediction_head1 = nn.Sequential(
+                                nn.Linear(embed_dim, embed_dim//2),
+                                nn.LayerNorm(embed_dim//2),
+                                nn.Dropout(0.1),
+                                nn.GELU(),
+                                nn.Linear(embed_dim//2, output_dim)
+        )
+        self.prediction_head2 = nn.Sequential(
+                                nn.Linear(embed_dim, embed_dim//2),
+                                nn.LayerNorm(embed_dim//2),
+                                nn.Dropout(0.1),
+                                nn.GELU(),
+                                nn.Linear(embed_dim//2, output_dim)
+        )
+
+        self.projection_head = nn.Linear(embed_dim, embed_dim, bias=False)
+
         
         # Create CLS tokens if needed
         if use_cls_token:
@@ -374,8 +504,10 @@ class DualFormer(nn.Module):
         
         # Positional encoding
         if use_positional_encoding:
-            self.pos_encoder1 = PositionalEncoding(embed_dim, max_seq_len, dropout)
-            self.pos_encoder2 = PositionalEncoding(embed_dim, max_seq_len, dropout)
+            self.rotary_ndims = int((embed_dim // num_heads) * 0.5)
+            self.pe = DualRotaryEmbedding(self.rotary_ndims)
+            # self.pos_encoder1 = PositionalEncoding(embed_dim, max_seq_len, dropout)
+            # self.pos_encoder2 = PositionalEncoding(embed_dim, max_seq_len, dropout)
         
         # DualFormer blocks
         self.layers = nn.ModuleList([
@@ -457,6 +589,14 @@ class DualFormer(nn.Module):
             Otherwise:
                 Tuple of (mod1_output, mod2_output)
         """
+        if len(x1.shape) == 2:
+            x1 = x1.unsqueeze(-1)
+        if len(x2.shape) == 2:
+            x2 = x2.unsqueeze(-1)
+        
+        x1 = self.embedding(x1)  # [batch_size, seq_len_1, embed_dim]
+        x2 = self.embedding(x2)  # [batch_size, seq_len_2, embed_dim]
+        
         attentions = [] if output_attentions else None
         hidden_states = [] if output_hidden_states else None
         
@@ -479,8 +619,9 @@ class DualFormer(nn.Module):
         
         # Apply positional encoding
         if self.use_positional_encoding:
-            x1 = self.pos_encoder1(x1)
-            x2 = self.pos_encoder2(x2)
+            RoPE = self.pe(x1, x2) # RoPE: [2, B, L, encoder_dim], 2: sin, cos
+        else:
+            RoPE = None
             
         # Record initial hidden states
         if output_hidden_states:
@@ -488,7 +629,7 @@ class DualFormer(nn.Module):
             
         # Process through DualFormer blocks
         for layer in self.layers:
-            x1, x2 = layer(x1, x2, x1_padding_mask, x2_padding_mask)
+            x1, x2 = layer(x1, x2, x1_padding_mask, x2_padding_mask, RoPE)
             
             if output_hidden_states:
                 hidden_states.append((x1.clone(), x2.clone()))
@@ -508,23 +649,31 @@ class DualFormer(nn.Module):
         else:
             mod1_output = x1
             mod2_output = x2
-        
-        # Return based on requested outputs
-        if output_attentions or output_hidden_states:
-            output_dict = {
-                "mod1_output": mod1_output,
-                "mod2_output": mod2_output,
-            }
+        output_dict = {
+            "emb1": mod1_output,
+            "emb2": mod2_output,
+        }
+
+        proj1 = self.projection_head(mod1_output)
+        proj2 = F.linear(mod2_output, self.projection_head.weight.t(), bias=None)
+
+        output_dict["proj1"] = proj1
+        output_dict["proj2"] = proj2
+
+        if self.use_prediction_head:
+            pred1 = self.prediction_head1(mod1_output)
+            pred2 = self.prediction_head2(mod2_output)
+            output_dict["pred1"] = pred1
+            output_dict["pred2"] = pred2
             
-            if output_hidden_states:
-                output_dict["hidden_states"] = hidden_states
+        if output_hidden_states:
+            output_dict["hidden_states"] = hidden_states
+            
+        if output_attentions:
+            output_dict["attentions"] = attentions
                 
-            if output_attentions:
-                output_dict["attentions"] = attentions
-                
-            return output_dict
+        return output_dict
         
-        return mod1_output, mod2_output
 
 
 class DualFormerForJointEmbedding(nn.Module):

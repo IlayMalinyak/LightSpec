@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR
 from collections import OrderedDict
 from .Modules.mhsa_pro import MHA_rotary
+from .DualFormer.dual_attention import DualAttention
 from .Modules.cnn import ConvBlock
 from nn.models import *
 from nn.moco import MultimodalMoCo
@@ -123,6 +124,7 @@ def deepnorm_init(model, args):
   """
   # Handle shared encoders in MoCo models (Transformer instances)
   from nn.models import Transformer
+  # from nn.DualFormer.dual_attention import DualFormer
   if isinstance(model, Transformer):
     print(f"Applying DeepNorm initialization to Transformer with {len(model.layers)} layers")
     beta = getattr(args, 'beta', 1)
@@ -135,6 +137,7 @@ def deepnorm_init(model, args):
         
     # Initialize all attention blocks
     for i, layer in enumerate(model.layers):
+      print(f"Initializing layer {i+1}/{len(model.layers)}")
       if hasattr(layer, 'attn'):
         # Initialize attention components
         if hasattr(layer.attn, 'query_proj'):
@@ -150,28 +153,31 @@ def deepnorm_init(model, args):
             nn.init.zeros_(layer.attn.output_proj.bias)
       
       # Initialize FFN components
-      if hasattr(layer, 'ffn'):
-        nn.init.xavier_normal_(layer.ffn.linear1.weight, gain=beta)
-        nn.init.xavier_normal_(layer.ffn.linear2.weight, gain=beta)
-        if hasattr(layer.ffn.linear1, 'bias') and layer.ffn.linear1.bias is not None:
-          nn.init.zeros_(layer.ffn.linear1.bias)
-          nn.init.zeros_(layer.ffn.linear2.bias)
+      elif hasattr(layer, 'ffn'):
+        nn.init.xavier_normal_(layer.ffn.fc1.weight, gain=beta)
+        nn.init.xavier_normal_(layer.ffn.fc2.weight, gain=beta)
+        if hasattr(layer.ffn.fc1, 'bias') and layer.ffn.fc1.bias is not None:
+          nn.init.zeros_(layer.ffn.fc1.bias)
+          nn.init.zeros_(layer.ffn.fc2.bias)
+      
+      else:
+        print(f"Warning: Layer {i} does not have 'attn' or 'ffn' attributes")
     
     # Initialize output projection
     if hasattr(model, 'head'):
       if hasattr(model.head, 'linear1'):
-        nn.init.xavier_normal_(model.head.linear1.weight, gain=beta)
+        nn.init.xavier_normal_(model.head.fc1.weight, gain=beta)
       if hasattr(model.head, 'linear2'):
-        nn.init.xavier_normal_(model.head.linear2.weight, gain=beta)
+        nn.init.xavier_normal_(model.head.fc2.weight, gain=beta)
     
     return
   
   # For other model types, use the apply method
   def init_func(m):
     beta = getattr(args, 'beta', 1)
-    
     # Handle MHA_rotary for Conformer/Astroconformer models
     if isinstance(m, MHA_rotary):
+      print(f"Applying DeepNorm initialization to MHA_rotary")
       nn.init.xavier_normal_(m.query.weight, gain=1)
       nn.init.xavier_normal_(m.key.weight, gain=1)
       nn.init.xavier_normal_(m.value.weight, gain=beta)
@@ -186,6 +192,17 @@ def deepnorm_init(model, args):
         nn.init.xavier_normal_(m.ffn.linear2.weight, gain=beta)
         nn.init.zeros_(m.ffn.linear1.bias)
         nn.init.zeros_(m.ffn.linear2.bias)
+
+    elif isinstance(m, DualAttention):
+      print(f"Applying DeepNorm initialization to DualAttention")
+      nn.init.xavier_normal_(m.q1_proj.weight, gain=1)
+      nn.init.xavier_normal_(m.k1_proj.weight, gain=1)
+      nn.init.xavier_normal_(m.v1_proj.weight, gain=1)
+      nn.init.xavier_normal_(m.q2_proj.weight, gain=1)
+      nn.init.xavier_normal_(m.k2_proj.weight, gain=beta)
+      nn.init.xavier_normal_(m.v2_proj.weight, gain=beta)
+      nn.init.xavier_normal_(m.out1_proj.weight, gain=beta)
+      nn.init.xavier_normal_(m.out2_proj.weight, gain=beta)
     
     # Handle Flash_Mha for regular Transformer models
     elif hasattr(m, 'attn') and hasattr(m.attn, 'query_proj'):

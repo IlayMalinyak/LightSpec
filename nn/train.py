@@ -725,6 +725,122 @@ class MaskedSSLTrainer(Trainer):
         return s / inverse_token_mask.sum()
 
 
+class DualFormerTrainer(Trainer):
+    def __init__(self, use_w=True, alpha=0.5, print_every=500, **kwargs):
+        super().__init__(**kwargs)
+        self.use_w = use_w
+        self.alpha = alpha
+        # self.lc_losses = []
+        # self.spec_losses = []
+        self.print_every = print_every
+    
+    def off_diagonal(self, x):
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+    
+    def _cov_loss(self, x,y):
+        batch_size, num_features = x.shape
+        x = x - x.mean(dim=0)
+        y = y - y.mean(dim=0)
+        cov_x = (x.T @ x) / (batch_size - 1)
+        cov_y = (y.T @ y) / (batch_size - 1)
+        cov_xy = (x.T @ y) / (batch_size - 1)
+        cov_loss = self.off_diagonal(cov_x).pow_(2).sum().div(
+            num_features
+        ) + self.off_diagonal(cov_y).pow_(2).sum().div(num_features)
+        + self.off_diagonal(cov_xy).pow_(2).sum().div(num_features)
+        return cov_loss
+
+    def _duality_loss(self, proj1, proj2, emb1, emb2):
+
+        left_side = torch.sum(proj1 * emb1, dim=1)
+        right_side = torch.sum(emb2 * proj2, dim=1)
+        diff = left_side - right_side
+        
+        # Return the mean squared error as the loss
+        return torch.mean(diff**2)
+    def train_batch(self,batch, batch_idx, device):
+        lc, spectra, y, lc_target, spectra_target, info = batch 
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        out = self.model(lc ,spectra, w=w)
+        # self.alpha = max(self.alpha / (self.epoch + 1) ** 2, 0.01)
+
+        dual_pred = out['dual_pred']
+        
+        # dual_pred_lc, dual_pred_spec = dual_pred['pred1'], dual_pred['pred2']
+        
+        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        pred_spec = out['spec_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        lc_loss = self.criterion(pred_lc, y)
+        spec_loss = self.criterion(pred_spec, y)
+        lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
+        spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
+        reg_loss = lc_loss + spec_loss
+        
+        lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
+        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']            
+        duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        
+        cov_loss = self._cov_loss(lc_emb, spec_emb)
+        loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2
+        loss.backward()
+        self.optimizer.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
+        torch.cuda.synchronize()
+        if batch_idx % self.print_every == 0:
+            print('separate losses - ', lc_loss.item(), spec_loss.item(), duality_loss.item(), cov_loss.item())
+        # Monitor memory periodically
+        if batch_idx % 200 == -0 and torch.distributed.get_rank() == 0:
+            print(f"GPU memory usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+        
+        self.train_aux_loss_1.append(reg_loss.item())
+        self.train_aux_loss_2.append(duality_loss.item())
+        acc1 = (torch.abs(pred_lc - y) < y * 0.1).sum(0)
+        acc2 = (torch.abs(pred_spec - y) < y * 0.1).sum(0)
+        acc = (acc1 + acc2) / 2
+        return loss, acc, y
+    def eval_batch(self,batch, batch_idx, device):
+        lc, spectra, y, lc_target, spectra_target, info = batch
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+        w = None
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+        with torch.no_grad():
+            out = self.model(lc ,spectra, w=w)
+        dual_pred = out['dual_pred']
+
+        # dual_pred_lc, dual_pred_spec = dual_pred['pred1'], dual_pred['pred2']
+
+        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        pred_spec = out['spec_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        lc_loss = self.criterion(pred_lc, y)
+        spec_loss = self.criterion(pred_spec, y)
+        lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
+        spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
+        reg_loss = lc_loss + spec_loss
+        
+        lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
+        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']            
+        duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        
+        cov_loss = self._cov_loss(lc_emb, spec_emb)
+        
+        loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2
+        if batch_idx % self.print_every == 0:
+            print('separate losses - ', lc_loss.item(), spec_loss.item(), duality_loss.item(), cov_loss.item())
+        acc1 = (torch.abs(pred_lc - y) < y * 0.1).sum(0)
+        acc2 = (torch.abs(pred_spec - y) < y * 0.1).sum(0)
+        acc = (acc1 + acc2) / 2
+        return loss, acc, y
+
+
+
+
 class JEPATrainer(Trainer):
     def __init__(self, use_w=True, lc_reg_idx=-1, alpha=0.5, **kwargs):
         super().__init__(**kwargs)

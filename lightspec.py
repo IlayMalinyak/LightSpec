@@ -38,7 +38,7 @@ from nn.simsiam import SimSiam, projection_MLP
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
 from nn.optim import CQR
-from nn.train import ContrastiveTrainer, JEPATrainer
+from nn.train import ContrastiveTrainer, JEPATrainer, DualFormerTrainer
 from tests.test_unique_sampler import run_sampler_tests
 from features import create_umap
 import generator
@@ -128,22 +128,23 @@ def create_train_test_dfs(meta_columns):
 def test_dataset_samples(ds, num_iters=10):
     start = time.time()
     no_founds = 0
+    start_time = time.time()
     for i in range(num_iters):
-        start = time.time()
         light, spec, y,light2, spec2,info = ds[i]
-        print(light.shape, spec.shape, light2.shape, spec2.shape, y)
-        if light.sum() == 0:
-            no_founds += 1
-        # print(light.shape, spec.shape, w.shape, info.keys())
-        if i % 10 == 0:
-            fig, axes = plt.subplots(1,2, figsize=(24,14))
-            axes[0].plot(light[0].cpu().numpy())
-            axes[1].plot(spec.cpu().numpy())
-            axes[0].set_title(f"Lightcurve: {info['KID']}")
-            axes[1].set_title(f"Spectrum: {info['obsid']}")
-            plt.savefig(f'/data/lightSpec/images/lightspec_{i}.png')
-            plt.close()
-    print("average time taken per iteration: ", (time.time()-start)/num_iters)
+        # print(light.shape, spec.shape, light2.shape, spec2.shape, y)
+        # if light.sum() == 0:
+        #     no_founds += 1
+        # # print(light.shape, spec.shape, w.shape, info.keys())
+        # if i % 10 == 0:
+        #     fig, axes = plt.subplots(1,2, figsize=(24,14))
+        #     axes[0].plot(light[0].cpu().numpy())
+        #     axes[1].plot(spec.cpu().numpy())
+        #     axes[0].set_title(f"Lightcurve: {info['KID']}")
+        #     axes[1].set_title(f"Spectrum: {info['obsid']}")
+        #     plt.savefig(f'/data/lightSpec/images/lightspec_{i}.png')
+        #     plt.close()
+    print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.4f} seconds." \
+        f"avg per iteration: {(time.time() - start_time)/num_iters:.6f} seconds")
 
 
 
@@ -166,24 +167,48 @@ train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(d
 
 test_dataset_samples(train_dataset, num_iters=10)
 
-train_dataloader = create_unique_loader(train_dataset,
-                                      batch_size=int(data_args.batch_size) // 2, \
-                                      num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                      collate_fn=kepler_collate_fn )
+# train_dataloader = create_unique_loader(train_dataset,
+#                                       batch_size=int(data_args.batch_size), \
+#                                       num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+#                                       collate_fn=kepler_collate_fn )
 
-val_dataloader = create_unique_loader(val_dataset,
-                                    batch_size=int(data_args.batch_size) // 2,
-                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                    collate_fn=kepler_collate_fn,
-                                     drop_last=True
-                                    )
+# val_dataloader = create_unique_loader(val_dataset,
+#                                     batch_size=int(data_args.batch_size),
+#                                     num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+#                                     collate_fn=kepler_collate_fn,
+#                                      drop_last=True
+#                                     )
 
+# test_dataloader = DataLoader(test_dataset,
+#                              batch_size=int(data_args.batch_size),
+#                              collate_fn=kepler_collate_fn,
+#                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+#                              drop_last=True
+                            #  )
+
+train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+train_dataloader = DataLoader(train_dataset,
+                              batch_size=int(data_args.batch_size), \
+                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                              collate_fn=kepler_collate_fn,
+                              sampler=train_sampler
+                              )
+
+val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
+val_dataloader = DataLoader(val_dataset,
+                            batch_size=int(data_args.batch_size),
+                            collate_fn=kepler_collate_fn,
+                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                            sampler=val_sampler
+                            )
+
+test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
 test_dataloader = DataLoader(test_dataset,
-                             batch_size=int(data_args.batch_size) // 2,
-                             collate_fn=kepler_collate_fn,
-                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                             drop_last=True
-                             )
+                            batch_size=int(data_args.batch_size),
+                            collate_fn=kepler_collate_fn,
+                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                            sampler=test_sampler
+                            )
 
 print("len train dataloader ", len(train_dataloader))
 
@@ -194,12 +219,22 @@ model, optim_args, complete_config, light_model, spec_model = generator.get_mode
                                                                                 local_rank,
                                                                                 )
 
+batch = next(iter(train_dataloader))
+lc1, spec1, lc2, spec2, y, info = batch
+
+# output = model(lc1, spec1)
+# print("output keys: ", output.keys())
+# print(output['lc_pred'].shape, output['spectra_pred'].shape, output['dual_pred'][0].shape, output['dual_pred'][1].shape)
+# exit()
+
 if data_args.approach == 'ssl':
     loss_fn = None
     num_quantiles = 1
 elif data_args.approach == 'multitask':
     loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
     num_quantiles = len(optim_args.quantiles)
+elif data_args.approach == 'dual_former':
+    loss_fn = nn.L1Loss(reduction='none')
 if optim_args.optimizer == 'sgd':
     optimizer = torch.optim.SGD(model.parameters(),
                                  lr=float(optim_args.max_lr),
@@ -212,7 +247,8 @@ else:
 scaler = GradScaler()
 
 accumulation_step = 1
-trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+if data_args.approach != 'dual_former':
+    trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
                          scaler=scaler, grad_clip=True,
                        scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
@@ -221,6 +257,16 @@ trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                              accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
                         exp_name=f"{exp_num}") 
+else:
+    trainer = DualFormerTrainer(model=model, optimizer=optimizer,
+                        criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+                         scaler=scaler, grad_clip=True,
+                       scheduler=None, train_dataloader=train_dataloader, 
+                       val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                             accumulation_step=accumulation_step, max_iter=np.inf, print_every=200,
+                              use_w=True, alpha=data_args.alpha,
+                        exp_name=f"{exp_num}")
 
 # trainer = JEPATrainer(
 #                         model=model, optimizer=optimizer,
