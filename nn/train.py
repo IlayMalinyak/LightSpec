@@ -1,7 +1,10 @@
 import torch
+import torch.nn.functional as F
 from torch.cuda.amp import autocast
 import numpy as np
 import time
+import umap
+
 import os
 import yaml
 import json
@@ -109,7 +112,7 @@ class Trainer(object):
         self.exp_num = exp_num
         self.exp_name = exp_name
         self.log_path = log_path
-        self.best_state_dict = None
+        self.best_state_dict = self.model.state_dict()
         self.plot_every = plot_every
         self.logger = None
         self.range_update = range_update
@@ -726,9 +729,9 @@ class MaskedSSLTrainer(Trainer):
 
 
 class DualFormerTrainer(Trainer):
-    def __init__(self, use_w=True, alpha=0.5, print_every=500, **kwargs):
+    def __init__(self, use_y_as_latent=False, alpha=0.5, print_every=500, **kwargs):
         super().__init__(**kwargs)
-        self.use_w = use_w
+        self.use_y_as_latent = use_y_as_latent
         self.alpha = alpha
         # self.lc_losses = []
         # self.spec_losses = []
@@ -763,82 +766,188 @@ class DualFormerTrainer(Trainer):
     def train_batch(self,batch, batch_idx, device):
         lc, spectra, y, lc_target, spectra_target, info = batch 
         lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
-        w = None
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
-        out = self.model(lc ,spectra, w=w)
+        # w = None
+        # if self.use_w:
+        #     w = torch.stack([i['w'] for i in info]).to(device)
+        latent = y.nan_to_num(-1) if self.use_y_as_latent else None
+        out = self.model(lc ,spectra, latent=latent)
         # self.alpha = max(self.alpha / (self.epoch + 1) ** 2, 0.01)
 
         dual_pred = out['dual_pred']
-        
+
         # dual_pred_lc, dual_pred_spec = dual_pred['pred1'], dual_pred['pred2']
-        
-        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
-        pred_spec = out['spec_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
-        lc_loss = self.criterion(pred_lc, y)
-        spec_loss = self.criterion(pred_spec, y)
-        lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
-        spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
-        reg_loss = lc_loss + spec_loss
+        # if out['lc_pred'] is not None:
+        # pred_lc = dual_pred['pred1'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        # pred_spec = dual_pred['pred2'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        # lc_loss = self.criterion(pred_lc, y)
+        # spec_loss = self.criterion(pred_spec, y)
+        # lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
+        # spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
+        # reg_loss = lc_loss + spec_loss
+        # else:
+        reg_loss = lc_loss = spec_loss = torch.tensor([0], device=device)
+        self.alpha = 0
         
         lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
         lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']            
         duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
-        
-        cov_loss = self._cov_loss(lc_emb, spec_emb)
-        loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2
+        cov_loss = self._cov_loss(lc_proj, spec_proj)
+        loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2 
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
         torch.cuda.synchronize()
         if batch_idx % self.print_every == 0:
-            print('separate losses - ', lc_loss.item(), spec_loss.item(), duality_loss.item(), cov_loss.item())
+            print('separate losses - ', lc_loss.item(), spec_loss.item(), duality_loss.item(), cov_loss.item() )
         # Monitor memory periodically
         if batch_idx % 200 == -0 and torch.distributed.get_rank() == 0:
             print(f"GPU memory usage: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
         
         self.train_aux_loss_1.append(reg_loss.item())
         self.train_aux_loss_2.append(duality_loss.item())
-        acc1 = (torch.abs(pred_lc - y) < y * 0.1).sum(0)
-        acc2 = (torch.abs(pred_spec - y) < y * 0.1).sum(0)
-        acc = (acc1 + acc2) / 2
+        # if out['lc_pred'] is not None:
+        # acc1 = (torch.abs(pred_lc - y) < y * 0.1).sum(0)
+        # acc2 = (torch.abs(pred_spec - y) < y * 0.1).sum(0)
+        # acc = (acc1 + acc2) / 2
+        # else:
+        acc = torch.tensor([0], device=device)
         return loss, acc, y
     def eval_batch(self,batch, batch_idx, device):
         lc, spectra, y, lc_target, spectra_target, info = batch
         lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
-        w = None
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
-        with torch.no_grad():
-            out = self.model(lc ,spectra, w=w)
+        
+        latent = y.nan_to_num(-1) if self.use_y_as_latent else None
+        out = self.model(lc ,spectra, latent=latent)
+        
         dual_pred = out['dual_pred']
 
         # dual_pred_lc, dual_pred_spec = dual_pred['pred1'], dual_pred['pred2']
-
-        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
-        pred_spec = out['spec_pred'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
-        lc_loss = self.criterion(pred_lc, y)
-        spec_loss = self.criterion(pred_spec, y)
-        lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
-        spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
-        reg_loss = lc_loss + spec_loss
-        
+        # if out['lc_pred'] is not None:
+        # pred_lc = dual_pred['pred1'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        # pred_spec = dual_pred['pred2'].view(lc.shape[0], -1, self.num_quantiles).squeeze(-1)
+        # lc_loss = self.criterion(pred_lc, y)
+        # spec_loss = self.criterion(pred_spec, y)
+        # lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
+        # spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
+        # reg_loss = lc_loss + spec_loss
+        # else:
+        reg_loss = lc_loss = spec_loss = torch.tensor([0], device=device)
+        self.alpha = 0
+            
         lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
         lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']            
         duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        cov_loss = self._cov_loss(lc_proj, spec_proj)
         
-        cov_loss = self._cov_loss(lc_emb, spec_emb)
-        
-        loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2
+        loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2 
         if batch_idx % self.print_every == 0:
             print('separate losses - ', lc_loss.item(), spec_loss.item(), duality_loss.item(), cov_loss.item())
-        acc1 = (torch.abs(pred_lc - y) < y * 0.1).sum(0)
-        acc2 = (torch.abs(pred_spec - y) < y * 0.1).sum(0)
-        acc = (acc1 + acc2) / 2
+        # if out['lc_pred'] is not None:
+        # acc1 = (torch.abs(pred_lc - y) < y * 0.1).sum(0)
+        # acc2 = (torch.abs(pred_spec - y) < y * 0.1).sum(0)
+        # acc = (acc1 + acc2) / 2
+        # else:
+        acc = torch.tensor([0], device=device)
         return loss, acc, y
+    
+    def _get_eigenspace(self, weight):
+        print("max diff weight", torch.max(torch.abs(weight - weight.t())).item())
+        if torch.abs(weight - weight.t()).sum() < 1e-6:
+            print("Weight matrix is symmetric. Using eigendecomposition.")
+            # Symmetric case - eigenvalues are real
+            eigenvalues, eigenvectors = torch.linalg.eigh(weight)
+            # Sort in descending order of eigenvalues
+            idx = torch.argsort(eigenvalues, descending=True)
+            eigenvalues = eigenvalues[idx]
+            eigenvectors = eigenvectors[:, idx]
+        else:
+            print("Warning: Weight matrix is not symmetric. error is: ", torch.abs(weight - weight.t()).sum())
+            # Non-symmetric case - eigenvalues may be complex
+            eigenvalues_complex, eigenvectors_complex = torch.linalg.eig(weight)
+            # For simplicity, we'll take the magnitude of complex eigenvalues
+            eigenvalues_mag = torch.abs(eigenvalues_complex)
+            idx = torch.argsort(eigenvalues_mag, descending=True)
+            eigenvalues = eigenvalues_complex[idx]
+            eigenvectors = eigenvectors_complex[:, idx]
+            
+            # Note: In practice, you might want to handle complex eigenvectors differently
+            # Here we'll just take the real part for demonstration
+            if torch.is_complex(eigenvectors):
+                print("Warning: Complex eigenvectors detected. Using real part for projections.")
+                eigenvectors = eigenvectors.real
+        
+        # Normalize eigenvectors
+        eigenvectors = F.normalize(eigenvectors, dim=0)
+
+        return eigenvalues, eigenvectors
+
+    def predict(self, test_dataloader, device, load_best=True, top_k=10):
+        preds_lc = np.zeros((0, self.output_dim))
+        preds_spec = np.zeros((0, self.output_dim))
+        targets = np.zeros((0, self.output_dim))
+        umap_data_spec = np.zeros((0, 2))
+        umap_data_lc = np.zeros((0, 2))
+        umap_data_comb = np.zeros((0, 2))
+        umap_proj_comb = np.zeros((0, 2))
+        kids = []
+        projections = []
+        # top_projection_indices_lc = []
+        # top_projection_indices_spec = []
+        # top_projection_indices_comb = []
+        # top_projection_values_comb = []
+        if load_best:
+            self.model.load_state_dict(self.best_state_dict)
+        self.model.eval()
+        A = self.model.module.dual_former.projection_head.weight.detach()
+        pbar = tqdm(test_dataloader)
+        eigenvalues, eigenvectors = self._get_eigenspace(A)
+        reducer = umap.UMAP(n_components=2)
+        for i, batch in enumerate(pbar):
+            with torch.no_grad():
+                lc, spectra, y, lc_target, spectra_target, info = batch
+                lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+                latent = y.nan_to_num(-1) if self.use_y_as_latent else None
+                out = self.model(lc ,spectra, latent=latent)
+                
+                dual_pred = out['dual_pred']
+                
+                targets = np.concatenate((targets, y.cpu().numpy()), axis=0)
+                kids.extend([i['KID'] for i in info])
+
+                lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
+                lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']
+                
+                projection_comb = (spec_emb + lc_emb) @ eigenvectors
+                projections.append(projection_comb.cpu().numpy())
+                # projection_magnitudes_comb = torch.abs(projection_comb)
+                # top_values_comb, top_indices_comb = torch.topk(projection_magnitudes_comb, k=min(top_k, projection_comb.shape[1]), dim=1)
+                
+                # top_projection_indices_lc.append(top_indices_lc.cpu().numpy())
+                # top_projection_indices_spec.append(top_indices_spec.cpu().numpy())
+                # top_projection_indices_comb.append(top_indices_comb.cpu().numpy())
+                # top_projection_values_comb.append(top_values_comb.cpu().numpy())
 
 
+                # reduced_data_spec = reducer.fit_transform(spec_proj.cpu().numpy())
+                # reduced_data_lc = reducer.fit_transform(lc_proj.cpu().numpy())
+                proj = np.concatenate((spec_proj.cpu().numpy(), lc_proj.cpu().numpy()), axis=1)
+                reduced_data_comb = reducer.fit_transform(proj)
+                umap_data_comb = np.concatenate((umap_data_comb, reduced_data_comb), axis=0)
+
+                reduced_proj_comb = reducer.fit_transform(projection_comb.cpu().numpy())
+                umap_proj_comb = np.concatenate((umap_proj_comb, reduced_proj_comb), axis=0)
+
+                # lc_loss = self.criterion(pred_lc, y)
+                # spec_loss = self.criterion(pred_spec, y)
+                # lc_loss = lc_loss.nan_to_num(0).mean(0).mean()
+                # spec_loss = spec_loss.nan_to_num(0).mean(0).mean()
+                # reg_loss = lc_loss + spec_loss
+                # pbar.set_description(f'lc_loss: {lc_loss.item():.4f}, spec_loss: {spec_loss.item():.4f}, reg_loss: {reg_loss.item():.4f}')
+                if i > self.max_iter:
+                    break
+        return (targets, np.array(kids), eigenvalues.detach().cpu().numpy(), eigenvectors.detach().cpu().numpy(),
+         np.concatenate(projections), umap_data_comb, umap_proj_comb)
 
 
 class JEPATrainer(Trainer):

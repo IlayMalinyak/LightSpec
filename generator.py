@@ -152,7 +152,8 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
         test_dataset = get_lamost_data(data_args, test_df, spec_transforms)
 
     elif dataset_name == 'LightSpec':
-        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lightspec)
+        train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lightspec, 
+                                                only_main_seq=data_args.only_main_seq)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         train_dataset = get_lightspec_data(data_args, train_df, light_transforms, spec_transforms)
         val_dataset = get_lightspec_data(data_args, val_df, light_transforms, spec_transforms)
@@ -225,6 +226,10 @@ def get_model(data_args,
     optim_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Optimization'])
     tuner_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Tuner'])
 
+    latent_dim = len(data_args.prediction_labels_lightspec) if data_args.use_latent else 0
+    dual_former_args.latent_dim = latent_dim
+    print("latent dim: ", latent_dim)
+
     tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
     # light_model_args.in_channels = data_args.in_channels_lc
     predictor_args.w_dim = len(data_args.meta_columns_lightspec)
@@ -285,7 +290,7 @@ def get_model(data_args,
     spectra_reg_args['w_dim'] = 0
 
     model = DualNet(light_model.simsiam.encoder, spec_model.encoder, dual_former_args.get_dict(),
-                     lc_reg_args, spectra_reg_args).to(local_rank)
+                     lc_reg_args, spectra_reg_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
 
     print("Applying DeepNorm initialization to DualNet transformer components")
     deepnorm_init(model.dual_former, dual_former_args)
@@ -307,11 +312,12 @@ def get_model(data_args,
 
     if data_args.approach=='finetune':
         model = MocoTuner(model.moco_model, tuner_args.get_dict(), freeze_moco=freeze).to(local_rank)
+    
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     
-    if load_individuals:
-        light_model.load_state_dict(light_model_state)
-        spec_model.load_state_dict(spec_model_state)
+    # if load_individuals:
+    #     light_model.load_state_dict(light_model_state)
+    #     spec_model.load_state_dict(spec_model_state)
 
     num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Number of trainble parameters: {num_params}")

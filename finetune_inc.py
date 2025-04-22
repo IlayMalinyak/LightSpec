@@ -40,8 +40,9 @@ from nn.train import *
 from tests.test_unique_sampler import run_sampler_tests
 from features import multimodal_umap, create_umap
 import generator
+from lightspec import priority_merge_prot
 
-META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'kmag_abs']
+META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist', 'kmag_abs', 'RUWE', 'Prot']
 
 
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
@@ -54,13 +55,35 @@ torch.cuda.empty_cache()
 torch.manual_seed(1234)
 np.random.seed(1234)
 
+def get_kepler_meta_df():
+    kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
+    kepler_meta = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
+    kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+    kepler_df = kepler_df.merge(kepler_meta, on='KID', how='left').merge(kmag_df[['KID', 'KMAG']], on='KID', how='left')
+    kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
+    lightpred_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
+    lightpred_df['Prot_ref'] = 'lightpred'
+    lightpred_df.rename(columns={'predicted period': 'Prot'}, inplace=True)
+
+    santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
+    santos_df['Prot_ref'] = 'santos'
+    mcq14_df = pd.read_csv('/data/lightPred/tables/Table_1_Periodic.txt')
+    mcq14_df['Prot_ref'] = 'mcq14'
+    reinhold_df = pd.read_csv('/data/lightPred/tables/reinhold2023.csv')
+    reinhold_df['Prot_ref'] = 'reinhold'
+
+    p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
+    kepler_df = priority_merge_prot(p_dfs, kepler_df)
+    return kepler_df
 
 def create_train_test_dfs(meta_columns):
-    period_catalog = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
-    period_catalog.rename(columns={'predicted period': 'Prot'}, inplace=True)
+    period_catalog = get_kepler_meta_df()
+    # period_catalog = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
+    # period_catalog.rename(columns={'predicted period': 'Prot'}, inplace=True)
     santos_catalog = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
     frasca_catalog = Table.read('/data/lightPred/tables/frasca2016.fit', format='fits').to_pandas()
     cks_catalog = Table.read('/data/lightPred/tables/CKS2017.fit', format='fits').to_pandas()
+    kepler_meta_df = get_kepler_meta_df()
 
     kepler_apogee = pd.read_csv('/data/apogee/crossmatched_catalog_Kepler.csv')
     kepler_apogee = kepler_apogee[~kepler_apogee['APOGEE_VSINI'].isna()].rename(columns={'APOGEE_VSINI': 'vsini'})
@@ -90,16 +113,23 @@ def create_train_test_dfs(meta_columns):
 
     final_df = pd.concat([final_apogee, final_frasca, final_cks])
     print("final frasca: ", len(final_frasca), " final apogee: ", len(final_apogee), "final cks", len(final_cks), " final df: ", len(final_df))
-    berger_catalog = pd.read_csv('/data/lightPred/tables/berger_catalog.csv')
-    final_df = final_df.merge(berger_catalog, on='KID', suffixes=['', '_berger'])
-    kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
-    final_df = final_df.merge(kmag_df[['KID', 'KMAG']], on='KID', how='left')
-    final_df['kmag_abs'] = final_df['KMAG'] - 5 * np.log10(final_df['Dist']) + 5
-    
-    final_df['sin_inc'] = (final_df['vsini'] * final_df['Prot'] * 24 * 3600
+    # berger_catalog = pd.read_csv('/data/lightPred/tables/berger_catalog.csv')
+    # kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+    # final_df = final_df.merge(kmag_df[['KID', 'KMAG']], on='KID', how='left')
+    # final_df['kmag_abs'] = final_df['KMAG'] - 5 * np.log10(final_df['Dist']) + 5
+    # final_df = final_df.merge(kepler_meta_df[META_COLUMNS], on='KID', how='left').rename(columns={'Prot_x': 'Prot'})
+
+    kois = pd.read_csv('/data/lightPred/tables/kois.csv')
+    kois =  kois[kois['koi_disposition'] == 'CONFIRMED']
+    kois = kois[['KID','kepoi_name','kepler_name','koi_disposition', 'planet_Prot']]
+    final_df = final_df.merge(kois, on='KID', how='left')
+
+    print("kois general : ", len(kois), " kois in final df: ", len(final_df[~final_df['kepoi_name'].isna()]))
+
+    final_df['cos_inc'] = (final_df['vsini'] * final_df['Prot'] * 24 * 3600
                                 / (2 * np.pi * final_df['Rstar'] * R_SUN_KM) )
-    final_df['log_sin_inc'] = -np.log(final_df['sin_inc'] + 1e-3)
-    final_df['inc'] = np.arcsin(final_df['sin_inc']) * 180 / np.pi
+    final_df['log_cos_inc'] = -np.log(final_df['cos_inc'] + 1e-3)
+    final_df['inc'] = np.arccos(final_df['cos_inc']) * 180 / np.pi # here im using arccos becasue the real angle is 90 - inc
     final_df['norm_vsini'] = (final_df['vsini'] - final_df['vsini'].min()) / (final_df['vsini'].max() - final_df['vsini'].min())
     final_df['norm_Prot'] = (final_df['Prot'] - final_df['Prot'].min()) / (final_df['Prot'].max() - final_df['Prot'].min())
     final_df = final_df[~final_df['inc'].isna()]
@@ -111,17 +141,21 @@ def create_train_test_dfs(meta_columns):
      " lamost-kepler-apogee:", len(lamost_kepler_df), " lamost_kepler_apogee_periods_1", len(lamost_kepler_periods_1),
      " lamost_kepler_apogee_periods_2", len(lamost_kepler_periods_2), " final_df", len(final_df)
     )
-    print("final_df columns: ", final_df.columns)
     
     for ref in final_df['vsini_ref'].unique():
         print("ref: ", ref, " samples: ", len(final_df[final_df['vsini_ref'] == ref]))
         ref_df = train_df[train_df['vsini_ref'] == ref]
         if len(ref_df) < 20:
             continue
-        plt.hist(ref_df['log_sin_inc'], bins=40, histtype='step', density=True, label=ref)
+        plt.hist(ref_df['cos_inc'], bins=40, histtype='step', density=True, label=ref)
+    kois_df = final_df[final_df['koi_disposition'] == 'CONFIRMED']
+    print("kois df: ", len(kois_df))
+    plt.hist(kois_df['cos_inc'], bins=40, histtype='step', density=True, label='KOI')
     plt.legend()
-    plt.savefig(f"/data/lightSpec/images/log_sin_inc_hist.png")
+    plt.savefig(f"/data/lightSpec/images/cos_inc_hist.png")
     plt.close()
+
+    final_df.to_csv('/data/lightSpec/finetune_inc.csv', index=False)
 
 
     return train_df, val_df 
@@ -145,7 +179,10 @@ os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
                                                                                  create_train_test_dfs,
-                                                                                 dataset_name='FineTune')
+                                                                                dataset_name='FineTune')
+for i in range(10):
+    light, spec, y, light2, spec2, info = train_dataset[i]
+    print("train dataset: ", light.shape, light2.shape,  spec.shape, spec2.shape, y)
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,
@@ -167,19 +204,22 @@ test_dataloader = DataLoader(test_dataset,
                             collate_fn=kepler_collate_fn,
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
-
 for i in range(10):
     light, spec, y, light2, spec2, info = train_dataset[i]
     print("train dataset: ", light.shape, light2.shape,  spec.shape, spec2.shape, y)
 
-_, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
+model, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
 # test_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Test_Tuner'])
 
-light_model = light_model.to(local_rank)
-model = DDP(light_model, device_ids=[local_rank], find_unused_parameters=True)
-# model = SimpleRegressor(light_model.simsiam.encoder, test_args).to(local_rank)
-# model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+batch = next(iter(train_dataloader))
+lc, spec, y, lc2, spec2, info = batch
+latent_vars = data_args.prediction_labels_lightspec
+latent = torch.stack([torch.tensor([i[j] for j in latent_vars]) for i in info])
+print("latent: ", latent.shape, " y: ", y.shape)
+y_hat = model(lc, spec, latent=latent)
+print("y_hat: ", y_hat.shape, " y: ", y.shape)
+exit()
 loss_fn = CQR(quantiles=optim_args.quantiles)
 # loss_fn = torch.nn.L1Loss()
 optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))

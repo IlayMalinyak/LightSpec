@@ -468,6 +468,7 @@ class DualFormer(nn.Module):
         pooling: str = "mean",  # Options: mean, max, cls, none
         use_cls_token: bool = False,
         use_prediction_head: bool = False,
+        latent_dim: int = 0
     ):
         super().__init__()
         
@@ -494,7 +495,7 @@ class DualFormer(nn.Module):
                                 nn.Linear(embed_dim//2, output_dim)
         )
 
-        self.projection_head = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.projection_head = nn.Linear(embed_dim + latent_dim, embed_dim + latent_dim, bias=False)
 
         
         # Create CLS tokens if needed
@@ -562,6 +563,7 @@ class DualFormer(nn.Module):
         x2: torch.Tensor,
         x1_padding_mask: Optional[torch.Tensor] = None,
         x2_padding_mask: Optional[torch.Tensor] = None,
+        latent_variables: Optional[torch.Tensor] = None,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
     ) -> Union[
@@ -649,16 +651,25 @@ class DualFormer(nn.Module):
         else:
             mod1_output = x1
             mod2_output = x2
+            
+        if latent_variables is not None:
+            mod1_output = torch.cat([mod1_output, latent_variables], dim=-1)
+            mod2_output = torch.cat([mod2_output, latent_variables], dim=-1)
+        
         output_dict = {
             "emb1": mod1_output,
             "emb2": mod2_output,
         }
+
 
         proj1 = self.projection_head(mod1_output)
         proj2 = F.linear(mod2_output, self.projection_head.weight.t(), bias=None)
 
         output_dict["proj1"] = proj1
         output_dict["proj2"] = proj2
+
+        # symmetry_loss = torch.norm(self.projection_head.weight - self.projection_head.weight.t())
+        # output_dict["symmetry_loss"] = symmetry_loss
 
         if self.use_prediction_head:
             pred1 = self.prediction_head1(mod1_output)

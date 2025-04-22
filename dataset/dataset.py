@@ -673,7 +673,7 @@ class KeplerDataset():
         info['Teff'] = info['TEFF']
         info['Mstar'] = info['M']
         info['logg'] = info['LOGG']
-        info['R'] = info['RADIUS']
+        info['Rstar'] = info['RADIUS']
         info['kmag_abs'] = info['KMAG']
        
         info['KID'] = self.df.iloc[idx]['KID']

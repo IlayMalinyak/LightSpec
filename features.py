@@ -8,6 +8,125 @@ from tqdm import tqdm
 import os
 import matplotlib.pyplot as plt
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+def features_analysis(model, device, linear_layer, dataloader, top_k=3, use_y_as_latent=True):
+    model.eval()
+
+    weight = linear_layer.weight.detach()
+    
+    # Calculate eigenvalues and eigenvectors
+    # For a non-symmetric matrix, we need to use torch.linalg.eig
+    # For a symmetric matrix, we could use torch.linalg.eigh
+    if torch.allclose(weight, weight.t(), atol=1e-6):
+        # Symmetric case - eigenvalues are real
+        eigenvalues, eigenvectors = torch.linalg.eigh(weight)
+        # Sort in descending order of eigenvalues
+        idx = torch.argsort(eigenvalues, descending=True)
+        eigenvalues = eigenvalues[idx]
+        eigenvectors = eigenvectors[:, idx]
+    else:
+        # Non-symmetric case - eigenvalues may be complex
+        eigenvalues_complex, eigenvectors_complex = torch.linalg.eig(weight)
+        # For simplicity, we'll take the magnitude of complex eigenvalues
+        eigenvalues_mag = torch.abs(eigenvalues_complex)
+        idx = torch.argsort(eigenvalues_mag, descending=True)
+        eigenvalues = eigenvalues_complex[idx]
+        eigenvectors = eigenvectors_complex[:, idx]
+        
+        # Note: In practice, you might want to handle complex eigenvectors differently
+        # Here we'll just take the real part for demonstration
+        if torch.is_complex(eigenvectors):
+            print("Warning: Complex eigenvectors detected. Using real part for projections.")
+            eigenvectors = eigenvectors.real
+    
+    # Normalize eigenvectors
+    eigenvectors = F.normalize(eigenvectors, dim=0)
+    
+    for batch in dataloader:
+        lc, spectra, y, lc_target, spectra_target, info = batch
+        lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
+        latent = y.nan_to_num(-1) if self.use_y_as_latent else None
+        out = self.model(lc ,spectra, latent=latent)
+        dual_pred = out['dual_pred']
+        lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
+        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']
+        eigenvalues, eigenvectors, top_projections = analyze_eigenspace_projections(linear_layer, lc_emb, top_k=top_k)
+        eigenvalues2, eigenvectors2, top_projections2 = analyze_eigenspace_projections(linear_layer, spec_emb, top_k=top_k)
+
+        print(f"Eigenvalues: {eigenvalues}")
+        print(f"Eigenvectors: {eigenvectors}")
+        print(f"Top {top_k} projections: {top_projections}")
+
+
+def analyze_eigenspace_projections(linear_layer, batch_vectors, top_k=3):
+    """
+    Calculate eigenvectors and eigenvalues of a linear layer's weight matrix,
+    then project input vectors onto this eigenspace and identify the most significant components.
+    
+    Args:
+        linear_layer (nn.Linear): PyTorch linear layer
+        batch_vectors (torch.Tensor): Batch of vectors with shape [batch_size, embed_dim]
+        top_k (int): Number of top projections to return
+        
+    Returns:
+        tuple: (eigenvalues, eigenvectors, top_projections)
+            - eigenvalues: Sorted eigenvalues (largest first)
+            - eigenvectors: Corresponding eigenvectors
+            - top_projections: Dict with 'values' and 'indices' of top-k projections for each vector
+    """
+    # Get the weight matrix from the linear layer
+    weight = linear_layer.weight.detach()
+    
+    # Calculate eigenvalues and eigenvectors
+    # For a non-symmetric matrix, we need to use torch.linalg.eig
+    # For a symmetric matrix, we could use torch.linalg.eigh
+    if torch.allclose(weight, weight.t(), atol=1e-6):
+        # Symmetric case - eigenvalues are real
+        eigenvalues, eigenvectors = torch.linalg.eigh(weight)
+        # Sort in descending order of eigenvalues
+        idx = torch.argsort(eigenvalues, descending=True)
+        eigenvalues = eigenvalues[idx]
+        eigenvectors = eigenvectors[:, idx]
+    else:
+        # Non-symmetric case - eigenvalues may be complex
+        eigenvalues_complex, eigenvectors_complex = torch.linalg.eig(weight)
+        # For simplicity, we'll take the magnitude of complex eigenvalues
+        eigenvalues_mag = torch.abs(eigenvalues_complex)
+        idx = torch.argsort(eigenvalues_mag, descending=True)
+        eigenvalues = eigenvalues_complex[idx]
+        eigenvectors = eigenvectors_complex[:, idx]
+        
+        # Note: In practice, you might want to handle complex eigenvectors differently
+        # Here we'll just take the real part for demonstration
+        if torch.is_complex(eigenvectors):
+            print("Warning: Complex eigenvectors detected. Using real part for projections.")
+            eigenvectors = eigenvectors.real
+    
+    # Normalize eigenvectors
+    eigenvectors = F.normalize(eigenvectors, dim=0)
+    
+    # Project batch vectors onto eigenvectors
+    # Shape: [batch_size, embed_dim] @ [embed_dim, embed_dim] -> [batch_size, embed_dim]
+    projections = batch_vectors @ eigenvectors
+    
+    # Get the top-k projections for each vector
+    projection_magnitudes = torch.abs(projections)
+    top_values, top_indices = torch.topk(projection_magnitudes, k=min(top_k, projections.shape[1]), dim=1)
+    
+    # Create a result dictionary with the top projections
+    top_projections = {
+        'values': projections.gather(1, top_indices),  # Get actual projection values (with sign)
+        'indices': top_indices,  # Eigenvalue indices (sorted by magnitude)
+        'eigenvalues': eigenvalues[top_indices]  # Corresponding eigenvalues
+    }
+    
+    return eigenvalues, eigenvectors, top_projections
+
+
 def create_umap(model,
                 dl,
                 device,

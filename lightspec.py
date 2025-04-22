@@ -40,7 +40,7 @@ from util.utils import *
 from nn.optim import CQR
 from nn.train import ContrastiveTrainer, JEPATrainer, DualFormerTrainer
 from tests.test_unique_sampler import run_sampler_tests
-from features import create_umap
+from features import create_umap, analyze_eigenspace_projections
 import generator
 
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist', 'kmag_abs', 'RUWE', 'Prot']
@@ -56,6 +56,44 @@ np.random.seed(1234)
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"lightspec_{current_date}"
+
+def predict_and_save_dl(dl, local_rank, name, trainer):
+    rank = torch.distributed.get_rank()
+    targets, kids, eigenvalues, eigenvectors, projections, \
+    umap_comb, umap_proj = trainer.predict(dl, local_rank, load_best=False)
+
+    df = pd.DataFrame({'kid': kids, 'umap_comb_X': umap_comb[:, 0], 'umap_comb_Y': umap_comb[:, 1],
+                       'umap_proj_X': umap_proj[:, 0], 'umap_proj_Y': umap_proj[:, 1]})
+    # top_k = top_idx_comb.shape[1]
+    # for i in range(1, top_k + 1):
+    #     df[f'top_idx_comb_{i}'] = top_idx_comb[:, i - 1]
+    #     df[f'top_values_comb_{i}'] = top_values_comb[:, i - 1]
+    
+    # Save rank-specific CSV file for data predictions
+    df.to_csv(f"{data_args.log_dir}/{datetime_dir}/preds_{exp_num}_{name}_{rank}.csv", index=False)
+    
+    # Only save eigenvalues and eigenvectors once (from rank 0)
+    if rank == 0:
+        np.save(f"{data_args.log_dir}/{datetime_dir}/eigenvalues_{exp_num}_{name}.npy", eigenvalues)
+        np.save(f"{data_args.log_dir}/{datetime_dir}/eigenvectors_{exp_num}_{name}.npy", eigenvectors)
+        np.save(f"{data_args.log_dir}/{datetime_dir}/projections_{exp_num}_{name}.npy", projections)
+    
+    print("results saved in", f"{data_args.log_dir}/{datetime_dir}/preds_{exp_num}_{name}_{rank}.csv")
+# Function to aggregate results after all GPUs are done
+def aggregate_results(name, num_gpus):
+    all_dfs = []
+    for rank in range(num_gpus):
+        df_path = f"{data_args.log_dir}/{datetime_dir}/preds_{exp_num}_{name}_{rank}.csv"
+        if os.path.exists(df_path):
+            df = pd.read_csv(df_path)
+            all_dfs.append(df)
+    
+    if all_dfs:
+        # Concatenate all dataframes
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        # Save the combined results
+        combined_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/preds_{exp_num}_{name}.csv", index=False)
+        print(f"Combined results saved to {data_args.log_dir}/{datetime_dir}/preds_{exp_num}_{name}.csv")
 
 def priority_merge_prot(dataframes, target_df):
     """
@@ -93,7 +131,7 @@ def priority_merge_prot(dataframes, target_df):
     return result
 
 
-def create_train_test_dfs(meta_columns):
+def create_train_test_dfs(meta_columns, only_main_seq=True):
     kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
     kepler_meta = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
     kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
@@ -119,7 +157,10 @@ def create_train_test_dfs(meta_columns):
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
     lamost_kepler_df = lamost_kepler_df.merge(kepler_df[META_COLUMNS], on='KID', how='inner')
     lamost_kepler_df['main_seq'] = lamost_kepler_df.apply(giant_cond, axis=1)
-    lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==True]
+    if only_main_seq:
+        lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==True]
+    # else:
+    #     lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==False]
     # lamost_kepler_df = lamost_kepler_df.dropna(subset=norm_cols)
     train_df, val_df  = train_test_split(lamost_kepler_df, test_size=0.2, random_state=42)
     print("number of samples kepler: ", len(kepler_df),  " lamost-kepler :", len(lamost_kepler_df))
@@ -135,185 +176,193 @@ def test_dataset_samples(ds, num_iters=10):
         # if light.sum() == 0:
         #     no_founds += 1
         # # print(light.shape, spec.shape, w.shape, info.keys())
-        # if i % 10 == 0:
-        #     fig, axes = plt.subplots(1,2, figsize=(24,14))
-        #     axes[0].plot(light[0].cpu().numpy())
-        #     axes[1].plot(spec.cpu().numpy())
-        #     axes[0].set_title(f"Lightcurve: {info['KID']}")
-        #     axes[1].set_title(f"Spectrum: {info['obsid']}")
-        #     plt.savefig(f'/data/lightSpec/images/lightspec_{i}.png')
-        #     plt.close()
+        if i % 10 == 0:
+            fig, axes = plt.subplots(1,2, figsize=(24,14))
+            axes[0].plot(light[0].cpu().numpy())
+            axes[1].plot(spec.cpu().numpy())
+            axes[0].set_title(f"Lightcurve: {info['KID']}")
+            axes[1].set_title(f"Spectrum: {info['obsid']}")
+            plt.savefig(f'/data/lightSpec/images/lightspec_giants_{i}.png')
+            plt.close()
     print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.4f} seconds." \
         f"avg per iteration: {(time.time() - start_time)/num_iters:.6f} seconds")
 
 
+if __name__ == "__main__":
+    local_rank, world_size, gpus_per_node = setup()
+    args_dir = '/data/lightSpec/nn/full_config.yaml'
+    data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
+    exp_num = data_args.exp_num
+    light_model_name = data_args.light_model_name
+    spec_model_name = data_args.spec_model_name
+    combined_model_name = data_args.combined_model_name
+    if data_args.test_run:
+        datetime_dir = f"test_{current_date}"
 
-local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/full_config.yaml'
-data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-exp_num = data_args.exp_num
-light_model_name = data_args.light_model_name
-spec_model_name = data_args.spec_model_name
-combined_model_name = data_args.combined_model_name
-if data_args.test_run:
-    datetime_dir = f"test_{current_date}"
-
-os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
-
-
-train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
-                                                 data_generation_fn=create_train_test_dfs,
-                                                  dataset_name='LightSpec')
-
-test_dataset_samples(train_dataset, num_iters=10)
-
-# train_dataloader = create_unique_loader(train_dataset,
-#                                       batch_size=int(data_args.batch_size), \
-#                                       num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-#                                       collate_fn=kepler_collate_fn )
-
-# val_dataloader = create_unique_loader(val_dataset,
-#                                     batch_size=int(data_args.batch_size),
-#                                     num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-#                                     collate_fn=kepler_collate_fn,
-#                                      drop_last=True
-#                                     )
-
-# test_dataloader = DataLoader(test_dataset,
-#                              batch_size=int(data_args.batch_size),
-#                              collate_fn=kepler_collate_fn,
-#                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-#                              drop_last=True
-                            #  )
-
-train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
-train_dataloader = DataLoader(train_dataset,
-                              batch_size=int(data_args.batch_size), \
-                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                              collate_fn=kepler_collate_fn,
-                              sampler=train_sampler
-                              )
-
-val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
-val_dataloader = DataLoader(val_dataset,
-                            batch_size=int(data_args.batch_size),
-                            collate_fn=kepler_collate_fn,
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                            sampler=val_sampler
-                            )
-
-test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
-test_dataloader = DataLoader(test_dataset,
-                            batch_size=int(data_args.batch_size),
-                            collate_fn=kepler_collate_fn,
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                            sampler=test_sampler
-                            )
-
-print("len train dataloader ", len(train_dataloader))
+    os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 
 
-model, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args,
-                                                                                 args_dir,
-                                                                                  complete_config,
-                                                                                local_rank,
-                                                                                )
+    train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
+                                                    data_generation_fn=create_train_test_dfs,
+                                                    dataset_name='LightSpec')
 
-batch = next(iter(train_dataloader))
-lc1, spec1, lc2, spec2, y, info = batch
+    test_dataset_samples(train_dataset, num_iters=100)
 
-# output = model(lc1, spec1)
-# print("output keys: ", output.keys())
-# print(output['lc_pred'].shape, output['spectra_pred'].shape, output['dual_pred'][0].shape, output['dual_pred'][1].shape)
-# exit()
+    # train_dataloader = create_unique_loader(train_dataset,
+    #                                       batch_size=int(data_args.batch_size), \
+    #                                       num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+    #                                       collate_fn=kepler_collate_fn )
 
-if data_args.approach == 'ssl':
-    loss_fn = None
-    num_quantiles = 1
-elif data_args.approach == 'multitask':
-    loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
-    num_quantiles = len(optim_args.quantiles)
-elif data_args.approach == 'dual_former':
-    loss_fn = nn.L1Loss(reduction='none')
-if optim_args.optimizer == 'sgd':
-    optimizer = torch.optim.SGD(model.parameters(),
-                                 lr=float(optim_args.max_lr),
-                                momentum=float(optim_args.momentum),
-                                weight_decay=float(optim_args.weight_decay),
-                                nesterov=optim_args.nesterov)
-else:
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr),
-    weight_decay=float(optim_args.weight_decay))
-scaler = GradScaler()
+    # val_dataloader = create_unique_loader(val_dataset,
+    #                                     batch_size=int(data_args.batch_size),
+    #                                     num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+    #                                     collate_fn=kepler_collate_fn,
+    #                                      drop_last=True
+    #                                     )
 
-accumulation_step = 1
-if data_args.approach != 'dual_former':
-    trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-                         scaler=scaler, grad_clip=True,
-                       scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
-                       val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                             accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
-                           use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
-                        exp_name=f"{exp_num}") 
-else:
-    trainer = DualFormerTrainer(model=model, optimizer=optimizer,
-                        criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-                         scaler=scaler, grad_clip=True,
-                       scheduler=None, train_dataloader=train_dataloader, 
-                       val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                             exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                             accumulation_step=accumulation_step, max_iter=np.inf, print_every=200,
-                              use_w=True, alpha=data_args.alpha,
-                        exp_name=f"{exp_num}")
+    # test_dataloader = DataLoader(test_dataset,
+    #                              batch_size=int(data_args.batch_size),
+    #                              collate_fn=kepler_collate_fn,
+    #                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+    #                              drop_last=True
+                                #  )
 
-# trainer = JEPATrainer(
-#                         model=model, optimizer=optimizer,
-#                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-#                         train_dataloader=train_dataloader,
-#                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-#                              exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
-#                              accumulation_step=accumulation_step, max_iter=np.inf, use_w=True,
-#                         exp_name=f"{exp_num}"
-#                         )
+    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+    train_dataloader = DataLoader(train_dataset,
+                                batch_size=int(data_args.batch_size), \
+                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                collate_fn=kepler_collate_fn,
+                                sampler=train_sampler
+                                )
 
-complete_config.update(
-    {"trainer": trainer.__dict__,
-    "loss_fn": str(loss_fn),
-    "optimizer": str(optimizer)}
-)
-   
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/{exp_num}_complete_config.yaml"
-with open(config_save_path, "w") as config_file:
-    json.dump(complete_config, config_file, indent=2, default=str)
+    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
+    val_dataloader = DataLoader(val_dataset,
+                                batch_size=int(data_args.batch_size),
+                                collate_fn=kepler_collate_fn,
+                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                sampler=val_sampler
+                                )
 
-print(f"Configuration (with model structure) saved at {config_save_path}.")
+    test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
+    test_dataloader = DataLoader(test_dataset,
+                                batch_size=int(data_args.batch_size),
+                                collate_fn=kepler_collate_fn,
+                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                sampler=test_sampler
+                                )
 
-fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=20, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{exp_num}_fit_res.json'
-with open(output_filename, "w") as f:
-    json.dump(fit_res, f, indent=2)
-fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{exp_num}.png")
-plt.clf()
-
-trainer.model.module.moco_model.calc_loss = False
-
-predict_results(trainer, val_dataloader, test_dataloader, loss_fn,
-                 data_args.prediction_labels_lightspec,
-                 data_args, optim_args, 'lightspec', exp_num,
-                  datetime_dir, local_rank, world_size)
+    print("len train dataloader ", len(train_dataloader))
 
 
-umap_df = create_umap(model, test_dataloader, local_rank, use_w=True, full_input=False, logits_key='q')
-print("umap created: ", umap_df.shape)
-print(umap_df.head())
-umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}.csv", index=False)
-print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}.csv")
+    model, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args,
+                                                                                    args_dir,
+                                                                                    complete_config,
+                                                                                    local_rank,
+                                                                                    )
 
-# convert_to_onnx(model, )
-exit()
+    # batch = next(iter(train_dataloader))
+    # lc1, spec1, lc2, spec2, y, info = batch
+
+    # A = model.module.dual_former.projection_head
+    # eigevals, egivec, topk = analyze_eigenspace_projections(A, batch)
+
+    # print(eigvals.shape, eigvecs.shape, topk.shape)
+
+    # exit()
+
+    # output = model(lc1, spec1)
+    # print("output keys: ", output.keys())
+    # print(output['lc_pred'].shape, output['spectra_pred'].shape, output['dual_pred'][0].shape, output['dual_pred'][1].shape)
+    # exit()
+
+    if data_args.approach == 'ssl':
+        loss_fn = None
+        num_quantiles = 1
+    elif data_args.approach == 'multitask':
+        loss_fn = CQR(quantiles=optim_args.quantiles, reduction='none')
+        num_quantiles = len(optim_args.quantiles)
+    elif data_args.approach == 'dual_former':
+        loss_fn = nn.L1Loss(reduction='none')
+    if optim_args.optimizer == 'sgd':
+        optimizer = torch.optim.SGD(model.parameters(),
+                                    lr=float(optim_args.max_lr),
+                                    momentum=float(optim_args.momentum),
+                                    weight_decay=float(optim_args.weight_decay),
+                                    nesterov=optim_args.nesterov)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=float(optim_args.max_lr),
+        weight_decay=float(optim_args.weight_decay))
+    scaler = GradScaler()
+
+    accumulation_step = 1
+    if data_args.approach != 'dual_former':
+        trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+                            criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+                            scaler=scaler, grad_clip=True,
+                        scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
+                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+                                exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                                accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
+                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
+                            exp_name=f"{exp_num}") 
+    else:
+        trainer = DualFormerTrainer(model=model, optimizer=optimizer,
+                            criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+                            scaler=scaler, grad_clip=True, use_y_as_latent=data_args.use_latent,
+                        scheduler=None, train_dataloader=train_dataloader, 
+                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+                                exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                                accumulation_step=accumulation_step, max_iter=np.inf, print_every=20,
+                                alpha=data_args.alpha,
+                            exp_name=f"{exp_num}")
+
+    # trainer = JEPATrainer(
+    #                         model=model, optimizer=optimizer,
+    #                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+    #                         train_dataloader=train_dataloader,
+    #                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+    #                              exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
+    #                              accumulation_step=accumulation_step, max_iter=np.inf, use_w=True,
+    #                         exp_name=f"{exp_num}"
+    #                         )
+
+    complete_config.update(
+        {"trainer": trainer.__dict__,
+        "loss_fn": str(loss_fn),
+        "optimizer": str(optimizer)}
+    )
+    
+    config_save_path = f"{data_args.log_dir}/{datetime_dir}/{exp_num}_complete_config.yaml"
+    with open(config_save_path, "w") as config_file:
+        json.dump(complete_config, config_file, indent=2, default=str)
+
+    print(f"Configuration (with model structure) saved at {config_save_path}.")
+
+    fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+                            early_stopping=20, best='loss', conf=True) 
+    output_filename = f'{data_args.log_dir}/{datetime_dir}/{exp_num}_fit_res.json'
+    with open(output_filename, "w") as f:
+        json.dump(fit_res, f, indent=2)
+    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{exp_num}.png")
+    plt.clf()
+
+    # predict_and_save_dl(train_dataloader, local_rank, 'train', trainer)
+    # predict_and_save_dl(val_dataloader, local_rank, 'val', trainer)
+    predict_and_save_dl(test_dataloader, local_rank, 'test', trainer)
+
+    # Make sure all processes are done before aggregating
+    torch.distributed.barrier()
+
+    # Only run aggregation on the main process
+    if local_rank == 0:
+        world_size = torch.distributed.get_world_size()
+        aggregate_results('train', world_size)
+        aggregate_results('val', world_size)
+        aggregate_results('test', world_size)
+
+    exit()
+
+
 
 

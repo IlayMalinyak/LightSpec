@@ -110,27 +110,36 @@ class FullGatherLayer(torch.autograd.Function):
 
 class DualNet(nn.Module):
     def __init__(self, lc_backbone, spectra_backbone, dual_former_args,
-     lc_reg_args, spectra_reg_args):
+     lc_reg_args, spectra_reg_args, freeze_backbone=False):
         super(DualNet, self).__init__()
         self.lc_backbone = lc_backbone
         self.spectra_backbone = spectra_backbone
         self.dual_former = DualFormer(**dual_former_args)
         self.lc_head = MLPHead(**lc_reg_args)
         self.spectra_head = MLPHead(**spectra_reg_args)
+        if freeze_backbone:
+            self._freeze_backbone()
+        self.freeze_backbone = freeze_backbone
         # self.loss_args = loss_args
+    
+    def _freeze_backbone(self):
+        for param in self.lc_backbone.parameters():
+            param.requires_grad = False
+        for param in self.spectra_backbone.parameters():
+            param.requires_grad = False
 
-    def forward(self, lc, spectra, w=None):
+    def forward(self, lc, spectra, latent=None):
         lc_feat = self.lc_backbone(lc)
         if isinstance(lc_feat, tuple):
             lc_feat = lc_feat[0]
         spectra_feat = self.spectra_backbone(spectra)
         if isinstance(spectra_feat, tuple):
             spectra_feat = spectra_feat[0]
-        lc_reg_pred = self.lc_head(lc_feat)
-        spectra_reg_pred = self.spectra_head(spectra_feat)
-        if w is not None:
-            w = w.nan_to_num(0)
-            spectra_feat = torch.cat((spectra_feat, w), dim=1)
-            lc_feat = torch.cat((lc_feat, w), dim=1)
-        dual_pred = self.dual_former(spectra_feat, lc_feat)
+        if not self.freeze_backbone:
+            lc_reg_pred = self.lc_head(lc_feat)
+            spectra_reg_pred = self.spectra_head(spectra_feat)
+        else:
+            lc_reg_pred = None
+            spectra_reg_pred = None
+        dual_pred = self.dual_former(spectra_feat, lc_feat, latent_variables=latent)
         return {'dual_pred': dual_pred, 'lc_pred':lc_reg_pred, 'spec_pred':spectra_reg_pred}
