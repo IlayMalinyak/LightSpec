@@ -1315,27 +1315,32 @@ class ClassificationTrainer(Trainer):
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
         return preds, targets, aggregated_info
 
+
 class RegressorTrainer(Trainer):
-    def __init__(self, use_w, only_lc=False, **kwargs):
+    def __init__(self, use_w, latent_vars, loss_weight_name=None, only_lc=False, **kwargs):
         super().__init__(**kwargs)
+        self.latent_vars = latent_vars
         self.use_w = use_w
+        self.loss_weight_name = loss_weight_name
         self.only_lc = only_lc
-    
-    def train_batch(self, batch, batch_idx, device):
-        lc, spectra, y , lc2, spectra2,info = batch
-        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
-        b = lc.shape[0]
-        w = None
-        print("lcs: ", lc.shape, lc2.shape, lc.isnan().sum(), lc2.isnan().sum())
+
+    def get_model_output(self, lc, spectra, lc2, spectra2, info, device):
+        if self.latent_vars is not None:
+            latent = torch.stack([torch.tensor([i[l] for l in self.latent_vars]) for i in info]).to(device).float()
+        else:
+            latent = None
+        if self.loss_weight_name is not None:
+            w_loss = torch.stack([torch.tensor(i[self.loss_weight_name]) for i in info]).to(device).float()
+            w_loss = 1 + torch.sqrt(w_loss)
         if self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
-            out = self.model(lc, spectra, w_tune=w) 
+            out = self.model(lc, spectra, w_tune=w)
         elif self.only_lc:
             out = self.model(lc, lc2)
         else:
-            out = self.model(lc, spectra)
+            out = self.model(lc, spectra, latent=latent)
         if isinstance(out, tuple):
-            out = out[0]
+            out, sigma = out[0], out[1]
         elif isinstance(out, dict):
             out = out['preds']
         if self.num_quantiles > 1:
@@ -1344,16 +1349,52 @@ class RegressorTrainer(Trainer):
             out = out.squeeze(1)
             if len(y.shape) == 2 and y.shape[1] == 1:
                 y = y.squeeze(1)
-        # print(out.shape, y.shape, out.isnan().sum(), y.isnan().sum())
-        loss = self.criterion(out, y)
+        return out, sigma, w_loss, latent
+
+    def train_batch(self, batch, batch_idx, device):
+        lc, spectra, y, lc2, spectra2, info = batch
+        lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+        b = lc.shape[0]
+        w = None
+        if self.latent_vars is not None:
+            latent = torch.stack([torch.tensor([i[l] for l in self.latent_vars]) for i in info]).to(device).float()
+        else:
+            latent = None
+        if self.loss_weight_name is not None:
+            w_loss = torch.stack([torch.tensor(i[self.loss_weight_name]) for i in info]).to(device).float()
+            w_loss = 1 + torch.sqrt(w_loss)
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+            out = self.model(lc, spectra, w_tune=w)
+        elif self.only_lc:
+            out = self.model(lc, lc2)
+        else:
+            out = self.model(lc, spectra, latent=latent)
+        if isinstance(out, tuple):
+            out, sigma = out[0], out[1]
+        elif isinstance(out, dict):
+            out = out['preds']
+        if self.num_quantiles > 1:
+            out = out.view(b, -1, self.num_quantiles)
+        else:
+            out = out.squeeze(1)
+            if len(y.shape) == 2 and y.shape[1] == 1:
+                y = y.squeeze(1)
+        loss = self.criterion(out, y).squeeze()
+        # sigma = sigma.squeeze()
+        # print('out: ', out.shape, 'y: ', y.shape, 'sigma: ', sigma.shape, 'loss: ', loss.shape)
+        loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+        if self.loss_weight_name is not None:
+            loss = (loss * w_loss)
+        loss = loss.mean(0).mean()
         # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape, 'loss: ', loss.shape)
         # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
-                self.scheduler.step()
+            self.scheduler.step()
         if self.num_quantiles > 1:
-            out_median = out[..., out.shape[-1]//2]
+            out_median = out[..., out.shape[-1] // 2]
             if (len(out_median.shape) == 2) and (len(y.shape) == 1):
                 out_median = out_median.squeeze(1)
         else:
@@ -1362,20 +1403,26 @@ class RegressorTrainer(Trainer):
         return loss, acc, y
 
     def eval_batch(self, batch, batch_idx, device):
-        lc, spectra,y , lc2, spectra2,info = batch
-        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        lc, spectra, y, lc2, spectra2, info = batch
+        lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
         b = lc.shape[0]
-        with torch.no_grad():
-            w = None
-            if self.use_w:
-                w = torch.stack([i['w'] for i in info]).to(device)
-                out = self.model(lc, spectra, w_tune=w) 
-            elif self.only_lc:
-                out = self.model(lc, lc2)
-            else:
-                out = self.model(lc, spectra)
+        w = None
+        if self.latent_vars is not None:
+            latent = torch.stack([torch.tensor([i[l] for l in self.latent_vars]) for i in info]).to(device).float()
+        else:
+            latent = None
+        if self.loss_weight_name is not None:
+            w_loss = torch.stack([torch.tensor(i[self.loss_weight_name]) for i in info]).to(device).float()
+            w_loss = 1 + torch.sqrt(w_loss)
+        if self.use_w:
+            w = torch.stack([i['w'] for i in info]).to(device)
+            out = self.model(lc, spectra, w_tune=w)
+        elif self.only_lc:
+            out = self.model(lc, lc2)
+        else:
+            out = self.model(lc, spectra, latent=latent)
         if isinstance(out, tuple):
-            out = out[0]
+            out, sigma = out[0], out[1]
         elif isinstance(out, dict):
             out = out['preds']
         if self.num_quantiles > 1:
@@ -1384,21 +1431,19 @@ class RegressorTrainer(Trainer):
             out = out.squeeze(1)
             if len(y.shape) == 2 and y.shape[1] == 1:
                 y = y.squeeze(1)
-        if isinstance(out, tuple):
-            out = out[0]
-        elif isinstance(out, dict):
-            out = out['preds']
-        if self.num_quantiles > 1:
-            out = out.view(b, -1, self.num_quantiles)
-        else:
-            out = out.squeeze(1)
-        loss = self.criterion(out, y)
+        loss = self.criterion(out, y).squeeze()
+        # sigma = sigma.squeeze()
+        loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+        if self.loss_weight_name is not None:
+            loss = (loss * w_loss)
+        loss = loss.mean()
+
         # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         # if self.wandb:
         #     wandb.log({"val_loss": loss.item()})
 
         if self.num_quantiles > 1:
-            out_median = out[..., out.shape[-1]//2]
+            out_median = out[..., out.shape[-1] // 2]
             if (len(out_median.shape) == 2) and (len(y.shape) == 1):
                 out_median = out_median.squeeze(1)
         else:
@@ -1413,14 +1458,17 @@ class RegressorTrainer(Trainer):
         self.model.eval()
         preds = np.zeros((0, self.output_dim, self.num_quantiles))
         targets = np.zeros((0, self.output_dim))
+        sigmas = np.zeros((0))
         tot_kic = []
         tot_teff = []
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
-        for i,(lc, spectra, y, _, _, info, _) in enumerate(pbar):
-            lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        for i, batch in enumerate(pbar):
+            lc, spectra, y, lc2, spectra2, info = batch
+            lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
             b = lc.shape[0]
+            w = None
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
@@ -1429,23 +1477,47 @@ class RegressorTrainer(Trainer):
                             aggregated_info[key] = []
                         aggregated_info[key].append(value)
             with torch.no_grad():
-                w = None
+                if self.latent_vars is not None:
+                    latent = torch.stack([torch.tensor([i[l] for l in self.latent_vars]) for i in info]).to(
+                        device).float()
+                else:
+                    latent = None
+                if self.loss_weight_name is not None:
+                    w_loss = torch.stack([torch.tensor(i[self.loss_weight_name]) for i in info]).to(device).float()
+                    w_loss = 1 + torch.sqrt(w_loss)
                 if self.use_w:
                     w = torch.stack([i['w'] for i in info]).to(device)
-                out = self.model(lc, spectra, w_tune=w)
+                    out = self.model(lc, spectra, w_tune=w)
+                elif self.only_lc:
+                    out = self.model(lc, lc2)
+                else:
+                    out = self.model(lc, spectra, latent=latent)
                 if isinstance(out, tuple):
-                    out = out[0]
+                    out, sigma = out[0], out[1]
                 elif isinstance(out, dict):
                     out = out['preds']
-                y_pred = out.view(b, -1, self.num_quantiles)
-            out_diff = int(y.shape[1] - y_pred.shape[1])
-            y = y[:, out_diff:]
-            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+                if self.num_quantiles > 1:
+                    out = out.view(b, -1, self.num_quantiles)
+                else:
+                    out = out.squeeze(1)
+                    if len(y.shape) == 2 and y.shape[1] == 1:
+                        y = y.squeeze(1)
+
+            loss = self.criterion(out, y).squeeze()
+            sigma = sigma.squeeze()
+            loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+            if self.loss_weight_name is not None:
+                loss = (loss * w_loss)
+            loss = loss.mean()
+
+            preds = np.concatenate((preds, out.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
+            sigmas = np.concatenate((sigmas, sigma.cpu().numpy()))
             if i > self.max_iter:
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets, aggregated_info
+        return preds, targets.squeeze(), sigmas.squeeze(), aggregated_info
+
 
 class MaskedRegressorTrainer(Trainer):
     def __init__(self, w_name, w_init_val, ssl_criterion, ssl_weight=0.5, **kwargs):

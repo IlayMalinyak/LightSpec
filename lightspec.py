@@ -39,7 +39,6 @@ from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
 from nn.optim import CQR
 from nn.train import ContrastiveTrainer, JEPATrainer, DualFormerTrainer
-from tests.test_unique_sampler import run_sampler_tests
 from features import create_umap, analyze_eigenspace_projections
 import generator
 

@@ -668,7 +668,6 @@ class LAMOSTSpectrumPreprocessor:
             ax[1, 0].set_title("WV Correction blue", loc='center')
             ax[1, 1].set_title("WV Correction red", loc='center')
 
-            
         # 2. Linear Interpolation Resampling (Separately)
         blue_resampled = self._linear_interpolation_resample(blue_spectrum, blue_wavelength, is_blue=True)
         red_resampled = self._linear_interpolation_resample(red_spectrum, red_wavelength, is_blue=False)

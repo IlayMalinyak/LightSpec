@@ -143,3 +143,75 @@ class DualNet(nn.Module):
             spectra_reg_pred = None
         dual_pred = self.dual_former(spectra_feat, lc_feat, latent_variables=latent)
         return {'dual_pred': dual_pred, 'lc_pred':lc_reg_pred, 'spec_pred':spectra_reg_pred}
+
+
+class FineTuner(nn.Module):
+    def __init__(self, model, head_args, method='dualformer'):
+        super(FineTuner, self).__init__()
+        print("head args: ", head_args)
+        self.model = model
+        # self.head = MLPHead(**head_args)
+        self.head = nn.Sequential(
+            nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
+            nn.LayerNorm(head_args['hidden_dim']),
+            nn.SiLU(),
+            nn.Linear(head_args['hidden_dim'], 1)
+        )
+        self.sigma_head = nn.Sequential(
+            nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
+            nn.LayerNorm(head_args['hidden_dim']),
+            nn.SiLU(),
+            nn.Linear(head_args['hidden_dim'], 1)
+        )
+
+        self.method = method
+        if method == 'dualformer':
+            self.A = self.model.dual_former.projection_head.weight.detach()
+            self.eigenvalues, self.eigenvectors = self._get_eigenspace(self.A)
+
+    def _get_eigenspace(self, weight):
+        print("max diff weight", torch.max(torch.abs(weight - weight.t())).item())
+        if torch.abs(weight - weight.t()).sum() < 1e-6:
+            print("Weight matrix is symmetric. Using eigendecomposition.")
+            # Symmetric case - eigenvalues are real
+            eigenvalues, eigenvectors = torch.linalg.eigh(weight)
+            # Sort in descending order of eigenvalues
+            idx = torch.argsort(eigenvalues, descending=True)
+            eigenvalues = eigenvalues[idx]
+            eigenvectors = eigenvectors[:, idx]
+        else:
+            print("Warning: Weight matrix is not symmetric. error is: ", torch.abs(weight - weight.t()).sum())
+            # Non-symmetric case - eigenvalues may be complex
+            eigenvalues_complex, eigenvectors_complex = torch.linalg.eig(weight)
+            # For simplicity, we'll take the magnitude of complex eigenvalues
+            eigenvalues_mag = torch.abs(eigenvalues_complex)
+            idx = torch.argsort(eigenvalues_mag, descending=True)
+            eigenvalues = eigenvalues_complex[idx]
+            eigenvectors = eigenvectors_complex[:, idx]
+
+            # Note: In practice, you might want to handle complex eigenvectors differently
+            # Here we'll just take the real part for demonstration
+            if torch.is_complex(eigenvectors):
+                print("Warning: Complex eigenvectors detected. Using real part for projections.")
+                eigenvectors = eigenvectors.real
+
+        # Normalize eigenvectors
+        eigenvectors = F.normalize(eigenvectors, dim=0)
+
+        return eigenvalues, eigenvectors
+
+    def forward(self, lc, spectra, latent=None):
+        model_out = self.model(lc, spectra, latent)
+        if self.method == 'dualformer':
+            dual_pred = model_out['dual_pred']
+            lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']
+            proj_lc, proj_spec = dual_pred['proj1'], dual_pred['proj2']
+
+            final_features = (spec_emb + lc_emb) @ self.eigenvectors
+            # final_features = torch.cat((spec_emb, lc_emb), dim=1)
+            # final_features = torch.cat((proj_lc, proj_spec), dim=1)
+        elif self.method == 'moco':
+            final_features = model_out['q']
+        predictions = self.head(final_features)
+        sigma = self.sigma_head(final_features)
+        return predictions, sigma

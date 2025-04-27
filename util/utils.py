@@ -19,26 +19,47 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
 def setup():
     """
     Setup the distributed training environment.
+    Works in both Slurm multi-GPU and non-Slurm single-GPU environments.
     """
-    world_size    = int(os.environ["WORLD_SIZE"])
-    rank          = int(os.environ["SLURM_PROCID"])
-    jobid         = int(os.environ["SLURM_JOBID"])
-    gpus_per_node = torch.cuda.device_count()
-    print('jobid ', jobid)
-    print('gpus per node ', gpus_per_node)
-    print(f"Hello from rank {rank} of {world_size} where there are" \
-          f" {gpus_per_node} allocated GPUs per node. ", flush=True)
+    # Check if running in a Slurm environment
+    in_slurm = "SLURM_PROCID" in os.environ and "WORLD_SIZE" in os.environ
 
-    # initialize the process group
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    
-    if rank == 0: print(f"Group initialized? {dist.is_initialized()}", flush=True)
-    local_rank = rank - gpus_per_node * (rank // gpus_per_node)
-    torch.cuda.set_device(local_rank)
-    print(f"rank: {rank}, local_rank: {local_rank}")
+    if in_slurm:
+        # Multi-GPU Slurm setup
+        world_size = int(os.environ["WORLD_SIZE"])
+        rank = int(os.environ["SLURM_PROCID"])
+        jobid = int(os.environ["SLURM_JOBID"])
+        gpus_per_node = torch.cuda.device_count()
+        print('jobid ', jobid)
+        print('gpus per node ', gpus_per_node)
+        print(f"Hello from rank {rank} of {world_size} where there are" \
+              f" {gpus_per_node} allocated GPUs per node. ", flush=True)
+
+        # Initialize the process group
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+        if rank == 0:
+            print(f"Group initialized? {dist.is_initialized()}", flush=True)
+        local_rank = rank - gpus_per_node * (rank // gpus_per_node)
+        torch.cuda.set_device(local_rank)
+        print(f"rank: {rank}, local_rank: {local_rank}")
+    else:
+        # Single-GPU non-Slurm setup
+        world_size = 1
+        rank = 0
+        gpus_per_node = 1
+        local_rank = 0
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            print(f"Running in single-GPU mode on device: {local_rank}")
+        else:
+            print("No GPU detected, running on CPU")
+
     return local_rank, world_size, gpus_per_node
 
 class Container(object):
@@ -375,7 +396,7 @@ def get_all_samples_df(num_qs:int=8, read_from_csv:bool=True):
         pd.DataFrame: The DataFrame of all samples.
     """
     if read_from_csv:
-        kepler_df = pd.read_csv('/data/lightPred/tables/all_kepler_samples.csv')
+        kepler_df = pd.read_csv('../../kepler/data/lightPred/tables/all_kepler_samples.csv')
     else:
         kepler_df = multi_quarter_kepler_df('/data/lightPred/data/', table_path=None, Qs=np.arange(3,17))
     try:

@@ -1,0 +1,58 @@
+Data:
+  # Basics
+  log_dir: '../logs'
+  # Data
+  dataset: "KeplerDataset"
+  data_dir: '../../Kepler/data/lightPred/data'
+  model_name: "MultiEncoder"
+  batch_size: 2
+  num_epochs: 1000
+  exp_num: 2
+  max_days_lc: 270
+  max_len_lc: 4096
+  lc_freq: 0.0208
+  create_umap: False
+  masked_transform: False
+
+Conformer:
+  encoder: ["mhsa_pro", "conv", "ffn"]
+  timeshift: false
+  num_layers: 4
+  stride: 2
+  encoder_dim: 256
+  num_heads: 8
+  kernel_size: 3
+  dropout_p: 0.2
+  norm: "shortcut"
+
+
+MultiEncoder:
+  # Model
+  in_channels: 1
+  num_layers: 6
+  stride: 1
+  encoder_dims: [32,64,128,256]
+  kernel_size: 3
+  dropout_p: 0.3
+  output_dim: 2
+  beta: 1
+  load_checkpoint: False
+  checkpoint_num: 1
+  activation: "sine"
+  sine_w0: 1.0
+  avg_output: True
+  checkpoint_path: '/data/lightSpec/logs/light_2025-01-07/MultiEncoder_lc_2.pth'
+
+Optimization SSL:
+  # Optimization
+  max_lr: 5e-5
+  weight_decay: 1e-5
+  warmup_pct: 0.15
+  steps_per_epoch: 2500
+
+Optimization:
+  # Optimization
+  max_lr: 1e-5
+  weight_decay: 5e-6
+  warmup_pct: 0.3
+  steps_per_epoch: 3500

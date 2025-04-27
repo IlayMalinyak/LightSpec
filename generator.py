@@ -39,7 +39,6 @@ from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp, deepnorm_init
 from util.utils import *
 from nn.train import *
-from tests.test_unique_sampler import run_sampler_tests
 from features import multimodal_umap, create_umap
 
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder,
@@ -58,7 +57,7 @@ def get_kepler_data(data_args, df, transforms):
     return KeplerDataset(df=df,
                         transforms=transforms,
                         target_transforms=transforms,
-                        npy_path = '/data/lightPred/data/raw_npy',
+                        npy_path = '../../kepler/data/lightPred/data/raw_npy',
                         seq_len=int(data_args.max_len_lc),
                         masked_transforms = data_args.masked_transform,
                         use_acf=data_args.use_acf,
@@ -78,7 +77,7 @@ def get_lightspec_data(data_args, df, light_transforms, spec_transforms):
     return LightSpecDataset(df=df,
                             light_transforms=light_transforms,
                             spec_transforms=spec_transforms,
-                            npy_path = '/data/lightPred/data/raw_npy',
+                            npy_path = '../../kepler/data/lightPred/data/raw_npy',
                             spec_path = data_args.spectra_dir,
                             light_seq_len=int(data_args.max_len_lc),
                             spec_seq_len=int(data_args.max_len_spectra),
@@ -94,7 +93,7 @@ def get_finetune_data(data_args, df, light_transforms, spec_transforms):
     return FineTuneDataset(df=df,
                             light_transforms=light_transforms,
                             spec_transforms=spec_transforms,
-                            npy_path = '/data/lightPred/data/raw_npy',
+                            npy_path = '../../kepler/data/lightPred/data/raw_npy',
                             spec_path = data_args.spectra_dir,
                             light_seq_len=int(data_args.max_len_lc),
                             spec_seq_len=int(data_args.max_len_spectra),
@@ -199,13 +198,13 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
     )
     return train_dataset, val_dataset, test_dataset, config
 
+
 def get_model(data_args,
-            args_dir,
-            config,
-             local_rank,
-             load_individuals=False,
-             freeze=False):
-    
+              args_dir,
+              config,
+              local_rank,
+              load_individuals=False,
+              freeze=False):
     light_model_name = data_args.light_model_name
     spec_model_name = data_args.spec_model_name
     light_model_args = Container(**yaml.safe_load(open(args_dir, 'r'))[f'{light_model_name}_lc'])
@@ -230,7 +229,7 @@ def get_model(data_args,
     dual_former_args.latent_dim = latent_dim
     print("latent dim: ", latent_dim)
 
-    tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
+    # tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
     # light_model_args.in_channels = data_args.in_channels_lc
     predictor_args.w_dim = len(data_args.meta_columns_lightspec)
     # lstm_args_lc.seq_len = int(data_args.max_len_lc)
@@ -248,10 +247,10 @@ def get_model(data_args,
     print(f"Number of trainble parameters in lc encoder: {num_params_lc}")
 
     spec_model = MODELS[spec_model_name](spec_model_args, conformer_args=conformer_args_spec)
-    
-    # Apply DeepNorm initialization to the spectra model
-    deepnorm_init(spec_model, conformer_args_spec)
-    
+
+    # # Apply DeepNorm initialization to the spectra model
+    # deepnorm_init(spec_model, conformer_args_spec)
+
     spec_model = init_model(spec_model, spec_model_args)
 
     num_params_spec_all = sum(p.numel() for p in spec_model.parameters() if p.requires_grad)
@@ -262,23 +261,6 @@ def get_model(data_args,
     light_model_state = light_model.state_dict()
     spec_model_state = spec_model.state_dict()
 
-
-
-    # moco = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
-    #                          transformer_args_lightspec,
-    #                          predictor_args.get_dict(),
-    #                          loss_args,
-    #                          **moco_args.get_dict()).to(local_rank)
-    
-    # Apply DeepNorm initialization to the MoCo transformer components
-    # Only the shared encoder is a transformer architecture
-    # print("Applying DeepNorm initialization to MoCo transformer components")
-    # print(f"Using transformer_args_lightspec with num_layers={transformer_args_lightspec.num_layers}, beta={getattr(transformer_args_lightspec, 'beta', 1.0)}")
-    # deepnorm_init(moco.shared_encoder_q, transformer_args_lightspec)
-    # deepnorm_init(moco.shared_encoder_k, transformer_args_lightspec)
-
-    # model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
-
     # Commenting out JEPA code
     lc_reg_args = predictor_args.get_dict().copy()
     lc_reg_args['in_dim'] = light_model.simsiam.encoder.output_dim
@@ -288,18 +270,42 @@ def get_model(data_args,
     spectra_reg_args['in_dim'] = spec_model.encoder.output_dim
     spectra_reg_args['out_dim'] = len(data_args.prediction_labels_spec) * len(optim_args.quantiles)
     spectra_reg_args['w_dim'] = 0
+    moco_args.freeze_lightcurve = data_args.freeze_backbone
+    moco_args.freeze_spectra = data_args.freeze_backbone
 
-    model = DualNet(light_model.simsiam.encoder, spec_model.encoder, dual_former_args.get_dict(),
-                     lc_reg_args, spectra_reg_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
+    if data_args.approach == 'dual_former':
 
-    print("Applying DeepNorm initialization to DualNet transformer components")
-    deepnorm_init(model.dual_former, dual_former_args)
+        model = DualNet(light_model.simsiam.encoder, spec_model.encoder, dual_former_args.get_dict(),
+                        lc_reg_args, spectra_reg_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
 
-    # model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
-    #  lc_reg_args, spectra_reg_args, loss_args).to(local_rank)
-    
-    # # Apply DeepNorm initialization to the JEPA transformer components
-    # deepnorm_init(model.vicreg_predictor, transformer_args_jepa)
+        print("Applying DeepNorm initialization to DualNet transformer components")
+        deepnorm_init(model.dual_former, dual_former_args)
+
+        tuner_args.in_dim = (dual_former_args.embed_dim + latent_dim)
+
+    elif data_args.approach == 'jepa':
+
+        model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
+                               lc_reg_args, spectra_reg_args, loss_args, freeze_backbone=data_args.freeze_backbone).to(
+            local_rank)
+
+        # Apply DeepNorm initialization to the JEPA transformer components
+        deepnorm_init(model.vicreg_predictor, transformer_args_jepa)
+
+    elif data_args.approach == 'moco':
+        # model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
+        model = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
+                               transformer_args_lightspec,
+                               predictor_args.get_dict(),
+                               loss_args,
+                               **moco_args.get_dict()).to(local_rank)
+        # Apply DeepNorm initialization to the MoCo transformer components
+        # Only the shared encoder is a transformer architecture
+        print("Applying DeepNorm initialization to MoCo transformer components")
+        print(
+            f"Using transformer_args_lightspec with num_layers={transformer_args_lightspec.num_layers}, beta={getattr(transformer_args_lightspec, 'beta', 1.0)}")
+        deepnorm_init(model.shared_encoder_q, transformer_args_lightspec)
+        deepnorm_init(model.shared_encoder_k, transformer_args_lightspec)
 
     if data_args.load_checkpoint:
         datetime_dir = os.path.basename(os.path.dirname(data_args.checkpoint_path))
@@ -308,13 +314,11 @@ def get_model(data_args,
         print("loading checkpoint from: ", data_args.checkpoint_path)
         moco = load_checkpoints_ddp(model, data_args.checkpoint_path)
         print("loaded checkpoint from: ", data_args.checkpoint_path)
-        
 
-    if data_args.approach=='finetune':
+    if data_args.approach == 'finetune':
         model = MocoTuner(model.moco_model, tuner_args.get_dict(), freeze_moco=freeze).to(local_rank)
-    
-    model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
-    
+
+
     # if load_individuals:
     #     light_model.load_state_dict(light_model_state)
     #     spec_model.load_state_dict(spec_model_state)
@@ -328,24 +332,26 @@ def get_model(data_args,
         config = {}
     config.update(
         {
-    "data_args": data_args.__dict__,
-    "light_model_args": light_model_args.__dict__,
-    "light_astroconformer_args": astroconformer_args_lc.__dict__,
-    "light_cnn_args": cnn_args_lc.__dict__,
-    "spec_model_args": spec_model_args.__dict__,
-    "conformer_args_spec": conformer_args_spec.__dict__,
-    "transformer_args_lightspec": transformer_args_lightspec.__dict__,
-    "moco_args": moco_args.__dict__,
-    "predictor_args": predictor_args.__dict__,
-    "moco_pred_args": moco_pred_args.__dict__,
-    "loss_args": loss_args.__dict__,
-    "tuner_args": tuner_args.__dict__,
-    "optim_args": optim_args.__dict__,
-    "num_params": num_params,
-    "model_structure": str(model),
-    }
+            "data_args": data_args.__dict__,
+            "light_model_args": light_model_args.__dict__,
+            "light_astroconformer_args": astroconformer_args_lc.__dict__,
+            "light_cnn_args": cnn_args_lc.__dict__,
+            "spec_model_args": spec_model_args.__dict__,
+            "conformer_args_spec": conformer_args_spec.__dict__,
+            "transformer_args_lightspec": transformer_args_lightspec.__dict__,
+            "moco_args": moco_args.__dict__,
+            "predictor_args": predictor_args.__dict__,
+            "moco_pred_args": moco_pred_args.__dict__,
+            "loss_args": loss_args.__dict__,
+            "tuner_args": tuner_args.__dict__,
+            "optim_args": optim_args.__dict__,
+            "num_params": num_params,
+            "model_structure": str(model),
+        }
     )
-    return model, optim_args, config, light_model, spec_model
+    return model, optim_args, tuner_args, config, light_model, spec_model
+
+
 
 
 

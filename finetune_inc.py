@@ -37,9 +37,9 @@ from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
 from nn.train import *
-from tests.test_unique_sampler import run_sampler_tests
 from features import multimodal_umap, create_umap
 import generator
+from nn.multi_modal import FineTuner
 from lightspec import priority_merge_prot
 
 META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist', 'kmag_abs', 'RUWE', 'Prot']
@@ -57,19 +57,19 @@ np.random.seed(1234)
 
 def get_kepler_meta_df():
     kepler_df = get_all_samples_df(num_qs=None, read_from_csv=True)
-    kepler_meta = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
-    kmag_df = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+    kepler_meta = pd.read_csv('../../kepler/data/lightPred/tables/berger_catalog_full.csv')
+    kmag_df = pd.read_csv('../../kepler/data/lightPred/tables/kepler_dr25_meta_data.csv')
     kepler_df = kepler_df.merge(kepler_meta, on='KID', how='left').merge(kmag_df[['KID', 'KMAG']], on='KID', how='left')
     kepler_df['kmag_abs'] = kepler_df['KMAG'] - 5 * np.log10(kepler_df['Dist']) + 5
-    lightpred_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
+    lightpred_df = pd.read_csv('../../kepler/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
     lightpred_df['Prot_ref'] = 'lightpred'
     lightpred_df.rename(columns={'predicted period': 'Prot'}, inplace=True)
 
-    santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
+    santos_df = pd.read_csv('../../kepler/data/lightPred/tables/santos_periods_19_21.csv')
     santos_df['Prot_ref'] = 'santos'
-    mcq14_df = pd.read_csv('/data/lightPred/tables/Table_1_Periodic.txt')
+    mcq14_df = pd.read_csv('../../kepler/data/lightPred/tables/Table_1_Periodic.txt')
     mcq14_df['Prot_ref'] = 'mcq14'
-    reinhold_df = pd.read_csv('/data/lightPred/tables/reinhold2023.csv')
+    reinhold_df = pd.read_csv('../../kepler/data/lightPred/tables/reinhold2023.csv')
     reinhold_df['Prot_ref'] = 'reinhold'
 
     p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
@@ -80,15 +80,16 @@ def create_train_test_dfs(meta_columns):
     period_catalog = get_kepler_meta_df()
     # period_catalog = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
     # period_catalog.rename(columns={'predicted period': 'Prot'}, inplace=True)
-    santos_catalog = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
-    frasca_catalog = Table.read('/data/lightPred/tables/frasca2016.fit', format='fits').to_pandas()
-    cks_catalog = Table.read('/data/lightPred/tables/CKS2017.fit', format='fits').to_pandas()
+    santos_catalog = pd.read_csv('../../kepler/data/lightPred/tables/santos_periods_19_21.csv')
+    frasca_catalog = Table.read('../../kepler/data/lightPred/tables/frasca2016.fit', format='fits').to_pandas()
+    cks_catalog = Table.read('../../kepler/data/lightPred/tables/CKS2017.fit', format='fits').to_pandas()
     kepler_meta_df = get_kepler_meta_df()
 
-    kepler_apogee = pd.read_csv('/data/apogee/crossmatched_catalog_Kepler.csv')
+    kepler_apogee = pd.read_csv('../../kepler/data/apogee/crossmatched_catalog_Kepler.csv')
     kepler_apogee = kepler_apogee[~kepler_apogee['APOGEE_VSINI'].isna()].rename(columns={'APOGEE_VSINI': 'vsini'})
     kepler_apogee['vsini_ref'] = 'apogee'
-    lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
+    lamost_kepler_df = (pd.read_csv('../../kepler/data/lightPred/tables/lamost_dr8_gaia_dr3_kepler_ids.csv')
+                        .rename(columns={'kepid': 'KID', 'obsid': 'ObsID'}))
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
     lamost_kepler_apogee = lamost_kepler_df.merge(kepler_apogee[['KID', 'vsini', 'vsini_ref']], on='KID')
@@ -119,7 +120,7 @@ def create_train_test_dfs(meta_columns):
     # final_df['kmag_abs'] = final_df['KMAG'] - 5 * np.log10(final_df['Dist']) + 5
     # final_df = final_df.merge(kepler_meta_df[META_COLUMNS], on='KID', how='left').rename(columns={'Prot_x': 'Prot'})
 
-    kois = pd.read_csv('/data/lightPred/tables/kois.csv')
+    kois = pd.read_csv('../../kepler/data/lightPred/tables/kois.csv')
     kois =  kois[kois['koi_disposition'] == 'CONFIRMED']
     kois = kois[['KID','kepoi_name','kepler_name','koi_disposition', 'planet_Prot']]
     final_df = final_df.merge(kois, on='KID', how='left')
@@ -133,7 +134,7 @@ def create_train_test_dfs(meta_columns):
     final_df['norm_vsini'] = (final_df['vsini'] - final_df['vsini'].min()) / (final_df['vsini'].max() - final_df['vsini'].min())
     final_df['norm_Prot'] = (final_df['Prot'] - final_df['Prot'].min()) / (final_df['Prot'].max() - final_df['Prot'].min())
     final_df = final_df[~final_df['inc'].isna()]
-    final_df['Prot'] /= 70
+    # final_df['Prot'] /= 70
     print("prot nans: ", final_df['Prot'].isna().sum(), " Rstar nans: ", final_df['Rstar'].isna().sum(), "VSINI nans: ", final_df['vsini'].isna().sum(), "inc nans: ", final_df['inc'].isna().sum())
     
     train_df, val_df  = train_test_split(final_df, test_size=0.2, random_state=42)
@@ -152,10 +153,10 @@ def create_train_test_dfs(meta_columns):
     print("kois df: ", len(kois_df))
     plt.hist(kois_df['cos_inc'], bins=40, histtype='step', density=True, label='KOI')
     plt.legend()
-    plt.savefig(f"/data/lightSpec/images/cos_inc_hist.png")
+    plt.savefig(f"images/cos_inc_hist.png")
     plt.close()
 
-    final_df.to_csv('/data/lightSpec/finetune_inc.csv', index=False)
+    # final_df.to_csv('../../kepler/data/lightPred/tables/finetune_inc.csv', index=False)
 
 
     return train_df, val_df 
@@ -165,7 +166,7 @@ current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"inc_finetune_{current_date}"
 
 local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/full_config.yaml'
+args_dir = 'nn/full_config.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
 light_model_name = data_args.light_model_name
@@ -187,69 +188,49 @@ for i in range(10):
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,
                               batch_size=int(data_args.batch_size), \
-                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
                               collate_fn=kepler_collate_fn,
-                              sampler=train_sampler)
+                              sampler=train_sampler
+                              )
 
 
 val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
 val_dataloader = DataLoader(val_dataset,
                             batch_size=int(data_args.batch_size),
                             collate_fn=kepler_collate_fn,
-                            sampler=val_sampler, \
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+                            sampler=val_sampler,
+                            )
 
 test_dataloader = DataLoader(test_dataset,
                             batch_size=int(data_args.batch_size),
-                            collate_fn=kepler_collate_fn,
-                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+                            collate_fn=kepler_collate_fn
+                             )
 
 for i in range(10):
     light, spec, y, light2, spec2, info = train_dataset[i]
     print("train dataset: ", light.shape, light2.shape,  spec.shape, spec2.shape, y)
 
-model, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
+pre_trained_model, optim_args, tuner_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
-# test_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Test_Tuner'])
+for param in pre_trained_model.parameters():
+        param.requires_grad = False
 
-batch = next(iter(train_dataloader))
-lc, spec, y, lc2, spec2, info = batch
-latent_vars = data_args.prediction_labels_lightspec
-latent = torch.stack([torch.tensor([i[j] for j in latent_vars]) for i in info])
-print("latent: ", latent.shape, " y: ", y.shape)
-y_hat = model(lc, spec, latent=latent)
-print("y_hat: ", y_hat.shape, " y: ", y.shape)
-exit()
-loss_fn = CQR(quantiles=optim_args.quantiles)
-# loss_fn = torch.nn.L1Loss()
-optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
+quantiles = [0.5]
+tuner_args.out_dim = tuner_args.out_dim * len(quantiles)
+model = FineTuner(pre_trained_model, tuner_args.get_dict()).to(local_rank)
+# model = load_checkpoints_ddp(model, finetune_checkpoint_path)
+# model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
-# kfold_trainer = KFoldTrainer(
-#     model=model,
-#     optimizer=optimizer,
-#     criterion=loss_fn,
-#     dataset=train_dataset,
-#     device=local_rank,
-#     n_splits=5,
-#     batch_size=data_args.batch_size,
-#     output_dim=len(data_args.prediction_labels),
-#     num_quantiles=len(optim_args.quantiles),
-#     log_path=data_args.log_dir,
-#     exp_num=datetime_dir,
-#     exp_name=f"inc_finetune_{exp_num}",
-# )
+num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+all_params = sum(p.numel() for p in model.parameters())
 
-# Run k-fold cross validation
-# k_results = kfold_trainer.run_kfold(num_epochs=100, early_stopping=10)
-      
+print("number of all parameters in finetune setting: ", all_params)
 
-# test_dataloader = DataLoader(test_dataset, batch_size=data_args.batch_size, shuffle=False, collate_fn=kepler_collate_fn)
-# final_results = kfold_trainer.train_final_model_and_test(
-#     test_dataloader=test_dataloader,
-#     num_epochs=1000,
-#     early_stopping=15
-# )
+print("number of trainable parameters in finetune setting: ", num_params)
 
+# loss_fn = CQR(quantiles=quantiles, reduction='none')
+loss_fn = torch.nn.L1Loss(reduction='none')
+optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr),
+                             weight_decay=float(optim_args.weight_decay))
 
 trainer = RegressorTrainer(
     model=model,
@@ -259,9 +240,11 @@ trainer = RegressorTrainer(
     val_dataloader=val_dataloader,
     device=local_rank,
     output_dim=len(data_args.prediction_labels_finetune),
-    num_quantiles=len(optim_args.quantiles),
-    use_w = False,
-    only_lc=True,
+    num_quantiles=len(quantiles),
+    use_w=False,
+    only_lc=False,
+    latent_vars=data_args.prediction_labels_lightspec,
+    loss_weight_name=None,
     log_path=data_args.log_dir,
     exp_num=datetime_dir,
     exp_name=f"inc_finetune_{exp_num}",
@@ -279,10 +262,10 @@ trainer = RegressorTrainer(
 
 complete_config.update(
     {"trainer": trainer.__dict__,
-    "loss_fn": str(loss_fn),
-    "optimizer": str(optimizer)}
+     "loss_fn": str(loss_fn),
+     "optimizer": str(optimizer)}
 )
-   
+
 config_save_path = f"{data_args.log_dir}/{datetime_dir}/finetune_inc_{exp_num}_complete_config.yaml"
 with open(config_save_path, "w") as config_file:
     json.dump(complete_config, config_file, indent=2, default=str)
@@ -290,22 +273,22 @@ with open(config_save_path, "w") as config_file:
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=10, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_inc_{exp_num}.json'
+                      early_stopping=10, best='loss', conf=True)
+output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_inc_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_inc_{exp_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_inc_{exp_num}.png")
 plt.clf()
 
-test_res = trainer.predict(test_loader, device=local_rank)
+preds, targets, sigmas, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
 
-y, y_pred = test_res['y'], test_res['y_pred']
-print('results shapes: ', y.shape, y_pred.shape)
-results_df = pd.DataFrame({'y': y})
-for q in len(optim_args.quantiles):
-    y_pred_q = y_pred[:,:, q]
-    for i, label in enumerate(['vsini', 'Prot', 'sin_inc']):
+print('results shapes: ', preds.shape, targets.shape, sigmas.shape)
+results_df = pd.DataFrame({'target_cos_inc': targets, 'sigmas_cos_inc': sigmas})
+results_df['KID'] = aggregated_info['KID']
+for q in range(len(quantiles)):
+    y_pred_q = preds[:, :, q]
+    for i, label in enumerate(['cos_inc']):
         results_df[f'{label}_{q}'] = y_pred_q[:, i]
 print(results_df.head())
 results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/test_predictions.csv", index=False)

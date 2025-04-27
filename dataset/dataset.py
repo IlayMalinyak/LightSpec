@@ -533,7 +533,7 @@ class KeplerDataset():
         if self.npy_path is not None:
             try:
                 file_path = os.path.join(self.npy_path, f"{int(row['KID'])}.npy")
-                x = np.load(file_path)            
+                x = np.load(file_path)
                 if not isinstance(x, np.ndarray) or x.size == 0:
                     print(f"Warning: Empty or invalid numpy array for {row['KID']}")
                     x = np.zeros((self.seq_len, 1))
@@ -760,14 +760,18 @@ class LightSpecDataset(KeplerDataset):
         obsid = int(self.df.iloc[idx]['ObsID'])
         info['obsid'] = obsid
         obsdir = str(obsid)[:4]
-        spectra_filename = os.path.join(self.spec_path, f'{obsdir}/{obsid}.fits')
+        spectra_filename = os.path.join(self.spec_path, f'{obsid}.fits')
         try:
             spectra, meta = self.read_spectra(spectra_filename)
             spec_time = time.time() - start
-        except OSError as e:
+        except (OSError, IndexError) as e:
             print("Error reading file ", obsid, e)
             spectra = np.zeros((self.spec_seq_len))
-            meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
+            wv = np.load('lamost_wv.npy')
+            to_pad = spectra.shape[0] - wv.shape[0]
+            if to_pad > 0:
+                wv = np.pad(wv, ((0, to_pad)), mode='constant')
+            meta = {'RV': 0, 'wavelength': wv}
         t2 = time.time()
         if self.spec_transforms:
             spectra, _, spec_info = self.spec_transforms(spectra, None, meta)
@@ -895,8 +899,7 @@ class FineTuneDataset(LightSpecDataset):
     
     def __getitem__(self, idx):
         light, spectra, _, light_target, spectra_target, info = super().__getitem__(idx)
-        row = self.df.iloc[idx]
-        y = torch.tensor([row[label] for label in self.labels], dtype=torch.float32)
+        y = torch.tensor([info[label] for label in self.labels], dtype=torch.float32)
         # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
         return (light, spectra, y, light_target, spectra_target, info)
 
