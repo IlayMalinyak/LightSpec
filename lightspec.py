@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, Subset
 from torch import distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR
-from astropy.io import fits
+from astropy.io import fits, ascii
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -111,13 +111,13 @@ def priority_merge_prot(dataframes, target_df):
     result = target_df.copy()
     
     # Create an empty dataframe with just KID and Prot columns
-    prot_values = pd.DataFrame({'KID': [], 'Prot': [], 'Prot_ref': []})
+    prot_values = pd.DataFrame({'KID': [], 'Prot': [], 'Prot_err': [], 'Prot_ref': []})
     
     # Process dataframes in priority order
     for df in dataframes:
         print(f"Processing dataframe with {len(df)} rows. currently have {len(prot_values)} prot values")
         # Extract just the KID and Prot columns
-        current = df[['KID', 'Prot', 'Prot_ref']].copy()
+        current = df[['KID', 'Prot', 'Prot_err', 'Prot_ref']].copy()
         
         # Only add keys that aren't already in our prot_values dataframe
         missing_keys = current[~current['KID'].isin(prot_values['KID'])]
@@ -140,22 +140,35 @@ def create_train_test_dfs(meta_columns, only_main_seq=True):
     lightpred_df = pd.read_csv('/data/lightPred/tables/kepler_predictions_clean_seg_0_1_2_median.csv')
     lightpred_df['Prot_ref'] = 'lightpred'
     lightpred_df.rename(columns={'predicted period': 'Prot'}, inplace=True)
+    lightpred_df['Prot_err'] = lightpred_df['observational error'] / lightpred_df['mean_period_confidence']
 
-    santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv')
+
+    santos_df = pd.read_csv('/data/lightPred/tables/santos_periods_19_21.csv').rename(columns={'E_Prot': 'Prot_err'})
     santos_df['Prot_ref'] = 'santos'
+    santos_df['Prot_err'] = pd.to_numeric(santos_df['Prot_err'], errors='coerce')
+    santos_df['Prot'] = pd.to_numeric(santos_df['Prot'], errors='coerce')
+    valid = santos_df.dropna(subset=['Prot', 'Prot_err'])
+    relative_mean_err = (valid['Prot_err'] / valid['Prot']).mean()
+    santos_df['Prot_err'] = santos_df['Prot_err'].fillna(santos_df['Prot'] * relative_mean_err)
     mcq14_df = pd.read_csv('/data/lightPred/tables/Table_1_Periodic.txt')
     mcq14_df['Prot_ref'] = 'mcq14'
     reinhold_df = pd.read_csv('/data/lightPred/tables/reinhold2023.csv')
     reinhold_df['Prot_ref'] = 'reinhold'
+    reinhold_df['Prot_err'] = reinhold_df['Prot'] * 0.15
+
 
     p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
     kepler_df = priority_merge_prot(p_dfs, kepler_df)
 
+    kinematic_df = ascii.read('/data/lightPred/tables/kinematic_v.txt').to_pandas()
+    kinematic_df['sigma'] = np.sqrt((kinematic_df['U'] ** 2 + kinematic_df['V'] ** 2 + kinematic_df['W'] ** 2) / 3)
+    print("len kinematic df: ", len(kinematic_df))
 
     lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
     lamost_kepler_df = lamost_kepler_df.merge(kepler_df[META_COLUMNS], on='KID', how='inner')
+    lamost_kepler_df = lamost_kepler_df.merge(kinematic_df[['KIC', 'sigma']], right_on='KIC', left_on='KID', how='left')
     lamost_kepler_df['main_seq'] = lamost_kepler_df.apply(giant_cond, axis=1)
     if only_main_seq:
         lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==True]
@@ -163,7 +176,12 @@ def create_train_test_dfs(meta_columns, only_main_seq=True):
     #     lamost_kepler_df = lamost_kepler_df[lamost_kepler_df['main_seq']==False]
     # lamost_kepler_df = lamost_kepler_df.dropna(subset=norm_cols)
     train_df, val_df  = train_test_split(lamost_kepler_df, test_size=0.2, random_state=42)
-    print("number of samples kepler: ", len(kepler_df),  " lamost-kepler :", len(lamost_kepler_df))
+    print("number of samples kepler: ", len(kepler_df),
+      " lamost-kepler :", len(lamost_kepler_df), 'unique kepler ', len(lamost_kepler_df.drop_duplicates('KID')))
+    print('number of unique sigmas', len(lamost_kepler_df.drop_duplicates('KID')[~lamost_kepler_df['sigma'].isna()]))
+    print(lamost_kepler_df['sigma'].notna().sum())
+    print(lamost_kepler_df['sigma'].isna().sum())
+    print("sample sigmas: ", lamost_kepler_df['sigma'].sample(10).values)
     return train_df, val_df 
 
 def test_dataset_samples(ds, num_iters=10):
@@ -248,13 +266,14 @@ if __name__ == "__main__":
                                 batch_size=int(data_args.batch_size),
                                 collate_fn=kepler_collate_fn,
                                 num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                sampler=test_sampler
+                                sampler=test_sampler,
+                                drop_last=True
                                 )
 
     print("len train dataloader ", len(train_dataloader))
 
 
-    model, optim_args, complete_config, light_model, spec_model = generator.get_model(data_args,
+    model, optim_args, tuner_args, complete_config, light_model, spec_model = generator.get_model(data_args,
                                                                                     args_dir,
                                                                                     complete_config,
                                                                                     local_rank,
@@ -283,6 +302,9 @@ if __name__ == "__main__":
         num_quantiles = len(optim_args.quantiles)
     elif data_args.approach == 'dual_former':
         loss_fn = nn.L1Loss(reduction='none')
+    else:
+        loss_fn = None
+        num_quantiles = len(optim_args.quantiles)
     if optim_args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(model.parameters(),
                                     lr=float(optim_args.max_lr),
@@ -295,7 +317,7 @@ if __name__ == "__main__":
     scaler = GradScaler()
 
     accumulation_step = 1
-    if data_args.approach != 'dual_former':
+    if data_args.approach == 'moco':
         trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
                             criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
                             scaler=scaler, grad_clip=True,
@@ -305,7 +327,8 @@ if __name__ == "__main__":
                                 accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
                             use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
                             exp_name=f"{exp_num}") 
-    else:
+    
+    elif data_args.approach == 'dual_former':
         trainer = DualFormerTrainer(model=model, optimizer=optimizer,
                             criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
                             scaler=scaler, grad_clip=True, use_y_as_latent=data_args.use_latent,
@@ -315,16 +338,18 @@ if __name__ == "__main__":
                                 accumulation_step=accumulation_step, max_iter=np.inf, print_every=20,
                                 alpha=data_args.alpha,
                             exp_name=f"{exp_num}")
+    
+    elif data_args.approach == 'jepa':
 
-    # trainer = JEPATrainer(
-    #                         model=model, optimizer=optimizer,
-    #                         criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-    #                         train_dataloader=train_dataloader,
-    #                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-    #                              exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
-    #                              accumulation_step=accumulation_step, max_iter=np.inf, use_w=True,
-    #                         exp_name=f"{exp_num}"
-    #                         )
+        trainer = JEPATrainer(
+                                model=model, optimizer=optimizer,
+                                criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+                                train_dataloader=train_dataloader,
+                            val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+                                    exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
+                                    accumulation_step=accumulation_step, max_iter=np.inf, use_y_as_latent=data_args.use_latent,
+                                exp_name=f"{exp_num}"
+                                )
 
     complete_config.update(
         {"trainer": trainer.__dict__,
@@ -346,6 +371,10 @@ if __name__ == "__main__":
     fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
     plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{exp_num}.png")
     plt.clf()
+
+    # Add before prediction calls
+    torch.cuda.empty_cache()
+    torch.distributed.barrier()
 
     # predict_and_save_dl(train_dataloader, local_rank, 'train', trainer)
     # predict_and_save_dl(val_dataloader, local_rank, 'val', trainer)

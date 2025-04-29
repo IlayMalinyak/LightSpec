@@ -564,7 +564,7 @@ class DualFormer(nn.Module):
         x1_padding_mask: Optional[torch.Tensor] = None,
         x2_padding_mask: Optional[torch.Tensor] = None,
         latent_variables: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
+        output_attentions: bool = True,
         output_hidden_states: bool = False,
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],

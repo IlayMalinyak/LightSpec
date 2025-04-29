@@ -51,7 +51,7 @@ META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist',
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
-finetune_checkpoint_path = '/data/lightSpec/logs/inc_finetune_2025-04-24/inc_finetune_lightspec_dual_former_6_latent_giants_finetune_inc_loss_w.pth'
+finetune_checkpoint_path = 'TBD'
 
 
 R_SUN_KM = 6.957e5
@@ -91,158 +91,38 @@ def get_kepler_meta_df():
     kepler_df = priority_merge_prot(p_dfs, kepler_df)
     return kepler_df
 
-def get_cos_i_err(row):
-    dv = row['Prot'] * 24 * 3600 / (2 * np.pi * row['Rstar'] * R_SUN_KM) * row['vsini_err']
-    dp = row['vsini'] / (2 * np.pi * row['Rstar'] * R_SUN_KM) * row['Prot_err'] * 24 * 3600
-    dr = (row['vsini'] * row['Prot'] * 24 * 3600 * row['Rstar_err'] * R_SUN_KM
-          / (2 * np.pi * (row['Rstar'] * R_SUN_KM) ** 2))
-    err = np.sqrt(dv ** 2 + dp ** 2 + dr ** 2)
-    return err
-
-def show_inclination_behavior(final_df):
-    p_refs = final_df['Prot_ref'].unique()
-    for ref in p_refs:
-        ref_df = final_df[final_df['Prot_ref'] == ref]
-        nan_inc_ratio = len(ref_df[ref_df['cos_inc'] > 1]) / len(ref_df)
-        nan_inc_ratio_err = len(ref_df[ref_df['cos_inc'] - ref_df['cos_inc_err'] > 1]) / len(ref_df)
-        plt.scatter(ref_df['Prot'], ref_df['cos_inc'], label=f'{ref} %$cos(i) > 1$={nan_inc_ratio:.2f}({nan_inc_ratio_err:.2f})')
-        # plt.errorbar(ref_df['Prot'], ref_df['cos_inc'],yerr=ref_df['cos_inc_err'], fmt='none', color='gray',
-        #              elinewidth=1, alpha=0.1, capsize=3)
-    plt.legend()
-    plt.hlines(1, 0, 70, colors='black', linestyles='dashed')
-    plt.ylabel('cos(i)')
-    plt.xlabel('Prot (days)')
-    plt.semilogy()
-    plt.savefig('/data/lightSpec/images/cos_inc_err_pref.png')
-    plt.close()
-
-    plt.scatter(final_df['Prot'], final_df['cos_inc'], c=np.log(final_df['cos_inc_err']))
-    plt.hlines(1, 0, 70, colors='black', linestyles='dashed')
-    plt.ylabel('cos(i)')
-    plt.xlabel('Prot (days)')
-    plt.colorbar()
-    plt.semilogy()
-    plt.savefig('/data/lightSpec/images/cos_inc_err.png')
-    plt.close()
-
-def physical_cos_inc(cos_inc_value, cos_inc_err):
-    """
-    Return a physically plausible cos(inclination) value by sampling from
-    a truncated normal distribution bounded between 0 and 1.
-    """
-    # For values already in the physical range with small errors, keep as is
-    if 0 <= cos_inc_value <= 1:
-        return cos_inc_value
-
-    # For non-physical values, sample from truncated normal
-    a, b = 0, 1  # bounds of the truncated distribution
-
-    # Calculate parameters for the truncated normal
-    loc = np.clip(cos_inc_value, 0.01, 0.99)  # Move extreme values slightly inward
-    scale = cos_inc_err * 2
-    # print("cos_inc_value: ", cos_inc_value, "cos_inc_err: ", cos_inc_err, "loc: ", loc, "scale: ", scale)
-
-    # Create a truncated normal distribution
-    trunc_norm = stats.truncnorm(
-        (a - loc) / scale,
-        (b - loc) / scale,
-        loc=loc,
-        scale=scale
-    )
-
-    # Return a random sample from this distribution
-    return trunc_norm.rvs()
-
 def create_train_test_dfs(meta_columns):
     period_catalog = get_kepler_meta_df().dropna(subset=['Prot']).drop_duplicates('KID')
-    print("nans in period catalog: ", period_catalog['Prot'].isna().sum())
 
-    kepler_apogee = pd.read_csv('/data/apogee/crossmatched_catalog_Kepler.csv')
-    kepler_apogee = kepler_apogee[~kepler_apogee['APOGEE_VSINI'].isna()].rename(columns={'APOGEE_VSINI': 'vsini'})
-    kepler_apogee['vsini_ref'] = 'apogee'
     lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv').rename(columns={'kepid':'KID'})
-    print("lamost kepler df: ", len(lamost_kepler_df))
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
-    lamost_kepler_apogee = lamost_kepler_df.merge(kepler_apogee[['KID', 'vsini', 'vsini_ref']], on='KID')
-    final_apogee = lamost_kepler_apogee.merge(period_catalog, on='KID',
-                                                         suffixes=['', '_kep']).drop_duplicates('ObsID')
-    final_apogee['vsini_err'] = final_apogee['vsini'] * 0.1
+    unamed_cols = [col for col in lamost_kepler_df.columns if 'Unnamed' in col]
+    lamost_kepler_df.drop(columns=unamed_cols, inplace=True)
+    lamost_kepler_df = lamost_kepler_df.merge(period_catalog, on='KID', how='left', suffixes=('_lamost', '')).drop_duplicates('KID')
+    
+    age_df = pd.read_csv('/data/lightPred/tables/ages_dataset.csv')
+    unamed_cols = [col for col in age_df.columns if 'Unnamed' in col]
+    age_df.drop(columns=unamed_cols, inplace=True)
+    
+    final_df = lamost_kepler_df.merge(age_df, on='KID', suffixes=('', '_ages')).drop_duplicates('KID')
 
-    cks_catalog = Table.read('/data/lightPred/tables/CKS2017.fit', format='fits').to_pandas()
-    cks_catalog['vsini_ref'] = 'cks'
-    print("len cks catalog: ", len(cks_catalog))
-    final_cks = cks_catalog.merge(period_catalog, left_on='KIC', right_on='KID', suffixes=['', '_kep'])
-    print("after merge, len final_cks: ", len(final_cks), len(period_catalog))
-    final_cks = final_cks.merge(lamost_kepler_df, left_on='KIC', right_on='KID', suffixes=['', '_lamost'])
-    print("after merge 2, len final_cks: ", len(final_cks))
-    final_cks = final_cks.drop_duplicates('KIC')
-    final_cks['vsini_err'] = final_cks['vsini'] * 0.1 # assume 10% error
+    final_df.dropna(subset=['final_age', 'age_error'], inplace=True)
 
-    final_df = pd.concat([final_apogee, final_cks])
-    print(" final apogee: ", len(final_apogee), "final cks", len(final_cks),
-          " final df: ", len(final_df))
-    final_df['Rstar_err'] = (final_df['E_Rstar'] - final_df['e_Rstar']) / 2
+    final_df['age_error_rel'] = final_df['age_error'] / final_df['final_age']
+    final_df['final_age_norm'] = final_df['final_age'] / 11
 
-    kois = pd.read_csv('/data/lightPred/tables/kois.csv')
-    kois = kois[kois['koi_disposition'] == 'CONFIRMED']
-    kois = kois[['KID', 'kepoi_name', 'kepler_name', 'koi_disposition', 'planet_Prot']]
-    final_df = final_df.merge(kois, on='KID', how='left')
-
-    print("kois general : ", len(kois), " kois in final df: ", len(final_df[~final_df['kepoi_name'].isna()]))
-
-    final_df.dropna(subset=['Prot', 'vsini', 'Rstar'], inplace=True)
-
-    final_df['cos_inc'] = (final_df['vsini'] * final_df['Prot'] * 24 * 3600
-                           / (2 * np.pi * final_df['Rstar'] * R_SUN_KM))
-    final_df['cos_inc_err'] = final_df.apply(get_cos_i_err, axis=1)
-
-    final_df = final_df[final_df['cos_inc'].abs() < 1]
-    print("final df after removing nan cos_inc: ", len(final_df))
-    final_df['physical_cos_inc'] = final_df.apply(
-        lambda row: physical_cos_inc(row['cos_inc'], row['cos_inc_err']),
-        axis=1
-    )
-    final_df['trunc_cos_inc'] = final_df['cos_inc'].apply(lambda x: x if x < 1 else np.nan)
-    plt.hist(final_df['physical_cos_inc'], bins=30, density=True, histtype='step', label='physical')
-    plt.hist(final_df['trunc_cos_inc'], bins=30,density=True, histtype='step', label='cos')
-    plt.close()
-    final_df['log_cos_inc'] = -np.log(final_df['physical_cos_inc'] + 1e-3)
-    final_df['inc'] = np.arccos(
-        final_df['physical_cos_inc']) * 180 / np.pi  # here im using arccos becasue the real angle is 90 - inc
-    final_df['norm_vsini'] = (final_df['vsini'] - final_df['vsini'].min()) / (
-                final_df['vsini'].max() - final_df['vsini'].min())
-    final_df['norm_Prot'] = (final_df['Prot'] - final_df['Prot'].min()) / (
-                final_df['Prot'].max() - final_df['Prot'].min())
-    show_inclination_behavior(final_df)
-
-    final_df = final_df[~final_df['inc'].isna()]
-    print("final df after removing nan inc: ", len(final_df))
-    # final_df['Prot'] /= 70
+    print("number of samples in final df: ", final_df.shape[0])
+    
 
     train_df, val_df = train_test_split(final_df, test_size=0.2, random_state=42)
-
-    # for ref in final_df['vsini_ref'].unique():
-    #     print("ref: ", ref, " samples: ", len(final_df[final_df['vsini_ref'] == ref]))
-    #     ref_df = train_df[train_df['vsini_ref'] == ref]
-    #     if len(ref_df) < 20:
-    #         continue
-    #     plt.hist(ref_df['physical_cos_inc'], bins=40, histtype='step', density=True, label=ref)
-    kois_df = final_df[final_df['koi_disposition'] == 'CONFIRMED']
-    print("kois df: ", len(kois_df))
-    plt.hist(kois_df['physical_cos_inc'], bins=40, histtype='step', density=True, label='KOI physical')
-    plt.hist(final_df['physical_cos_inc'], bins=40, histtype='step', density=True, label='All physical')
-    plt.hist(final_df['trunc_cos_inc'], bins=40, histtype='step', density=True, label='All raw')
-    plt.legend()
-    plt.savefig(f"/data/lightSpec/images/cos_inc_hist.png")
-    plt.close()
 
 
     return train_df, val_df
 
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
-datetime_dir = f"inc_finetune_{current_date}"
+datetime_dir = f"age_finetune_{current_date}"
 
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/full_config.yaml'
@@ -320,12 +200,12 @@ trainer = RegressorTrainer(
     use_w = False,
     only_lc=False,
     latent_vars=data_args.prediction_labels_lightspec,
-    loss_weight_name='cos_inc_err',
+    loss_weight_name=None,
     max_iter=np.inf,
     # error_name='cos_inc_err',
     log_path=data_args.log_dir,
     exp_num=datetime_dir,
-    exp_name=f"inc_finetune_{exp_num}",
+    exp_name=f"age_finetune_{exp_num}",
 )
 
 # trainer = ContrastiveTrainer(model=model, optimizer=optimizer, stack_pairs=False,
@@ -344,7 +224,7 @@ complete_config.update(
     "optimizer": str(optimizer)}
 )
    
-config_save_path = f"{data_args.log_dir}/{datetime_dir}/finetune_inc_{exp_num}_complete_config.yaml"
+config_save_path = f"{data_args.log_dir}/{datetime_dir}/finetune_age_{exp_num}_complete_config.yaml"
 with open(config_save_path, "w") as config_file:
     json.dump(complete_config, config_file, indent=2, default=str)
 
@@ -352,11 +232,11 @@ print(f"Configuration (with model structure) saved at {config_save_path}.")
 
 fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
                         early_stopping=10, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_inc_{exp_num}.json'
+output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_age_{exp_num}.json'
 with open(output_filename, "w") as f:
     json.dump(fit_res, f, indent=2)
 fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_inc_{exp_num}.png")
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_age_{exp_num}.png")
 plt.clf()
 
 preds, targets, sigmas, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
@@ -371,7 +251,7 @@ for i, label in enumerate(labels):
         y_pred_q = preds[:,:, q]
         results_df[f'{label}_{q}'] = y_pred_q[:, i]
 print(results_df.head())
-results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/test_predictions.csv", index=False)
+results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_finetune_age_{exp_num}.csv", index=False)
 # Access results
 
 

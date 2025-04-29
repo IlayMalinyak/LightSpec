@@ -230,7 +230,7 @@ def get_model(data_args,
     dual_former_args.latent_dim = latent_dim
     print("latent dim: ", latent_dim)
 
-    tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
+    # tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
     # light_model_args.in_channels = data_args.in_channels_lc
     predictor_args.w_dim = len(data_args.meta_columns_lightspec)
     # lstm_args_lc.seq_len = int(data_args.max_len_lc)
@@ -249,8 +249,8 @@ def get_model(data_args,
 
     spec_model = MODELS[spec_model_name](spec_model_args, conformer_args=conformer_args_spec)
     
-    # Apply DeepNorm initialization to the spectra model
-    deepnorm_init(spec_model, conformer_args_spec)
+    # # Apply DeepNorm initialization to the spectra model
+    # deepnorm_init(spec_model, conformer_args_spec)
     
     spec_model = init_model(spec_model, spec_model_args)
 
@@ -264,21 +264,6 @@ def get_model(data_args,
 
 
 
-    # moco = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
-    #                          transformer_args_lightspec,
-    #                          predictor_args.get_dict(),
-    #                          loss_args,
-    #                          **moco_args.get_dict()).to(local_rank)
-    
-    # Apply DeepNorm initialization to the MoCo transformer components
-    # Only the shared encoder is a transformer architecture
-    # print("Applying DeepNorm initialization to MoCo transformer components")
-    # print(f"Using transformer_args_lightspec with num_layers={transformer_args_lightspec.num_layers}, beta={getattr(transformer_args_lightspec, 'beta', 1.0)}")
-    # deepnorm_init(moco.shared_encoder_q, transformer_args_lightspec)
-    # deepnorm_init(moco.shared_encoder_k, transformer_args_lightspec)
-
-    # model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
-
     # Commenting out JEPA code
     lc_reg_args = predictor_args.get_dict().copy()
     lc_reg_args['in_dim'] = light_model.simsiam.encoder.output_dim
@@ -288,18 +273,41 @@ def get_model(data_args,
     spectra_reg_args['in_dim'] = spec_model.encoder.output_dim
     spectra_reg_args['out_dim'] = len(data_args.prediction_labels_spec) * len(optim_args.quantiles)
     spectra_reg_args['w_dim'] = 0
+    moco_args.freeze_lightcurve = data_args.freeze_backbone
+    moco_args.freeze_spectra = data_args.freeze_backbone
 
-    model = DualNet(light_model.simsiam.encoder, spec_model.encoder, dual_former_args.get_dict(),
-                     lc_reg_args, spectra_reg_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
+    if data_args.approach == 'dual_former':
 
-    print("Applying DeepNorm initialization to DualNet transformer components")
-    deepnorm_init(model.dual_former, dual_former_args)
+        model = DualNet(light_model.simsiam.encoder, spec_model.encoder, dual_former_args.get_dict(),
+                        lc_reg_args, spectra_reg_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
 
-    # model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
-    #  lc_reg_args, spectra_reg_args, loss_args).to(local_rank)
+        print("Applying DeepNorm initialization to DualNet transformer components")
+        deepnorm_init(model.dual_former, dual_former_args)
+
+        tuner_args.in_dim = (dual_former_args.embed_dim + latent_dim) * 2
     
-    # # Apply DeepNorm initialization to the JEPA transformer components
-    # deepnorm_init(model.vicreg_predictor, transformer_args_jepa)
+    elif data_args.approach == 'jepa':
+
+        model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
+        lc_reg_args, spectra_reg_args, loss_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
+        
+        # Apply DeepNorm initialization to the JEPA transformer components
+        deepnorm_init(model.vicreg_predictor, transformer_args_jepa)
+    
+    elif data_args.approach == 'moco':
+        # model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
+        model = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
+                             transformer_args_lightspec,
+                             predictor_args.get_dict(),
+                             loss_args,
+                             **moco_args.get_dict()).to(local_rank)
+        # Apply DeepNorm initialization to the MoCo transformer components
+        # Only the shared encoder is a transformer architecture
+        print("Applying DeepNorm initialization to MoCo transformer components")
+        print(f"Using transformer_args_lightspec with num_layers={transformer_args_lightspec.num_layers}, beta={getattr(transformer_args_lightspec, 'beta', 1.0)}")
+        deepnorm_init(model.shared_encoder_q, transformer_args_lightspec)
+        deepnorm_init(model.shared_encoder_k, transformer_args_lightspec)
+
 
     if data_args.load_checkpoint:
         datetime_dir = os.path.basename(os.path.dirname(data_args.checkpoint_path))
@@ -345,7 +353,7 @@ def get_model(data_args,
     "model_structure": str(model),
     }
     )
-    return model, optim_args, config, light_model, spec_model
+    return model, optim_args, tuner_args, config, light_model, spec_model
 
 
 

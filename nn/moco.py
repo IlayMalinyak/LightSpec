@@ -220,11 +220,11 @@ class MultimodalMoCo(nn.Module):
                     }
 
         with torch.no_grad():
-            # k_s, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
-            # k_l, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
+            k_s, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
+            k_l, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
 
-            k_s = self.spectra_proj_k(spectra_feat)
-            k_l = self.lightcurve_proj_k(lightcurve_feat)
+            # k_s = self.spectra_proj_k(spectra_feat)
+            # k_l = self.lightcurve_proj_k(lightcurve_feat)
 
         loss_s, logits_s, labels = self.contrastive_loss(
             q_s, k_l, self.lightcurve_queue

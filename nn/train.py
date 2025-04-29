@@ -851,6 +851,7 @@ class DualFormerTrainer(Trainer):
         acc = torch.tensor([0], device=device)
         return loss, acc, y
     
+    @staticmethod
     def _get_eigenspace(self, weight):
         print("max diff weight", torch.max(torch.abs(weight - weight.t())).item())
         if torch.abs(weight - weight.t()).sum() < 1e-6:
@@ -951,9 +952,9 @@ class DualFormerTrainer(Trainer):
 
 
 class JEPATrainer(Trainer):
-    def __init__(self, use_w=True, lc_reg_idx=-1, alpha=0.5, **kwargs):
+    def __init__(self, use_y_as_latent=True, lc_reg_idx=-1, alpha=0.5, **kwargs):
         super().__init__(**kwargs)
-        self.use_w = use_w
+        self.use_y_as_latent = use_y_as_latent
         self.lc_reg_idx = lc_reg_idx
         self.alpha = alpha
         self.lc_losses = []
@@ -963,39 +964,42 @@ class JEPATrainer(Trainer):
     def train_batch(self,batch, batch_idx, device):
         lc, spectra, y, lc_target, spectra_target, info = batch 
         lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
-        w = None
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
-        out = self.model(lc ,spectra, w=w)
-        y_lc = y[:, self.lc_reg_idx:]
-        y_spec = y[:, :self.lc_reg_idx]
-        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles)
-        pred_spec = out['spectra_pred'].view(lc.shape[0], -1, self.num_quantiles)
-        lc_loss = self.criterion(pred_lc, y_lc)
-        lc_loss = lc_loss.nan_to_num(0).mean()
-        spec_loss = self.criterion(pred_spec, y_spec)
-        spec_loss = spec_loss.nan_to_num(0).mean()
-        reg_loss = lc_loss + spec_loss
-        self.lc_losses.append(lc_loss)
-        self.spec_losses.append(spec_loss)
+        # w = None
+        # if self.use_w:
+        #     w = torch.stack([i['w'] for i in info]).to(device)
+        latent = y.nan_to_num(-1) if self.use_y_as_latent else None
+        out = self.model(lc ,spectra, latent=latent)
+        # y_lc = y[:, self.lc_reg_idx:]
+        # y_spec = y[:, :self.lc_reg_idx]
+        # pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles)
+        # pred_spec = out['spectra_pred'].view(lc.shape[0], -1, self.num_quantiles)
+        # lc_loss = self.criterion(pred_lc, y_lc)
+        # lc_loss = lc_loss.nan_to_num(0).mean()
+        # spec_loss = self.criterion(pred_spec, y_spec)
+        # spec_loss = spec_loss.nan_to_num(0).mean()
+        # reg_loss = lc_loss + spec_loss
+        # self.lc_losses.append(lc_loss)
+        # self.spec_losses.append(spec_loss)
         
         jepa_loss = out['loss']
+        print("jepa loss: ", jepa_loss.item())
         self.jepa_losses.append(jepa_loss)
-        loss = reg_loss * self.alpha + jepa_loss * (1 - self.alpha)
+        loss = jepa_loss * (1 - self.alpha)
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
         
-        if batch_idx % 200 == 0:
-            print('separate losses - ', lc_loss.item(), spec_loss.item(), jepa_loss.item())
-        self.train_aux_loss_1.append(loss.item())
-        self.train_aux_loss_2.append(reg_loss.item())
+        # if batch_idx % 200 == 0:
+            # print('separate losses - ', lc_loss.item(), spec_loss.item(), jepa_loss.item())
+        # self.train_aux_loss_1.append(loss.item())
+        # self.train_aux_loss_2.append(reg_loss.item())
 
-        lc_pred_med = pred_lc[: ,:, self.num_quantiles // 2]
-        spec_pred_med = pred_spec[: ,:, self.num_quantiles // 2]
-        pred_med = torch.cat([spec_pred_med, lc_pred_med], dim=-1)
-        acc = (torch.abs(pred_med - y) < y * 0.1).sum(0)
+        # lc_pred_med = pred_lc[: ,:, self.num_quantiles // 2]
+        # spec_pred_med = pred_spec[: ,:, self.num_quantiles // 2]
+        # pred_med = torch.cat([spec_pred_med, lc_pred_med], dim=-1)
+        # acc = (torch.abs(pred_med - y) < y * 0.1).sum(0)
+        acc =0 
 
         return loss, acc, y
     
@@ -1183,8 +1187,9 @@ class ContrastiveTrainer(Trainer):
         self.model.eval()
         preds = np.zeros((0, self.output_dim, self.num_quantiles))
         targets = np.zeros((0, self.output_dim))
-        tot_kic = []
+        kids = []
         tot_teff = []
+        features = []
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
@@ -1217,6 +1222,8 @@ class ContrastiveTrainer(Trainer):
                     out = self.model(lc, spectra)
             acc = 0
             loss = out['loss'] if 'loss' in out.keys() else 0
+            features.append(out['features'].cpu().numpy())
+            kids.extend([i['KID'] for i in info])
             if self.criterion is not None:
                 y_pred = out['preds']
                 y_pred = y_pred.view(lc.shape[0], -1, self.num_quantiles)
@@ -1233,51 +1240,92 @@ class ContrastiveTrainer(Trainer):
                 break
             pbar.set_description(f"test_loss: {loss.item():.4f}, test_acc: {acc}")
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets, aggregated_info
+        return (targets, kids, np.zeros(len(kids)), np.zeros(len(kids)),
+         np.concatenate(features), np.zeros((len(kids), 2)), np.zeros((len(kids), 2)))
 
-class ClassificationTrainer(Trainer):
-    def __init__(self, num_cls=1, use_w=False, **kwargs):
+class FineTuneTrainer(Trainer):
+    def __init__(self, use_w, latent_vars,
+                 loss_weight_name=None,
+                  only_lc=False, error_name=None, **kwargs):
         super().__init__(**kwargs)
-        self.num_cls = num_cls
+        self.latent_vars = latent_vars
         self.use_w = use_w
-
-    def train_batch(self, batch, batch_idx, device):
-        lc, spectra,y , _, _,info = batch
-        # print("numberof 1s: ", (y == 1).sum(), "number of 0s: ", (y == 0).sum())
-        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        self.loss_weight_name = loss_weight_name
+        self.only_lc = only_lc
+        self.error_name = error_name
+    
+    def get_model_output(self, lc, spectra, lc2, spectra2, info, device, val=False):
         b = lc.shape[0]
-        W = None
+        w = None
+        w_loss = None
+        sigma = None
+        pred_dict = {}
+        if self.latent_vars is not None:
+            latent = torch.stack([torch.tensor([i[l] for l in self.latent_vars]) for i in info]).to(device).float()
+            latent = latent.nan_to_num(0)
+        else:
+            latent = None
+        if val:
+            self.model.eval()
+        if self.loss_weight_name is not None:
+            w_loss = torch.stack([torch.tensor(i[self.loss_weight_name]) for i in info]).to(device).float()
+            w_loss = torch.exp(-w_loss)
         if self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
-        out = self.model(lc, spectra, w_tune=w)
+            out = self.model(lc, spectra, w_tune=w) 
+        elif self.only_lc:
+            out = self.model(lc, lc2)
+        else:
+            out = self.model(lc, spectra, latent=latent)
         if isinstance(out, tuple):
-            out = out[0]
+            out, sigma, pred_dict = out[0], out[1], out[2]
         elif isinstance(out, dict):
             out = out['preds']
-        # print("nans in y: ", torch.isnan(y).sum(), "nans in out: ", torch.isnan(out).sum())
-        loss = self.criterion(out, y)
+        if self.num_quantiles > 1:
+            out = out.view(b, -1, self.num_quantiles)
+        else:
+            out = out.squeeze(1)
+        if self.error_name is not None:
+            err = torch.stack([torch.tensor(i[self.error_name]) for i in info]).to(device).float()
+        else:
+            err = None
+        return out, sigma, pred_dict, w_loss, latent, err
+
+
+class ClassificationTrainer(FineTuneTrainer):
+    def __init__(self, latent_vars, num_cls=1, use_w=False,
+     loss_weight_name=None, only_lc=False, error_name=None, **kwargs):
+        super().__init__(use_w=use_w, latent_vars=latent_vars,
+                 loss_weight_name=loss_weight_name,
+                  only_lc=only_lc, error_name=error_name, **kwargs)
+        self.num_cls = num_cls
+
+    def train_batch(self, batch, batch_idx, device):
+        lc, spectra, y , lc2, spectra2,info = batch
+        lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+        out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2, spectra2, info, device)
+        if len(y.shape) == 2 and y.shape[1] == 1:
+            y = y.squeeze(1)
+        loss = self.criterion(out, y.long())
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
             self.scheduler.step()
-        probs = torch.sigmoid(out)
-        acc = ((probs > 0.5) == y).sum(0)
+        pred_cls = out.argmax(dim=-1)
+        acc = (pred_cls == y).sum(0)
         # acc = (torch.abs((out - y)) < 0.1).sum(0)
         return loss, acc, y 
 
     def eval_batch(self, batch, batch_idx, device):
-        lc, spectra,y , _, _,info = batch
-        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
-        w = None
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
-        out = self.model(lc, spectra, w_tune=w)
-        if isinstance(out, tuple):
-            out = out[0]
-        elif isinstance(out, dict):
-            out = out['preds']
-        loss = self.criterion(out, y)
-        acc = (torch.abs((out - y)) < 0.1).sum(0)
+        lc, spectra, y , lc2, spectra2,info = batch
+        lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+        with torch.no_grad():
+            out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2, spectra2, info, device)
+        if len(y.shape) == 2 and y.shape[1] == 1:
+            y = y.squeeze(1)
+        loss = self.criterion(out, y.long())
+        pred_cls = out.argmax(dim=-1)
+        acc = (pred_cls == y).sum(0)
         return loss, acc, y
     
     def predict(self, test_dataloader, device, load_best=False):
@@ -1285,16 +1333,24 @@ class ClassificationTrainer(Trainer):
         Returns the predictions of the model on the given dataset.
         """
         self.model.eval()
-        preds = np.zeros((0, self.num_cls))
-        targets = np.zeros((0, self.num_cls))
+        probs = np.zeros((0, self.num_cls))
+        preds_cls = np.zeros((0))
+        targets = np.zeros((0))
         tot_kic = []
         tot_teff = []
+        tot_projections = []
+        final_features = []
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
-        for i,(lc, spectra, y, _, _, info, _) in enumerate(pbar):
-            lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
-            b = lc.shape[0]
+
+        # A = self.model.module.dual_former.projection_head.weight.detach()
+        # eigenvalues, eigenvectors = self._get_eigenspace(A)
+        # reducer = umap.UMAP(n_components=2)
+
+        for i,(batch) in enumerate(pbar):
+            lc, spectra, y , lc2, spectra2,info = batch
+            lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
@@ -1303,51 +1359,59 @@ class ClassificationTrainer(Trainer):
                             aggregated_info[key] = []
                         aggregated_info[key].append(value)
             with torch.no_grad():
-                w = None
-                if self.use_w:
-                    w = torch.stack([i['w'] for i in info]).to(device)
-                out = self.model(lc, spectra, w_tune=w)
-                probs = torch.softmax(out, dim=1)
-            preds = np.concatenate((preds, probs.cpu().numpy()))
+                out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2, spectra2, info, device)
+            if len(y.shape) == 2 and y.shape[1] == 1:
+                y = y.squeeze(1)
+            loss = self.criterion(out, y.long())
+            out = out.softmax(dim=-1)
+            pred_cls = out.argmax(dim=-1)
+            acc = (pred_cls == y).sum(0)
+            pbar.set_description(f"test_loss: {loss.item():.4f}, test_acc: {acc}")
+    
+            projection_comb = pred_dict['eigen_projection'].cpu().numpy()
+            tot_projections.append(projection_comb)
+
+            features = pred_dict['head_features'].cpu().numpy()
+            final_features.append(features)
+            # reduced_data_comb = reducer.fit_transform(pr
+            # print("shapes: ", projection_comb.shape, features.shape)
+            probs = np.concatenate((probs, out.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
+            preds_cls = np.concatenate((preds_cls, pred_cls.cpu().numpy()))
             if i > self.max_iter:
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets, aggregated_info
+        return (preds_cls, targets, probs, np.concatenate(tot_projections),
+         np.concatenate(final_features), aggregated_info)
 
-class RegressorTrainer(Trainer):
-    def __init__(self, use_w, only_lc=False, **kwargs):
-        super().__init__(**kwargs)
-        self.use_w = use_w
-        self.only_lc = only_lc
+class RegressorTrainer(FineTuneTrainer):
+    def __init__(self, use_w, latent_vars,
+                 loss_weight_name=None,
+                  only_lc=False, error_name=None, **kwargs):
+        super().__init__(use_w=use_w, latent_vars=latent_vars,
+                 loss_weight_name=loss_weight_name,
+                  only_lc=only_lc, error_name=error_name, **kwargs)
+    
     
     def train_batch(self, batch, batch_idx, device):
-        lc, spectra, y , lc2, spectra2,info = batch
-        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
-        b = lc.shape[0]
-        w = None
-        print("lcs: ", lc.shape, lc2.shape, lc.isnan().sum(), lc2.isnan().sum())
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
-            out = self.model(lc, spectra, w_tune=w) 
-        elif self.only_lc:
-            out = self.model(lc, lc2)
-        else:
-            out = self.model(lc, spectra)
-        if isinstance(out, tuple):
-            out = out[0]
-        elif isinstance(out, dict):
-            out = out['preds']
-        if self.num_quantiles > 1:
-            out = out.view(b, -1, self.num_quantiles)
-        else:
-            out = out.squeeze(1)
-            if len(y.shape) == 2 and y.shape[1] == 1:
-                y = y.squeeze(1)
-        # print(out.shape, y.shape, out.isnan().sum(), y.isnan().sum())
-        loss = self.criterion(out, y)
-        # print('shapes: ', x.shape, y.shape, out.shape, 'w: ', w.shape, 'loss: ', loss.shape)
-        # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
+        lc, spectra, y , lc2, spectra2, info = batch
+        lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+        
+        out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2, spectra2, info, device)
+        if len(y.shape) == 2 and y.shape[1] == 1:
+            y = y.squeeze(1)
+        loss_reg = self.criterion(out, y).squeeze()
+        loss = reg_loss
+        # sigma = sigma.squeeze()
+        # print('out: ', out.shape, 'y: ', y.shape, 'sigma: ', sigma.shape, 'loss: ', loss.shape)
+        # loss = 0.5 * torch.exp(-sigma) * loss_reg + 0.5 * sigma
+        if self.loss_weight_name is not None:
+            loss = (loss * w_loss.unsqueeze(-1))
+        loss = loss.mean(0).mean()
+        if self.error_name is not None:
+            loss_err = F.mse_loss(0.5 * torch.exp(sigma), err)
+            loss = loss + loss_err
+        print("losses: ", loss_reg.mean(), sigma.mean(), loss.mean())
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
@@ -1362,37 +1426,24 @@ class RegressorTrainer(Trainer):
         return loss, acc, y
 
     def eval_batch(self, batch, batch_idx, device):
-        lc, spectra,y , lc2, spectra2,info = batch
-        lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
-        b = lc.shape[0]
+        lc, spectra, y , lc2, spectra2, info = batch
+        lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
         with torch.no_grad():
-            w = None
-            if self.use_w:
-                w = torch.stack([i['w'] for i in info]).to(device)
-                out = self.model(lc, spectra, w_tune=w) 
-            elif self.only_lc:
-                out = self.model(lc, lc2)
-            else:
-                out = self.model(lc, spectra)
-        if isinstance(out, tuple):
-            out = out[0]
-        elif isinstance(out, dict):
-            out = out['preds']
-        if self.num_quantiles > 1:
-            out = out.view(b, -1, self.num_quantiles)
-        else:
-            out = out.squeeze(1)
-            if len(y.shape) == 2 and y.shape[1] == 1:
-                y = y.squeeze(1)
-        if isinstance(out, tuple):
-            out = out[0]
-        elif isinstance(out, dict):
-            out = out['preds']
-        if self.num_quantiles > 1:
-            out = out.view(b, -1, self.num_quantiles)
-        else:
-            out = out.squeeze(1)
-        loss = self.criterion(out, y)
+            out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2,
+                                                spectra2, info, device, val=True)
+        if len(y.shape) == 2 and y.shape[1] == 1:
+            y = y.squeeze(1)
+        reg_loss = self.criterion(out, y).squeeze()
+        loss = reg_loss
+        # sigma = sigma.squeeze()
+        # loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+        if self.loss_weight_name is not None:
+            loss = (loss * w_loss.unsqueeze(-1))
+        loss = loss.mean()
+        if self.error_name is not None:
+            loss_err = F.mse_loss(0.5 * torch.exp(sigma), err)
+            loss = loss + loss_err
+        
         # loss = (loss * w.unsqueeze(-1)).mean(0).sum()
         # if self.wandb:
         #     wandb.log({"val_loss": loss.item()})
@@ -1413,14 +1464,17 @@ class RegressorTrainer(Trainer):
         self.model.eval()
         preds = np.zeros((0, self.output_dim, self.num_quantiles))
         targets = np.zeros((0, self.output_dim))
+        sigmas = np.zeros((0, 1))
         tot_kic = []
         tot_teff = []
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
-        for i,(lc, spectra, y, _, _, info, _) in enumerate(pbar):
-            lc, spectra, y = lc.to(device), spectra.to(device), y.to(device)
+        for i, batch in enumerate(pbar):
+            lc, spectra, y , lc2, spectra2, info = batch
+            lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
             b = lc.shape[0]
+            w = None
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)
@@ -1429,23 +1483,28 @@ class RegressorTrainer(Trainer):
                             aggregated_info[key] = []
                         aggregated_info[key].append(value)
             with torch.no_grad():
-                w = None
-                if self.use_w:
-                    w = torch.stack([i['w'] for i in info]).to(device)
-                out = self.model(lc, spectra, w_tune=w)
-                if isinstance(out, tuple):
-                    out = out[0]
-                elif isinstance(out, dict):
-                    out = out['preds']
-                y_pred = out.view(b, -1, self.num_quantiles)
-            out_diff = int(y.shape[1] - y_pred.shape[1])
-            y = y[:, out_diff:]
-            preds = np.concatenate((preds, y_pred.cpu().numpy()))
+                out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2,
+                                                spectra2, info, device, val=True)
+            if len(y.shape) == 2 and y.shape[1] == 1:
+                y = y.squeeze(1)  
+            loss = self.criterion(out, y).squeeze()
+            # sigma = sigma.squeeze()
+            loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+            if self.loss_weight_name is not None:
+                loss = (loss * w_loss.unsqueeze(-1))
+            loss = loss.mean()
+            if self.error_name is not None:
+                loss_err = F.mse_loss(0.5 * torch.exp(sigma), err)
+                loss = loss + loss_err
+            if len(out.shape) == 2:
+                out = out.unsqueeze(-1)
+            preds = np.concatenate((preds, out.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
+            sigmas = np.concatenate((sigmas, sigma.cpu().numpy()))
             if i > self.max_iter:
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets, aggregated_info
+        return preds, targets.squeeze(), sigmas.squeeze(), aggregated_info
 
 class MaskedRegressorTrainer(Trainer):
     def __init__(self, w_name, w_init_val, ssl_criterion, ssl_weight=0.5, **kwargs):

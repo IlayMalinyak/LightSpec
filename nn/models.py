@@ -540,6 +540,7 @@ class Transformer(nn.Module):
         # Set first layer flag for initialization purposes
         self.encoder = nn.Linear(args.in_channels, args.encoder_dim)
         self.encoder.is_first_layer = True
+        self.pooling_method=args.pooling_method
         
         # Create transformer blocks
         self.layers = torch.nn.ModuleList()
@@ -566,9 +567,15 @@ class Transformer(nn.Module):
         h = self.encoder(x)
         for layer in self.layers:
             h = layer(h)
-        h = self.norm(h)[:, -1]
+        h = self.norm(h)
+        if self.pooling_method == 'sum':
+            h = h.sum(dim=1)
+        elif self.pooling_method == 'cls_token':
+            h = h[:,0,:]
+        elif self.pooling_method == 'mean':
+            h = h.mean(dim=1)
         output = self.head(h)        
-        return output, y
+        return output, y, h
 
 
 class LSTMFeatureExtractor(nn.Module):

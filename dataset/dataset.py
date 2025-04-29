@@ -537,8 +537,8 @@ class KeplerDataset():
                 if not isinstance(x, np.ndarray) or x.size == 0:
                     print(f"Warning: Empty or invalid numpy array for {row['KID']}")
                     x = np.zeros((self.seq_len, 1))
-            except FileNotFoundError:
-                print(f"Error: File not found for {row['KID']}")
+            except FileNotFoundError as e:
+                # print(f"Error: File not found for {row['KID']}", e)
                 x = np.zeros((self.seq_len, 1))
             except Exception as e:
                 print(f"Error loading file for {row['KID']}: {str(e)}")
@@ -571,15 +571,20 @@ class KeplerDataset():
                 meta['Prot_ref'] = np.nan
             conf_cols = [c for c in row.keys() if 'confidence' in c]
             prob_cols = [c for c in row.keys() if 'prob' in c]
+            inc_cols = [c for c in row.keys() if 'inc' in c]
             for c in conf_cols:
                 meta[c] = row[c]
             for c in prob_cols:
+                meta[c] = row[c]
+            for c in inc_cols:
                 meta[c] = row[c]
             if 'Pmax' in row.keys() and 'Pmin' in row.keys():
                 meta['Pmax'] = row['Pmax']
                 meta['Pmin'] = row['Pmin']
             if 'RUWE' in row.keys():
                 meta['RUWE'] = row['RUWE']
+            if 'sigma' in row.keys():
+                meta['sigma'] = row['sigma']
             return x, meta, None, y_val
         else:
             paths = row['data_file_path']
@@ -767,7 +772,11 @@ class LightSpecDataset(KeplerDataset):
         except OSError as e:
             print("Error reading file ", obsid, e)
             spectra = np.zeros((self.spec_seq_len))
-            meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
+            wv = np.load('/data/lightSpec/lamost_wv.npy')
+            to_pad = spectra.shape[0] - wv.shape[0]
+            if to_pad > 0:
+                wv = np.pad(wv, ((0, to_pad)), mode='constant')
+            meta = {'RV': 0, 'wavelength': wv}
         t2 = time.time()
         if self.spec_transforms:
             spectra, _, spec_info = self.spec_transforms(spectra, None, meta)
@@ -895,8 +904,7 @@ class FineTuneDataset(LightSpecDataset):
     
     def __getitem__(self, idx):
         light, spectra, _, light_target, spectra_target, info = super().__getitem__(idx)
-        row = self.df.iloc[idx]
-        y = torch.tensor([row[label] for label in self.labels], dtype=torch.float32)
+        y = torch.tensor([info[label] for label in self.labels], dtype=torch.float32)
         # print(f"Light time: {light_time}, Spec time: {spec_time}, Spec transform time: {spec_transform_time}")
         return (light, spectra, y, light_target, spectra_target, info)
 
