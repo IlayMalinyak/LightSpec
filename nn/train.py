@@ -1401,7 +1401,7 @@ class RegressorTrainer(FineTuneTrainer):
         if len(y.shape) == 2 and y.shape[1] == 1:
             y = y.squeeze(1)
         loss_reg = self.criterion(out, y).squeeze()
-        loss = reg_loss
+        loss = loss_reg
         # sigma = sigma.squeeze()
         # print('out: ', out.shape, 'y: ', y.shape, 'sigma: ', sigma.shape, 'loss: ', loss.shape)
         # loss = 0.5 * torch.exp(-sigma) * loss_reg + 0.5 * sigma
@@ -1411,7 +1411,7 @@ class RegressorTrainer(FineTuneTrainer):
         if self.error_name is not None:
             loss_err = F.mse_loss(0.5 * torch.exp(sigma), err)
             loss = loss + loss_err
-        print("losses: ", loss_reg.mean(), sigma.mean(), loss.mean())
+        # print("losses: ", loss_reg.mean(), sigma.mean(), loss.mean())
         loss.backward()
         self.optimizer.step()
         if self.scheduler is not None:
@@ -1433,8 +1433,8 @@ class RegressorTrainer(FineTuneTrainer):
                                                 spectra2, info, device, val=True)
         if len(y.shape) == 2 and y.shape[1] == 1:
             y = y.squeeze(1)
-        reg_loss = self.criterion(out, y).squeeze()
-        loss = reg_loss
+        loss_reg = self.criterion(out, y).squeeze()
+        loss = loss_reg
         # sigma = sigma.squeeze()
         # loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
         if self.loss_weight_name is not None:
