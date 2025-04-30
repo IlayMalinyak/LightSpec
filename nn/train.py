@@ -21,6 +21,7 @@ from util.utils import kepler_collate_fn
 from pathlib import Path
 import io
 import zipfile
+from postprocessing.eigenspace_analysis import apply_linear_regression
 # import wandb
 
 def count_occurence(x,y):
@@ -1351,6 +1352,28 @@ class RegressorTrainer(Trainer):
                 y = y.squeeze(1)
         return out, sigma, w_loss, latent
 
+    # def train_epoch(self, device, epoch):
+    #     self.model.train()
+    #     projections = []
+    #     targets = []
+    #     pbar = enumerate(tqdm(self.train_dl))
+    #     for i, batch in pbar:
+    #         lc, spectra, y, lc2, spectra2, info = batch
+    #         lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+    #         latent = None
+    #         if self.latent_vars is not None:
+    #             latent = torch.stack([torch.tensor([i[l] for l in self.latent_vars]) for i in info]).to(device).float()
+    #         out = self.model(lc, spectra, latent=latent)
+    #         if isinstance(out, tuple):
+    #             out, sigma, features = out[0], out[1], out[2]
+    #         projections.append(features.cpu().detach().numpy())
+    #         targets.append(y.cpu().detach().numpy())
+    #
+    #     projections = np.concatenate(projections)
+    #     targets = np.concatenate(targets)
+    #     res = apply_linear_regression(projections, targets, fraction_scale=1)
+    #     print(res['score'])
+
     def train_batch(self, batch, batch_idx, device):
         lc, spectra, y, lc2, spectra2, info = batch
         lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
@@ -1362,7 +1385,7 @@ class RegressorTrainer(Trainer):
             latent = None
         if self.loss_weight_name is not None:
             w_loss = torch.stack([torch.tensor(i[self.loss_weight_name]) for i in info]).to(device).float()
-            w_loss = 1 + torch.sqrt(w_loss)
+            w_loss = 1 / (1 + torch.sqrt(w_loss))
         if self.use_w:
             w = torch.stack([i['w'] for i in info]).to(device)
             out = self.model(lc, spectra, w_tune=w)
@@ -1383,7 +1406,7 @@ class RegressorTrainer(Trainer):
         loss = self.criterion(out, y).squeeze()
         # sigma = sigma.squeeze()
         # print('out: ', out.shape, 'y: ', y.shape, 'sigma: ', sigma.shape, 'loss: ', loss.shape)
-        loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+        # loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
         if self.loss_weight_name is not None:
             loss = (loss * w_loss)
         loss = loss.mean(0).mean()

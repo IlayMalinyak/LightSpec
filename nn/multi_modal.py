@@ -4,8 +4,49 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from nn.DualFormer.dual_attention import DualFormer
+from postprocessing.eigenspace_analysis import apply_linear_regression
 
 
+class LinearRegressionWithScaling(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(LinearRegressionWithScaling, self).__init__()
+        self.linear = nn.Linear(input_dim, output_dim)
+        self.register_buffer('x_mean', torch.zeros(input_dim))
+        self.register_buffer('x_std', torch.ones(input_dim))
+        self.register_buffer('y_mean', torch.zeros(output_dim))
+        self.register_buffer('y_std', torch.ones(output_dim))
+        self.is_fitted = False
+
+    def forward(self, X):
+        """Forward pass with automatic scaling and inverse scaling."""
+        # if not self.is_fitted:
+        #     raise RuntimeError("Model must be fitted before making predictions")
+
+        # Scale input
+        X_scaled = (X - self.x_mean) / self.x_std
+
+        # Make prediction in scaled space
+        y_scaled = self.linear(X_scaled)
+
+        # Inverse transform to original scale
+        y_pred = y_scaled * self.y_std + self.y_mean
+
+        return y_pred
+
+    def score(self, X, y):
+        """Calculate R^2 score, similar to scikit-learn's score method."""
+        with torch.no_grad():
+            y_pred = self(X)
+            u = ((y - y_pred) ** 2).sum()
+            v = ((y - y.mean(dim=0)) ** 2).sum()
+            return 1 - u / v
+
+    def accuracy_within_percentage(self, X, y, percentage=0.1):
+        """Calculate accuracy as predictions within percentage of true values."""
+        with torch.no_grad():
+            y_pred = self(X)
+            acc = (torch.abs(y_pred - y) < y * percentage).float().mean(dim=0)
+            return acc
 
 class MLPHead(nn.Module):
     """
@@ -150,13 +191,16 @@ class FineTuner(nn.Module):
         super(FineTuner, self).__init__()
         print("head args: ", head_args)
         self.model = model
-        # self.head = MLPHead(**head_args)
-        self.head = nn.Sequential(
-            nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
-            nn.LayerNorm(head_args['hidden_dim']),
-            nn.SiLU(),
-            nn.Linear(head_args['hidden_dim'], 1)
-        )
+        self.head = MLPHead(**head_args)
+        # self.head = nn.Sequential(
+        #     nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
+        #     # nn.LayerNorm(head_args['hidden_dim']),
+        #     nn.BatchNorm1d(head_args['hidden_dim']),
+        #     nn.SiLU(),
+        #     nn.Linear(head_args['hidden_dim'], head_args['out_dim'])
+        # )
+        # self.head = Transformer(head_args)
+        # self.head = LinearRegressionWithScaling(head_args['in_dim'], head_args['out_dim'])
         self.sigma_head = nn.Sequential(
             nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
             nn.LayerNorm(head_args['hidden_dim']),
@@ -208,10 +252,12 @@ class FineTuner(nn.Module):
             proj_lc, proj_spec = dual_pred['proj1'], dual_pred['proj2']
 
             final_features = (spec_emb + lc_emb) @ self.eigenvectors
+            # y = torch.cat([spec_emb[:, -2].unsqueeze(-1), spec_emb[:, -4].unsqueeze(-1)], dim=-1)
+            # lr_res = apply_linear_regression(final_features.cpu().numpy(), y.cpu().numpy(), 'test')
             # final_features = torch.cat((spec_emb, lc_emb), dim=1)
             # final_features = torch.cat((proj_lc, proj_spec), dim=1)
         elif self.method == 'moco':
             final_features = model_out['q']
         predictions = self.head(final_features)
         sigma = self.sigma_head(final_features)
-        return predictions, sigma
+        return predictions, sigma, final_features

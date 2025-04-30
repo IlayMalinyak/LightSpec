@@ -10,7 +10,8 @@ import umap
 import seaborn as sns
 import torch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from eigenspace_analysis import transform_eigenspace, plot_diagrams
+from eigenspace_analysis import transform_eigenspace, plot_diagrams, plot_umap
+from classification_analysis import plot_classification_results
 
 T_MIN =3483.11
 T_MAX = 7500.0
@@ -805,7 +806,7 @@ def plot_error_vs_snr(df_path, bins=10):
         # for i, bin_label in enumerate(bin_labels):
         #     print(f"SNR bin {bin_label}: {np.mean(binned_data[i]):.3f}")
 
-def plot_umap(log_path, color_cols=['Teff'], merge_cat=None, left_on=None, right_on=None, suffix=''):
+def plot_umap_encoder(log_path, color_cols=['Teff'], merge_cat=None, left_on=None, right_on=None, suffix=''):
     umap_files = [os.path.join(log_path, f) for f in os.listdir(log_path) if f.endswith('.csv') and 'umap' in f]
     exp_dir = log_path.split('/')[-1]
     modal_type = get_modal_type(exp_dir)
@@ -938,72 +939,9 @@ def analyze_projection_distributions(projections, n_bins=50, top_n=10):
 
     return mean_magnitudes, median_magnitudes, std_magnitudes
 
-def plot_eigenspace(dir_name, file_name):
-    berger = pd.read_csv(berger_catalog_path)
-    lightpred = pd.read_csv(lightpred_full_catalog_path)
-    godoy = pd.read_csv(godoy_catalog_path)
-    eigvec_path = f'{dir_name}\eigenvectors_{file_name}.npy'
-    eigvecs = np.load(eigvec_path)
-    eigvals_path = f'{dir_name}\eigenvalues_{file_name}.npy'
-    eigvals = np.abs(np.load(eigvals_path))
-    proj_path = f'{dir_name}\projections_{file_name}.npy'
-    projections = np.load(proj_path)
-    reducer = umap.UMAP(n_components=2)
-    reduced_data_comb = reducer.fit_transform(projections)
-    # analyze_projection_distributions(projections, n_bins=30)
-    df = pd.read_csv(f'{dir_name}\preds_{file_name}.csv')
-    df = df.merge(berger, right_on='KID', left_on='kid',  how='left')
-    age_cols = [c for c in lightpred.columns if 'age' in c]
-    df = df.merge(lightpred[['KID', 'predicted period', 'mean_period_confidence'] + age_cols], right_on='KID', left_on='kid',  how='left')
-    df = df.merge(godoy, right_on='KIC', left_on='kid', how='left')
-    df['main_seq'] = df.apply(giant_cond, axis=1)
-    df = df[df['main_seq'] == True]
-    df['subgiant'] = (df['flag_CMD'] == 'Subgiant').astype(int)
-    print("ploting eigenspace of ", file_name, ' with ', len(df), ' samples')
-    cols_to_plot = ['Teff', 'Rstar', 'Lstar', 'logg',  'subgiant', 'BPmRP_0',
-                    'predicted period', 'age_gyrointerp_model', 'age_angus23', 'flag_Binary_Union']
-    fig, axes = plt.subplots(nrows=2, ncols=5, figsize=(42, 24), sharex=True, sharey=True)
-    axes = axes.flatten()
-    for i, ax in enumerate(axes):
-        color = df[cols_to_plot[i]] if cols_to_plot[i] != 'Teff' else np.log(df[cols_to_plot[i]])
-        label = cols_to_plot[i] if cols_to_plot[i] != 'Teff' else f'log({cols_to_plot[i]})'
-        sc = ax.scatter(reduced_data_comb[:, 0], reduced_data_comb[:, 1], c=color)
-        cbar = fig.colorbar(sc,  orientation='vertical', label=label)
-        cbar.ax.yaxis.set_tick_params(labelsize=18)  # Set colorbar tick label size
-        cbar.set_label(label, fontsize=20)  # Set colorbar label size
-    fig.supxlabel('UMAP X', fontsize=20)
-    fig.supylabel('UMAP Y', fontsize=20)
-    fig.suptitle('UMAP of Eigenspace', fontsize=20)
-    plt.tight_layout()
-    plt.savefig(os.path.join(dir_name, f'umap_eigenspace_{file_name}.png'))
-    plt.show()
 
-    # for vec_idx in range(5):
-    #     vec = eigvecs[:, vec_idx]
-    #     plt.plot(vec)
-    # plt.show()
-    # x = np.linspace(0, len(df), len(df))
-    # plt.scatter(df['umap_comb_X'], df['umap_comb_Y'], c=df['Teff'])
-    # plt.show()
-    # x = np.linspace(0, len(df), len(df))
-    # for val_idx in range(1, 6, 2):
-    #     plt.scatter(df[f'top_idx_comb_{val_idx}'], df[f'top_values_comb_{val_idx}'], c=df['Teff'])
-    #     plt.title(f'{val_idx}')
-    #     plt.show()
-    #     fig, axes = plt.subplots(1, 2)
-    #     sc0 = axes[0].scatter(df['Teff'], df['logg'], c=df[f'top_values_comb_{val_idx}'])
-    #     axes[0].invert_xaxis()
-    #     axes[0].invert_yaxis()
-    #     cbar = fig.colorbar(sc0, orientation='vertical', label='eigenvalues idx')
-    #     cbar.ax.yaxis.set_tick_params(labelsize=18)  # Set colorbar tick label size
-    #     sc1 = axes[1].scatter(df['Teff'], df['Lstar'], c=df[f'top_values_comb_{val_idx}'])
-    #     axes[1].invert_xaxis()
-    #     # plt.gca().invert_yaxis()
-    #     cbar = fig.colorbar(sc1, orientation='vertical', label='eigenvalues idx')
-    #     cbar.ax.yaxis.set_tick_params(labelsize=18)
-    #     fig.suptitle(f'{val_idx}', fontsize=20)
-    #     plt.tight_layout()
-    #     plt.show()
+
+
 
 
 
@@ -1017,11 +955,21 @@ if __name__ == '__main__':
     lc_df_path = os.path.join(root_dir, 'light', 'light_2025-03-19',
                               'DoubleInputRegressor_lc_decode2_3_1_ssl_cqr.csv')
     lightspec_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-04-22')
-    files = [f for f in os.listdir(lightspec_dir) if f.endswith('csv')]
+    finetune_nss_dir = os.path.join(root_dir, 'finetune', 'nss_finetune_2025-04-29')
+    finetune_age_dir = os.path.join(root_dir, 'finetune', 'age_finetune_2025-04-30')
+    files = [f for f in os.listdir(finetune_age_dir) if f.endswith('csv')]
     for file in files:
-        if '6_latent' in file:
-            file_name = file.replace('preds_', '').replace('.csv', '')
-            plot_diagrams(lightspec_dir, file_name)
+        if file.endswith('.csv'):
+            plot_quantile_predictions(os.path.join(finetune_age_dir, file))
+        # if 'hard' in file:
+        #     file_name = file.replace('preds_', '').replace('.csv', '')
+        #     plot_classification_results(finetune_nss_dir, file_name)
+    # exit()
+    # files = [f for f in os.listdir(lightspec_dir) if f.endswith('csv')]
+    # for file in files:
+    #     if '6_latent' in file:
+    #         file_name = file.replace('preds_', '').replace('.csv', '')
+    #         plot_diagrams(lightspec_dir, file_name)
             # plot_eigenspace(lightspec_dir, file_name)
     exit()
     lightspec_best_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-03-28',)

@@ -20,6 +20,9 @@ ebs_path =  r"C:\Users\Ilay\projects\kepler\data\binaries\tables\ebs.csv"
 berger_catalog_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\berger_catalog_full.csv"
 lamost_kepler_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\lamost_dr8_gaia_dr3_kepler_ids.csv"
 lamost_apogee_path = r"C:\Users\Ilay\projects\kepler\data\apogee\crossmatched_catalog_LAMOST.csv"
+mist_path = r"C:\Users\Ilay\projects\kepler\data\binaries\tables\ks_mist_catalog_kepler_1e9_feh_interp_all.csv"
+kepler_meta_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\kepler_dr25_meta_data.csv"
+
 
 # --- Helper Function (from your example) ---
 def giant_cond(row):
@@ -30,6 +33,23 @@ def giant_cond(row):
     return row['logg'] > 4.0
 
 # --- 1. Data Loading and Preparation ---
+
+def get_mag_data(df):
+    kepler_meta = pd.read_csv(kepler_meta_path)
+    mist_data = pd.read_csv(mist_path)
+    mag_cols = [c for c in kepler_meta.columns if ('MAG' in c) or ('COLOR' in c)]
+    meta_columns = mag_cols + ['KID', 'EBMINUSV']
+    df = df.merge(kepler_meta[meta_columns], on='KID', how='left')
+    df = df.merge(mist_data[['KID', 'Kmag_MIST']], on='KID', how='left')
+    if 'Dist' not in df.columns:
+        berger_cat = pd.read_csv(berger_catalog_path)
+        df = df.merge(berger_cat, on='KID', how='left',
+                      suffixes=['_old', ''])
+    for c in mag_cols:
+        df[f'{c}_abs'] = df.apply(lambda x: x[c] - 5 * np.log10(x['Dist']) + 5, axis=1)
+    df['kmag_abs'] = df.apply(lambda x: x['KMAG'] - 5 * np.log10(x['Dist']) + 5, axis=1)
+    df['kmag_diff'] = df['kmag_abs'] - df['Kmag_MIST']
+    return df
 
 def prepare_data(dir_name, file_name):
     """Loads projections, merges catalogs, filters data, and prepares inputs."""
@@ -51,6 +71,7 @@ def prepare_data(dir_name, file_name):
     godoy = pd.read_csv(godoy_catalog_path)
 
     df = df.merge(berger, right_on='KID', left_on='kid', how='left')
+    df = get_mag_data(df)
     age_cols = [c for c in lightpred.columns if 'age' in c] # Robustly find age columns
     df = df.merge(lightpred[['KID', 'predicted period', 'mean_period_confidence'] + age_cols], right_on='KID', left_on='kid', how='left')
     df = df.merge(godoy, right_on='KIC', left_on='kid', how='left', suffixes=['', '_godoy'])
@@ -85,7 +106,7 @@ def create_hr_coords(df, projections, diagram_coords):
 
 # --- 2. Transformation Methods ---
 
-def apply_linear_regression(X, Y, name):
+def apply_linear_regression(X, Y, fraction_scale=0.2, name=''):
     """Applies Linear Regression to predict Y from X."""
     print("\n--- Applying Linear Regression ---")
     scaler_X = StandardScaler()
@@ -94,36 +115,42 @@ def apply_linear_regression(X, Y, name):
     scaler_Y = StandardScaler()
     Y_scaled = scaler_Y.fit_transform(Y)
 
-    x_indices = np.random.choice(len(X_scaled), size=int(len(X_scaled)*0.2), replace=False)
+    x_indices = np.random.choice(len(X_scaled), size=int(len(X_scaled)*fraction_scale), replace=False)
+    mask = np.ones(len(X_scaled), dtype=bool)
+    mask[x_indices] = False
+    if mask.sum() == 0:
+        mask = np.ones(len(X_scaled), dtype=bool)
     X_train_scaled = X_scaled[x_indices, :]
-    X_test_scaled = X_scaled[~x_indices, :]
+    X_test_scaled = X_scaled[mask, :]
     y_train_scaled = Y_scaled[x_indices, :]
-    y_test_scaled = Y_scaled[~x_indices, :]
+    y_test_scaled = Y_scaled[mask, :]
+
     lr = LinearRegression()
     lr.fit(X_train_scaled, y_train_scaled)
-    Y_pred_scaled = lr.predict(X_scaled)
-
     score = lr.score(X_test_scaled, y_test_scaled)
-    y_hat_scaled = lr.predict(X_test_scaled)
 
+    Y_pred_scaled = lr.predict(X_scaled)
     # Inverse transform to get predictions in original Temp/LogLum scale
     Y_pred_lr = scaler_Y.inverse_transform(Y_pred_scaled)
-    acc =  np.mean(np.abs(Y - Y_pred_lr) < Y*0.1, axis=0)
-    print("acc: ", acc)
+    Y_lr = scaler_Y.inverse_transform(Y_scaled)
+    acc = np.mean(np.abs(Y_lr - Y_pred_lr) < Y_lr*0.1, axis=0)
+    loss = np.abs(Y_lr - Y_pred_lr).mean(axis=-1).mean(axis=-1)
+    print("acc: ", acc, "loss: ", loss)
 
-    fig, axes = plt.subplots(nrows=2, ncols=1)
-    axes[0].hexbin(Y_pred_lr[:, 0], Y_scaled[:, 0], mincnt=1)
-    axes[1].hexbin(Y_pred_lr[:, 1], Y_scaled[:, 1], mincnt=1)
-    fig.suptitle(f"{name} accuracy: {acc[0]:.3f}, {acc[1]:.3f}")
-
-    plt.show()
+    # fig, axes = plt.subplots(nrows=2, ncols=1)
+    # axes[0].hexbin(Y_pred_lr[:, 0], Y_scaled[:, 0], mincnt=1)
+    # axes[1].hexbin(Y_pred_lr[:, 1], Y_scaled[:, 1], mincnt=1)
+    # fig.suptitle(f"{name} accuracy: {acc[0]:.3f}, {acc[1]:.3f}")
+    #
+    # plt.show()
 
     print(f"Generated Linear Regression predictions shape: {Y_pred_lr.shape}, score: {score}")
     return Y_pred_lr, score
 
 def plot_umap(df, umap_coords, dir_name, file_name):
-    cols_to_plot = ['Teff', 'Rstar', 'Lstar', 'logg',  'main_seq', 'subgiant',
-                    'predicted period', 'age_gyrointerp_model', 'age_angus23', 'RUWE']
+    df.loc[df['kmag_diff'].abs() > 2, 'kmag_diff'] = np.nan
+    cols_to_plot = ['Teff', 'Rstar', 'Lstar', 'logg',  'main_seq', 'subgiant', 'FeH',
+                    'predicted period', 'age_gyrointerp_model', 'age_angus23',]
     fig, axes = plt.subplots(nrows=2, ncols=5, figsize=(42, 24), sharex=True, sharey=True)
     axes = axes.flatten()
     for i, ax in enumerate(axes):
@@ -147,7 +174,7 @@ def plot_umap(df, umap_coords, dir_name, file_name):
     plt.show()
 
     binary_cols = ['flag_Binary_Union', 'flag_RUWE', 'flag_RVvariable', 'flag_NSS', 'flag_EB_Kepler',
-                   'flag_EB_Gaia', 'flag_SB9']
+                   'flag_EB_Gaia', 'flag_SB9', 'kmag_diff']
     fig, axes = plt.subplots(nrows=2, ncols=4, figsize=(42, 24), sharex=True, sharey=True)
     axes = axes.flatten()
     for i, ax in enumerate(axes):
@@ -164,6 +191,7 @@ def plot_umap(df, umap_coords, dir_name, file_name):
     plt.tight_layout()
     plt.savefig(os.path.join(dir_name, f'umap_eigenspace_{file_name}_binaries.png'))
     plt.show()
+
 
 def plot_transformation(Y_hr,  Y_pred_lr, score_lr, hr_coords_df,
                  dir_name, file_name, diagram_coords=['Teff', 'Lstar']):
@@ -220,7 +248,7 @@ def transform_eigenspace(df, projections, dir_name, file_name, diagram_coords=['
     # 1. Prepare data
     Y_hr, X = create_hr_coords(df, projections, diagram_coords)
     # 2. Apply transformations
-    Y_pred_lr, score = apply_linear_regression(X, Y_hr, f'{diagram_coords[0]}, {diagram_coords[1]}')
+    Y_pred_lr, score = apply_linear_regression(X, Y_hr, name=f'{diagram_coords[0]}, {diagram_coords[1]}')
 
     # 3. Plot results
     plot_transformation(Y_hr, Y_pred_lr, score, df, dir_name, file_name, diagram_coords)
@@ -229,7 +257,7 @@ def plot_diagrams(dir_name, file_name):
     projections, U_standard, df = prepare_data(
         dir_name, file_name,
     )
-    for coords in [['M_G_0','BPmRP_0'], ['Teff', 'Lstar'], ['Rstar', 'predicted period']]:
+    for coords in [['M_G_0','BPmRP_0'], ['Teff', 'Lstar'], ['Mstar', 'Rstar']]:
         transform_eigenspace(df, projections, dir_name, file_name, coords)
 
     plot_umap(df, U_standard, dir_name, file_name)

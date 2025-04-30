@@ -229,6 +229,7 @@ print("number of trainable parameters in finetune setting: ", num_params)
 
 # loss_fn = CQR(quantiles=quantiles, reduction='none')
 loss_fn = torch.nn.L1Loss(reduction='none')
+# loss_fn = torch.nn.MSELoss(reduction='none')
 optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr),
                              weight_decay=float(optim_args.weight_decay))
 
