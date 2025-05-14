@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: lightspec_dual_former_6_latent_giants_ablation
+  exp_num: lightspec_dual_former_6_latent_giants_ablation_normal
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -43,12 +43,11 @@ Data:
   pred_coeff_val: 0
   approach: "dual_former"
   only_main_seq: False
-  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-18/lightspec_dual_former_latent_full.pth'
-  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-15/lightspec_dual_former_teff_logg_prot_duality_loss_freeze_backbone_latent_2.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss_mainseq.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-20/lightspec_dual_former_6_latent_proj_covloss_2.pth'
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-22/lightspec_dual_former_6_latent_proj_covloss_giants.pth'
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-22/lightspec_dual_former_6_latent_proj_covloss_giants.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-07/lightspec_dual_former_6_latent_giants_ablation.pth'
 
 DoubleInputRegressor_lc:
   encoder_only: True
@@ -314,8 +313,8 @@ dual_former:
   pooling: "mean"  # Options: mean, max, cls, none
   use_prediction_head: False
   latent_dim: 0
-  attention_type: "cross_self" # Options: cross, self, cross_self?
-  projection_type: "transpose" # Options: transpose, normal
+  attention_type: "cross" # Options: cross, self, cross_self?
+  projection_type: "normal" # Options: transpose, normal
   
     
 

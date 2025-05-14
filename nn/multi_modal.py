@@ -120,6 +120,7 @@ class DualNet(nn.Module):
     def __init__(self, lc_backbone, spectra_backbone, dual_former_args,
      lc_reg_args, spectra_reg_args, freeze_backbone=False):
         super(DualNet, self).__init__()
+        print("DualNet init with dualformer args:\n", dual_former_args)
         self.lc_backbone = lc_backbone
         self.spectra_backbone = spectra_backbone
         self.dual_former = DualFormer(**dual_former_args)
@@ -162,7 +163,7 @@ class FineTuner(nn.Module):
         if head_type == 'mlp':
             self.head = MLPHead(**head_args)
         else:
-            self.head_args = Container(in_channels=1, encoder_dim=head_args['hidden_dim'], num_layers=4
+            self.head_args = Container(in_channels=1, encoder_dim=head_args['hidden_dim'], num_layers=8
                 , num_heads=8, output_dim=head_args['out_dim'],
                  dropout=0.1, num_quantiles=1, pooling_method='mean')
             self.head = Transformer(self.head_args)

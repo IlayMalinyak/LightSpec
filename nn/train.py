@@ -1433,6 +1433,7 @@ class RegressorTrainer(FineTuneTrainer):
                                                 spectra2, info, device, val=True)
         if len(y.shape) == 2 and y.shape[1] == 1:
             y = y.squeeze(1)
+        # print("nans in y: ", y.isnan().sum(), "nans in out: ", out.isnan().sum())
         loss_reg = self.criterion(out, y).squeeze()
         loss = loss_reg
         # sigma = sigma.squeeze()
@@ -1486,10 +1487,10 @@ class RegressorTrainer(FineTuneTrainer):
                 out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2,
                                                 spectra2, info, device, val=True)
             if len(y.shape) == 2 and y.shape[1] == 1:
-                y = y.squeeze(1)  
+                y = y.squeeze(1)
             loss = self.criterion(out, y).squeeze()
             # sigma = sigma.squeeze()
-            loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
+            # loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
             if self.loss_weight_name is not None:
                 loss = (loss * w_loss.unsqueeze(-1))
             loss = loss.mean()
@@ -1498,6 +1499,15 @@ class RegressorTrainer(FineTuneTrainer):
                 loss = loss + loss_err
             if len(out.shape) == 2:
                 out = out.unsqueeze(-1)
+            if self.num_quantiles > 1:
+                out_median = out[..., out.shape[-1]//2]
+                if (len(out_median.shape) == 2) and (len(y.shape) == 1):
+                    out_median = out_median.squeeze(1)
+            else:
+                out_median = out
+            acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
+            pbar.set_description(f"test_loss: {loss.item():.4f}, test_acc: {acc}")
+            
             preds = np.concatenate((preds, out.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
             sigmas = np.concatenate((sigmas, sigma.cpu().numpy()))

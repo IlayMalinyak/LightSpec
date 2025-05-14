@@ -133,7 +133,8 @@ class DualAttention(nn.Module):
         embed_dim: int,
         num_heads: int = 8,
         dropout: float = 0.1,
-        bidirectional: bool = True
+        bidirectional: bool = True,
+        attention_type: str = 'cross'
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -143,6 +144,7 @@ class DualAttention(nn.Module):
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
         self.bidirectional = bidirectional
         self.scaling = self.head_dim ** -0.5
+        self.attention_type = attention_type
         
         # Projections for modality 1 -> modality 2 attention
         self.q1_proj = nn.Linear(embed_dim, embed_dim)
@@ -230,6 +232,10 @@ class DualAttention(nn.Module):
         k2 = self._reshape_for_multihead(self.k2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
         v2 = self._reshape_for_multihead(self.v2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
 
+        q2 = self._reshape_for_multihead(self.q2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
+        k1 = self._reshape_for_multihead(self.k1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
+        v1 = self._reshape_for_multihead(self.v1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
+
         if rope is not None:
             cos1, sin1, cos2, sin2 = rope
             q1, query_pass_1 = q1[..., :self.rotary_ndims], q1[..., self.rotary_ndims:]
@@ -238,24 +244,34 @@ class DualAttention(nn.Module):
             q1 = torch.cat((q1, query_pass_1), dim=-1)
             k2 = torch.cat((k2, key_pass_2), dim=-1)
 
-        
-        attended_1 = self._attention(q1, k2, v2, x2_attn_mask)  # [batch, seq_len_1, embed_dim]
+            q2, query_pass_2 = q2[..., :self.rotary_ndims], q2[..., self.rotary_ndims:]
+            k1, key_pass_1 = k1[..., :self.rotary_ndims], k1[..., self.rotary_ndims:]
+            q2, k1 = apply_rotary_pos_emb(q2, k1, cos2, sin2, cos1, sin1)
+            q2 = torch.cat((q2, query_pass_2), dim=-1)
+            k1 = torch.cat((k1, key_pass_1), dim=-1) 
+
+        if self.attention_type == 'cross':
+            attended_1 = self._attention(q1, k2, v2, x2_attn_mask)  # [batch, seq_len_1, embed_dim]
+        elif self.attention_type == 'self':
+            attended_1 = self._attention(q1, k1, v1, x1_attn_mask)
+        elif self.attention_type == 'cross_self':
+            attended_1 = self._attention(q1, k2, v2, x2_attn_mask) \
+                         + self._attention(q1, k1, v1, x1_attn_mask)
+        else:
+            raise ValueError(f"Unsupported attention type: {self.attention_type}")
         attended_1 = self.out1_proj(attended_1)
         
         # Modality 2 attends to modality 1 (if bidirectional)
         if self.bidirectional:
-            q2 = self._reshape_for_multihead(self.q2_proj(x2))  # [batch, heads, seq_len_2, head_dim]
-            k1 = self._reshape_for_multihead(self.k1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
-            v1 = self._reshape_for_multihead(self.v1_proj(x1))  # [batch, heads, seq_len_1, head_dim]
-
-            if rope is not None:
-                q2, query_pass_2 = q2[..., :self.rotary_ndims], q2[..., self.rotary_ndims:]
-                k1, key_pass_1 = k1[..., :self.rotary_ndims], k1[..., self.rotary_ndims:]
-                q2, k1 = apply_rotary_pos_emb(q2, k1, cos2, sin2, cos1, sin1)
-                q2 = torch.cat((q2, query_pass_2), dim=-1)
-                k1 = torch.cat((k1, key_pass_1), dim=-1) 
-            
-            attended_2 = self._attention(q2, k1, v1, x1_attn_mask)  # [batch, seq_len_2, embed_dim]
+            if self.attention_type == 'cross':
+                attended_2 = self._attention(q2, k1, v1, x1_attn_mask) # [batch, seq_len_2, embed_dim]
+            elif self.attention_type == 'self':
+                attended_2 = self._attention(q2, k2, v2, x2_attn_mask)
+            elif self.attention_type == 'cross_self':
+                attended_2 = self._attention(q2, k1, v1, x1_attn_mask) \
+                             + self._attention(q2, k2, v2, x2_attn_mask)
+            else:
+                raise ValueError(f"Unsupported attention type: {self.attention_type}")
             attended_2 = self.out2_proj(attended_2)
         else:
             attended_2 = x2  # No update if not bidirectional
@@ -343,7 +359,8 @@ class DualFormerBlock(nn.Module):
         attention_dropout: float = 0.1,
         activation: str = "gelu",
         bidirectional: bool = True,
-        norm_first: bool = True  # Pre-norm (True) or post-norm (False)
+        norm_first: bool = True,  # Pre-norm (True) or post-norm (False)
+        attention_type: str = 'cross'
     ):
         super().__init__()
         
@@ -360,7 +377,8 @@ class DualFormerBlock(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             dropout=attention_dropout,
-            bidirectional=bidirectional
+            bidirectional=bidirectional,
+            attention_type=attention_type
         )
         
         # Dual feedforward
@@ -468,7 +486,9 @@ class DualFormer(nn.Module):
         pooling: str = "mean",  # Options: mean, max, cls, none
         use_cls_token: bool = False,
         use_prediction_head: bool = False,
-        latent_dim: int = 0
+        latent_dim: int = 0,
+        attention_type: str = 'cross',
+        projection_type: str = 'transpose'
     ):
         super().__init__()
         
@@ -477,6 +497,7 @@ class DualFormer(nn.Module):
         self.pooling = pooling
         self.use_cls_token = use_cls_token
         self.use_prediction_head = use_prediction_head
+        self.projection_type = projection_type
 
         self.embedding = nn.Linear(input_dim, embed_dim)
 
@@ -520,7 +541,8 @@ class DualFormer(nn.Module):
                 attention_dropout=attention_dropout,
                 activation=activation,
                 bidirectional=bidirectional,
-                norm_first=norm_first
+                norm_first=norm_first,
+                attention_type=attention_type
             )
             for _ in range(num_layers)
         ])
@@ -663,7 +685,13 @@ class DualFormer(nn.Module):
 
 
         proj1 = self.projection_head(mod1_output)
-        proj2 = F.linear(mod2_output, self.projection_head.weight.t(), bias=None)
+        if self.projection_type == 'transpose':
+            proj2 = F.linear(mod2_output, self.projection_head.weight.t(), bias=None)
+        elif self.projection_type == 'normal':
+            proj2 = self.projection_head(mod2_output)
+        else:
+            raise ValueError(f"Unsupported projection type: {self.projection_type}")
+       
 
         output_dict["proj1"] = proj1
         output_dict["proj2"] = proj2
