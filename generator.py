@@ -232,7 +232,7 @@ def get_model(data_args,
 
     # tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
     # light_model_args.in_channels = data_args.in_channels_lc
-    predictor_args.w_dim = len(data_args.meta_columns_lightspec)
+    # predictor_args.w_dim = len(data_args.meta_columns_lightspec)
     # lstm_args_lc.seq_len = int(data_args.max_len_lc)
     light_encoder1 = CNNEncoder(cnn_args_lc)
     # light_encoder1 = LSTMEncoder(lstm_args_lc)
@@ -276,7 +276,9 @@ def get_model(data_args,
     moco_args.freeze_lightcurve = data_args.freeze_backbone
     moco_args.freeze_spectra = data_args.freeze_backbone
 
-    if data_args.approach == 'dual_former':
+    if data_args.approach == 'dual_former' or 'unimodal' in data_args.approach:
+
+        print("Using DualNet with transformer args: ", dual_former_args)
 
         model = DualNet(light_model.simsiam.encoder, spec_model.encoder, dual_former_args.get_dict(),
                         lc_reg_args, spectra_reg_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
@@ -287,19 +289,28 @@ def get_model(data_args,
         tuner_args.in_dim = (dual_former_args.embed_dim + latent_dim) * 2
     
     elif data_args.approach == 'jepa':
+        
+        print("Using JEPA with transformer args: ", transformer_args_jepa)
+        print("Using projector args: ", projector_args)
 
-        model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
-        lc_reg_args, spectra_reg_args, loss_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
+        model = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
+                             transformer_args_lightspec,
+                              predictor_args.get_dict(),
+                              loss_args,
+                               **moco_args.get_dict()).to(local_rank)
+
+        # model = MultiModalJEPA(light_model.simsiam.encoder, spec_model.encoder, transformer_args_jepa,
+        # lc_reg_args, spectra_reg_args, loss_args, freeze_backbone=data_args.freeze_backbone).to(local_rank)
         
         # Apply DeepNorm initialization to the JEPA transformer components
         deepnorm_init(model.vicreg_predictor, transformer_args_jepa)
     
     elif data_args.approach == 'moco':
+
+        print("Using MoCo with transformer args: ", transformer_args_lightspec)
         # model = MultiTaskMoCo(moco, moco_pred_args.get_dict()).to(local_rank)
-        model = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
+        model = MultimodalMoCo(spec_model.encoder, light_model.simsiam.encoder,
                              transformer_args_lightspec,
-                             predictor_args.get_dict(),
-                             loss_args,
                              **moco_args.get_dict()).to(local_rank)
         # Apply DeepNorm initialization to the MoCo transformer components
         # Only the shared encoder is a transformer architecture

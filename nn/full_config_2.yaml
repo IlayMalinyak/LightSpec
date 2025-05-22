@@ -29,7 +29,7 @@ Data:
   target_norm: 'solar'
   test_run: False
   create_umap: False
-  load_checkpoint: False
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
   use_fft: True
@@ -47,7 +47,8 @@ Data:
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss_mainseq.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-20/lightspec_dual_former_6_latent_proj_covloss_2.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-22/lightspec_dual_former_6_latent_proj_covloss_giants.pth'
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-07/lightspec_dual_former_6_latent_giants_ablation.pth'
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-07/lightspec_dual_former_6_latent_giants_ablation.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-15/lightspec_dual_former_6_latent_giants_ablation_normal.pth'
 
 DoubleInputRegressor_lc:
   encoder_only: True
@@ -313,7 +314,7 @@ dual_former:
   pooling: "mean"  # Options: mean, max, cls, none
   use_prediction_head: False
   latent_dim: 0
-  attention_type: "cross" # Options: cross, self, cross_self?
+  attention_type: "cross_self" # Options: cross, self, cross_self?
   projection_type: "normal" # Options: transpose, normal
   
     

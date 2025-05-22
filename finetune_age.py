@@ -34,7 +34,7 @@ from nn.astroconf import Astroconformer, AstroEncoderDecoder
 from nn.models import *
 from nn.simsiam import MultiModalSimSiam, MultiModalSimCLR
 from nn.moco import MultimodalMoCo, PredictiveMoco, MocoTuner
-from nn.multi_modal import FineTuner
+from nn.multi_modal import FineTuner, ContrastiveFineTuner, UniModalFineTuner
 from nn.simsiam import SimSiam, projection_MLP
 from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp
@@ -51,7 +51,8 @@ META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist',
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
-finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-04-30/age_finetune_lightspec_dual_former_6_latent_giants_finetune_age_gyro.pth'
+# finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-04-30/age_finetune_lightspec_dual_former_6_latent_giants_finetune_age_gyro.pth'
+finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-17/age_finetune_lightspec_dual_former_6_latent_giants_nss_finetune_age_gyro.pth'
 
 
 R_SUN_KM = 6.957e5
@@ -94,7 +95,7 @@ def get_kepler_meta_df():
     return kepler_df
 
 def create_train_test_dfs(meta_columns):
-    period_catalog = get_kepler_meta_df().dropna(subset=['Prot']).drop_duplicates('KID')
+    period_catalog = get_kepler_meta_df().drop_duplicates('KID')
 
 
     lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv').rename(columns={'kepid':'KID'})
@@ -104,7 +105,9 @@ def create_train_test_dfs(meta_columns):
     lamost_kepler_df.drop(columns=unamed_cols, inplace=True)
     lamost_kepler_df = lamost_kepler_df.merge(period_catalog, on='KID', how='left', suffixes=('_lamost', '')).drop_duplicates('KID')
     
-    age_df = pd.read_csv('/data/lightPred/tables/ages_dataset.csv')
+    # age_df = pd.read_csv('/data/lightPred/tables/ages_dataset.csv')
+    age_df = pd.read_csv('/data/lightPred/tables/ages_dataset_gyro.csv')
+
     unamed_cols = [col for col in age_df.columns if 'Unnamed' in col]
     age_df.drop(columns=unamed_cols, inplace=True)
     
@@ -120,13 +123,18 @@ def create_train_test_dfs(meta_columns):
     final_df['final_age_norm'] = final_df['final_age'] / 11
     final_df['age_error_norm'] = final_df['age_error'] / 11
 
-    final_df = final_df[~((final_df['ESA3'] == 1) & (final_df['age_ref'] == 'asteroseismology'))]
+    
 
-    final_df = final_df[final_df['age_ref']=='asteroseismology']
+    # final_df = final_df[~((final_df['ESA3'] == 1) & (final_df['age_ref'] == 'asteroseismology'))]
+
+    # final_df = final_df[final_df['age_ref']=='gyro_gyro']
+    # final_df = final_df[final_df['age_ref']=='asteroseismology']
 
     print("number of samples in final df: ", final_df.shape[0])
 
     final_df = final_df.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    final_df.to_csv('/data/lightSpec/updated_finetune_age_df.csv', index=False)
     
 
     train_df, val_df = train_test_split(final_df, test_size=0.2, random_state=42)
@@ -141,7 +149,7 @@ datetime_dir = f"age_finetune_{current_date}"
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/full_config.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-exp_num = data_args.exp_num
+exp_num = data_args.exp_num + '_' + data_args.approach
 light_model_name = data_args.light_model_name
 spec_model_name = data_args.spec_model_name
 combined_model_name = data_args.combined_model_name
@@ -154,6 +162,8 @@ os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
                                                                                  create_train_test_dfs,
                                                                                 dataset_name='FineTune')
+
+print("number of training samples: ", len(train_dataset))
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,
@@ -181,13 +191,34 @@ for i in range(10):
 
 pre_trained_model, optim_args, tuner_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
+quantiles = [0.14, 0.5, 0.86]
+tuner_args.out_dim = tuner_args.out_dim * len(quantiles)
+
+only_lc = False
+only_spec = False
+if data_args.approach == 'unimodal_light':
+    only_lc = True
+    only_spec = False
+    model = UniModalFineTuner(light_model.simsiam.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'unimodal_spec':
+    only_spec = True
+    only_lc = False
+    model = UniModalFineTuner(spec_model.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'moco':
+    model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'jepa':
+    model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'dual_former':
+    model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+
 # for param in pre_trained_model.parameters():
 #         param.requires_grad = False
 
-quantiles = [0.14, 0.5, 0.86]
-tuner_args.out_dim = tuner_args.out_dim * len(quantiles)
-model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer').to(local_rank)
+# print("loading finetune checkpoints from best run...")
 # model = load_checkpoints_ddp(model, finetune_checkpoint_path)
+
+
+
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -212,10 +243,11 @@ trainer = RegressorTrainer(
     output_dim=len(data_args.prediction_labels_finetune),
     num_quantiles=len(quantiles),
     use_w = False,
-    only_lc=False,
     latent_vars=data_args.prediction_labels_lightspec,
     loss_weight_name=None,
     max_iter=np.inf,
+    only_lc=only_lc,
+    only_spec=only_spec,
     # error_name='cos_inc_err',
     log_path=data_args.log_dir,
     exp_num=datetime_dir,
@@ -253,9 +285,9 @@ fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
 plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_age_{exp_num}.png")
 plt.clf()
 
-preds, targets, sigmas, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
+preds, targets, sigmas, projections, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
 
-preds_val, targets_val, sigmas_val, aggregated_info_val = trainer.predict(val_dataloader, device=local_rank)
+preds_val, targets_val, sigmas_val, projections, aggregated_info_val = trainer.predict(val_dataloader, device=local_rank)
 
 low_q = preds[:, :, 0] 
 high_q = preds[:, :, -1]
@@ -277,6 +309,9 @@ print('coverage after calibration: ', coverage)
 print('results shapes: ', preds.shape, targets.shape, sigmas.shape)
 results_df = pd.DataFrame({'sigmas': sigmas})
 results_df['KID'] = aggregated_info['KID']
+results_df['age_ref'] = aggregated_info['age_ref']
+# results_df['ESA3'] = aggregated_info['ESA3']
+# results_df['flag_gyro_quality'] = aggregated_info['flag_gyro_quality']
 labels = data_args.prediction_labels_finetune
 for i, label in enumerate(labels):
     results_df[label] = targets[:, i]

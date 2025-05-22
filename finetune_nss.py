@@ -38,7 +38,7 @@ from nn.optim import CQR
 from nn.utils import init_model, load_checkpoints_ddp
 from util.utils import *
 from nn.train import *
-from nn.multi_modal import FineTuner
+from nn.multi_modal import FineTuner, ContrastiveFineTuner, UniModalFineTuner
 from tests.test_unique_sampler import run_sampler_tests
 from features import multimodal_umap, create_umap
 import generator
@@ -49,8 +49,8 @@ import generator
 
 R_SUN_KM = 6.957e5
 
-finetune_checkpoint_path =  '/data/lightSpec/logs/nss_finetune_2025-04-29/nss_finetune_lightspec_dual_former_6_latent_giants_finetune_nss_hard.pth'
-
+# finetune_checkpoint_path =  '/data/lightSpec/logs/nss_finetune_2025-04-29/nss_finetune_lightspec_dual_former_6_latent_giants_finetune_nss_hard.pth'
+finetune_checkpoint_path = '/data/lightSpec/logs/nss_finetune_2025-05-17/nss_finetune_lightspec_dual_former_6_latent_giants_nss_finetune.pth'
 
 torch.cuda.empty_cache()
 
@@ -90,7 +90,7 @@ datetime_dir = f"nss_finetune_{current_date}"
 local_rank, world_size, gpus_per_node = setup()
 args_dir = '/data/lightSpec/nn/full_config.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-exp_num = data_args.exp_num
+exp_num = data_args.exp_num + "_" + data_args.approach
 if data_args.test_run:
     datetime_dir = f"test_{current_date}"
 
@@ -128,14 +128,28 @@ for i in range(10):
 
 
 pre_trained_model, optim_args, tuner_args, complete_config, light_model, spec_model = generator.get_model(data_args, args_dir, complete_config, local_rank)
-
+only_lc = False
+only_spec = False
+if data_args.approach == 'unimodal_light':
+    only_lc = True
+    only_spec = False
+    model = UniModalFineTuner(light_model.simsiam.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'unimodal_spec':
+    only_spec = True
+    only_lc = False
+    model = UniModalFineTuner(spec_model.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'moco':
+    model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'jepa':
+    model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
+elif data_args.approach == 'dual_former':
+    model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 # for param in pre_trained_model.parameters():
 #         param.requires_grad = False
 
 # tuner_args.out_dim = tuner_args.out_dim 
-model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
-model = load_checkpoints_ddp(model, finetune_checkpoint_path)
-model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+# model = load_checkpoints_ddp(model, finetune_checkpoint_path)
+# model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 all_params = sum(p.numel() for p in model.parameters())
@@ -148,6 +162,8 @@ print("number of trainable parameters in finetune setting: ", num_params)
 loss_fn = torch.nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=float(optim_args.max_lr), weight_decay=float(optim_args.weight_decay))
 
+
+
 trainer = ClassificationTrainer(
     model=model,
     optimizer=optimizer,
@@ -159,8 +175,11 @@ trainer = ClassificationTrainer(
     use_w = False,
     latent_vars = data_args.prediction_labels_lightspec,
     num_cls = tuner_args.out_dim,
+    only_lc=only_lc,
+    only_spec=only_spec,
     log_path=data_args.log_dir,
     exp_num=datetime_dir,
+    max_iter=np.inf,
     exp_name=f"nss_finetune_{exp_num}",
 )
 complete_config.update(
@@ -175,28 +194,27 @@ with open(config_save_path, "w") as config_file:
 
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
-# fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-#                         early_stopping=10, best='loss', conf=True) 
-# output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_nss_{exp_num}.json'
-# with open(output_filename, "w") as f:
-#     json.dump(fit_res, f, indent=2)
-# fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_nss_{exp_num}.png")
-# plt.clf()
+fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+                        early_stopping=10, best='loss', conf=True) 
+output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_nss_{exp_num}.json'
+with open(output_filename, "w") as f:
+    json.dump(fit_res, f, indent=2)
+fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_nss_{exp_num}.png")
+plt.clf()
 
 preds_cls, targets, probs, projections, features, aggregated_info = trainer.predict(test_loader, device=local_rank)
 
 print("total accuracy: ", np.sum(preds_cls == targets) / len(targets))
 
-np.save(f"{data_args.log_dir}/{datetime_dir}/projections_{data_args.exp_num}.npy", projections)
-np.save(f"{data_args.log_dir}/{datetime_dir}/features_{data_args.exp_num}.npy", features)
+np.save(f"{data_args.log_dir}/{datetime_dir}/projections_nss_{exp_num}.npy", projections)
+np.save(f"{data_args.log_dir}/{datetime_dir}/features_nss_{exp_num}.npy", features)
 
 results_df = pd.DataFrame({'target': targets, 'preds_cls': preds_cls})
 for c in range(probs.shape[1]):
     results_df[f'pred_{c}'] = probs[:, c]
 results_df['kid'] = aggregated_info['KID']
 print(results_df.head())
-results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/preds_{data_args.exp_num}.csv", index=False)
-# Access results
+results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/preds_nss_{exp_num}.csv", index=False)
 
-
+print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/preds_nss_{exp_num}.csv")

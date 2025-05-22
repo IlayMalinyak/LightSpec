@@ -95,7 +95,7 @@ class MultiModalJEPA(nn.Module):
         if isinstance(lc_pred, tuple):
             lc_pred = lc_pred[0]
         loss = self.vicreg_loss(lc_feat, lc_pred)
-        return {'loss': loss}
+        return {'loss': loss, 'q': lc_pred}
 
 class FullGatherLayer(torch.autograd.Function):
     """
@@ -236,3 +236,81 @@ class FineTuner(nn.Module):
         else:
             sigma = None
         return predictions, sigma, dual_pred
+
+
+class ContrastiveFineTuner(nn.Module):
+    def __init__(self, model, head_args, head_type='mlp', use_sigma=True):
+        super(ContrastiveFineTuner, self).__init__()
+        print("head args: ", head_args)
+        self.model = model
+        self.use_sigma = use_sigma
+        if head_type == 'mlp':
+            self.head = MLPHead(**head_args)
+        else:
+            self.head_args = Container(in_channels=1, encoder_dim=head_args['hidden_dim'], num_layers=8
+                , num_heads=8, output_dim=head_args['out_dim'],
+                 dropout=0.1, num_quantiles=1, pooling_method='mean')
+            self.head = Transformer(self.head_args)
+        if self.use_sigma:
+            self.sigma_head = nn.Sequential(
+                nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
+                nn.LayerNorm(head_args['hidden_dim']),
+                nn.SiLU(),
+                nn.Linear(head_args['hidden_dim'], 1)
+            )
+        else:
+            sigma_head = None
+        
+    def forward(self, lc, spectra, latent=None):
+        model_out = self.model(lc, spectra, latent)
+        predictions = self.head(model_out['q'])
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        pred_dict = {'head_features': model_out['q']}
+        pred_dict['eigen_projection'] = torch.zeros_like(model_out['q'])
+        if self.use_sigma:
+            sigma = self.sigma_head(model_out['q'])
+        else:
+            sigma = None
+        return predictions, sigma, pred_dict
+
+
+class UniModalFineTuner(nn.Module):
+    def __init__(self, model, head_args, head_type='mlp', use_sigma=True):
+        super(UniModalFineTuner, self).__init__()
+        print("head args: ", head_args)
+        self.model = model
+        self.use_sigma = use_sigma
+        if head_type == 'mlp':
+            self.head = MLPHead(**head_args)
+        else:
+            self.head_args = Container(in_channels=1, encoder_dim=head_args['hidden_dim'], num_layers=8
+                , num_heads=8, output_dim=head_args['out_dim'],
+                 dropout=0.1, num_quantiles=1, pooling_method='mean')
+            self.head = Transformer(self.head_args)
+        if self.use_sigma:
+            self.sigma_head = nn.Sequential(
+                nn.Linear(head_args['in_dim'], head_args['hidden_dim']),
+                nn.LayerNorm(head_args['hidden_dim']),
+                nn.SiLU(),
+                nn.Linear(head_args['hidden_dim'], 1)
+            )
+        else:
+            sigma_head = None
+    
+    def forward(self, x, latent=None):
+        features = self.model(x)
+        if isinstance(features, tuple):
+            features = features[0]
+        if latent is not None:
+            feautes = torch.cat((features, latent), dim=1)
+        predictions = self.head(features)
+        pred_dict = {'head_features': features}
+        pred_dict['eigen_projection'] = torch.zeros_like(features)
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        if self.use_sigma:
+            sigma = self.sigma_head(model_out['q'])
+        else:
+            sigma = None
+        return predictions, sigma, pred_dict

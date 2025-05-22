@@ -572,11 +572,14 @@ class KeplerDataset():
             conf_cols = [c for c in row.keys() if 'confidence' in c]
             prob_cols = [c for c in row.keys() if 'prob' in c]
             inc_cols = [c for c in row.keys() if 'inc' in c]
+            age_cols = [c for c in row.keys() if 'age' in c]
             for c in conf_cols:
                 meta[c] = row[c]
             for c in prob_cols:
                 meta[c] = row[c]
             for c in inc_cols:
+                meta[c] = row[c]
+            for c in age_cols:
                 meta[c] = row[c]
             if 'Pmax' in row.keys() and 'Pmin' in row.keys():
                 meta['Pmax'] = row['Pmax']

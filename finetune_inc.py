@@ -51,7 +51,7 @@ META_COLUMNS = ['KID', 'Teff', 'logg', 'FeH', 'Rstar', 'Mstar', 'Lstar', 'Dist',
 MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEncoder': MultiEncoder, 'MultiTaskRegressor': MultiTaskRegressor,
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
-finetune_checkpoint_path = '/data/lightSpec/logs/inc_finetune_2025-04-24/inc_finetune_lightspec_dual_former_6_latent_giants_finetune_inc_loss_w.pth'
+finetune_checkpoint_path = '/data/lightSpec/logs/inc_finetune_2025-05-19/inc_finetune_lightspec_dual_former_6_latent_giants_nss_finetune_inc.pth'
 
 
 R_SUN_KM = 6.957e5
@@ -154,6 +154,68 @@ def physical_cos_inc(cos_inc_value, cos_inc_err):
     return trunc_norm.rvs()
 
 def create_train_test_dfs(meta_columns):
+    inc_dataset = pd.read_csv('/data/lightPred/tables/inc_dataset.csv')
+    inc_dataset['i_rad'] = np.deg2rad(inc_dataset['i'])
+    inc_dataset['i_err_rad'] = np.deg2rad(inc_dataset['i_err'])
+    inc_dataset['i_rad_norm'] = inc_dataset['i_rad'] / (np.pi / 2)
+    inc_dataset['i_err_rad_norm'] = inc_dataset['i_err_rad'] / (np.pi / 2)
+    inc_dataset['cos_inc'] = np.cos(inc_dataset['i_rad'])
+    inc_dataset['cos_inc_err'] = np.cos(inc_dataset['i_err_rad'])
+
+    kepler_meta = get_kepler_meta_df()
+    inc_dataset = inc_dataset.merge(kepler_meta, on='KID', how='left')
+
+    kepler_apogee = pd.read_csv('/data/apogee/crossmatched_catalog_Kepler.csv')
+    kepler_apogee = kepler_apogee[~kepler_apogee['APOGEE_VSINI'].isna()].rename(columns={'APOGEE_VSINI': 'vsini'})
+    kepler_apogee['vsini_ref'] = 'apogee'
+    lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv').rename(columns={'kepid':'KID'})
+    print("lamost kepler df: ", len(lamost_kepler_df))
+    lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
+    lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
+    lamost_kepler_apogee = lamost_kepler_df.merge(kepler_apogee[['KID', 'vsini', 'vsini_ref']], on='KID')
+    final_apogee = lamost_kepler_apogee.merge(kepler_meta, on='KID',
+                                                         suffixes=['', '_kep']).drop_duplicates('ObsID')
+    final_apogee['vsini_err'] = final_apogee['vsini'] * 0.1
+
+    cks_catalog = Table.read('/data/lightPred/tables/CKS2017.fit', format='fits').to_pandas()
+    cks_catalog['vsini_ref'] = 'cks'
+    final_cks = cks_catalog.merge(kepler_meta, left_on='KIC', right_on='KID', suffixes=['', '_kep'])
+    final_cks = final_cks.merge(lamost_kepler_df, left_on='KIC', right_on='KID', suffixes=['', '_lamost'])
+    final_cks = final_cks.drop_duplicates('KIC')
+    final_cks['vsini_err'] = final_cks['vsini'] * 0.1 # assume 10% error
+
+    vsini_df = pd.concat([final_apogee, final_cks])
+    print(" final apogee: ", len(final_apogee), "final cks", len(final_cks))
+    vsini_df['Rstar_err'] = (vsini_df['E_Rstar'] - vsini_df['e_Rstar']) / 2
+
+    vsini_df.dropna(subset=['Prot', 'vsini', 'Rstar'], inplace=True)
+
+    vsini_df['cos_inc'] = (vsini_df['vsini'] * vsini_df['Prot'] * 24 * 3600
+                           / (2 * np.pi * vsini_df['Rstar'] * R_SUN_KM))
+    
+    vsini_df['cos_inc_err'] = vsini_df.apply(get_cos_i_err, axis=1)
+    vsini_df = vsini_df[vsini_df['cos_inc'].abs() < 1]
+    vsini_df['i_rad'] = np.arccos(vsini_df['cos_inc'])
+    vsini_df['i_rad_err'] = np.arccos(vsini_df['cos_inc_err'])
+    vsini_df['i_rad_norm'] = vsini_df['i_rad'] / (np.pi / 2)
+    vsini_df['i_err_rad_norm'] = vsini_df['i_rad_err'] / (np.pi / 2)
+
+    inc_dataset = inc_dataset.merge(lamost_kepler_df, on='KID', how='left').dropna(subset=['ObsID'])
+    final_df  = pd.concat([inc_dataset, vsini_df]).drop_duplicates('KID')
+    print("len inc dataset: ", len(inc_dataset))
+    print("len vsini dataset: ", len(vsini_df))
+    print("len final df: ", len(final_df))
+
+    # final_df['ObsID'].fillna(0, inplace=True)
+    
+    train_df, val_df = train_test_split(final_df, test_size=0.2, random_state=42)
+
+    return train_df, val_df
+
+
+    
+
+def create_train_test_dfs_vsini(meta_columns):
     period_catalog = get_kepler_meta_df().dropna(subset=['Prot']).drop_duplicates('KID')
     print("nans in period catalog: ", period_catalog['Prot'].isna().sum())
 
@@ -292,8 +354,11 @@ pre_trained_model, optim_args, tuner_args, complete_config, light_model, spec_mo
 
 quantiles = [0.14, 0.5, 0.86]
 tuner_args.out_dim = tuner_args.out_dim * len(quantiles)
-model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer').to(local_rank)
+model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='mlp').to(local_rank)
+
+# print("loading model from ", finetune_checkpoint_path)
 # model = load_checkpoints_ddp(model, finetune_checkpoint_path)
+
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -320,7 +385,7 @@ trainer = RegressorTrainer(
     use_w = False,
     only_lc=False,
     latent_vars=data_args.prediction_labels_lightspec,
-    loss_weight_name='cos_inc_err',
+    loss_weight_name=None,
     max_iter=np.inf,
     # error_name='cos_inc_err',
     log_path=data_args.log_dir,
@@ -359,7 +424,23 @@ fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
 plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_inc_{exp_num}.png")
 plt.clf()
 
-preds, targets, sigmas, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
+preds, targets, sigmas, projections, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
+preds_train, targets_train, sigmas_train, projections_train, aggregated_info_train = trainer.predict(train_dataloader, device=local_rank)
+preds_val, targets_val, sigmas_val, projections_val, aggregated_info_val = trainer.predict(val_dataloader, device=local_rank)
+
+np.save(f"{data_args.log_dir}/{datetime_dir}/projections_test_{exp_num}.npy", projections)
+np.save(f"{data_args.log_dir}/{datetime_dir}/projections_train_{exp_num}.npy", projections_train)
+np.save(f"{data_args.log_dir}/{datetime_dir}/projections_val_{exp_num}.npy", projections_val)
+
+kids_test = aggregated_info['KID']
+kids_train = aggregated_info_train['KID']
+kids_val = aggregated_info_val['KID']
+
+df_test = pd.DataFrame({'sigmas': sigmas, 'KID': kids_test}).to_csv(f"{data_args.log_dir}/{datetime_dir}/test_kids.csv", index=False)
+df_train = pd.DataFrame({'sigmas': sigmas_train, 'KID': kids_train}).to_csv(f"{data_args.log_dir}/{datetime_dir}/train_kids.csv", index=False)
+df_val = pd.DataFrame({'sigmas': sigmas_val, 'KID': kids_val}).to_csv(f"{data_args.log_dir}/{datetime_dir}/val_kids.csv", index=False)
+
+print('predictions shapes: ', preds.shape, targets.shape, sigmas.shape, projections.shape)
 
 print('results shapes: ', preds.shape, targets.shape, sigmas.shape)
 results_df = pd.DataFrame({'sigmas': sigmas})
@@ -369,7 +450,7 @@ for i, label in enumerate(labels):
     results_df[label] = targets[:, i]
     for q in range(len(quantiles)):
         y_pred_q = preds[:,:, q]
-        results_df[f'{label}_{q}'] = y_pred_q[:, i]
+        results_df[f'pred_{label}_q{q_value:.3f}'] = y_pred_q[:, i]
 print(results_df.head())
 results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/test_predictions.csv", index=False)
 # Access results

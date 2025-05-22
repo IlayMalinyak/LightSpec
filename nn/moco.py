@@ -208,8 +208,9 @@ class MultimodalMoCo(nn.Module):
             combined_embed = self.combined_encoder(combined_input)
             spectra_feat = torch.cat((spectra_feat, combined_embed),dim=-1)
             lightcurve_feat = torch.cat((lightcurve_feat, combined_embed), dim=-1)
-        q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
-        q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
+            
+        q_s, _, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
+        q_l, _, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
 
         # q_s = self.spectra_proj_q(spectra_feat)
         # q_l = self.lightcurve_proj_q(lightcurve_feat)
@@ -220,8 +221,8 @@ class MultimodalMoCo(nn.Module):
                     }
 
         with torch.no_grad():
-            k_s, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
-            k_l, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
+            k_s, _, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
+            k_l, _, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
 
             # k_s = self.spectra_proj_k(spectra_feat)
             # k_l = self.lightcurve_proj_k(lightcurve_feat)
@@ -338,8 +339,8 @@ class PredictiveMoco(MultimodalMoCo):
              spectra_feat = torch.cat((spectra_feat, combined_embed),dim=-1)
              lightcurve_feat = torch.cat((lightcurve_feat, combined_embed), dim=-1)
  
-         q_s, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
-         q_l, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
+         q_s, _, _ = self.shared_encoder_q(spectra_feat.unsqueeze(-1))
+         q_l, _, _ = self.shared_encoder_q(lightcurve_feat.unsqueeze(-1))
  
         #  q_s = self.spectra_proj_q(spectra_feat)
         #  q_l = self.lightcurve_proj_q(lightcurve_feat)
@@ -357,8 +358,8 @@ class PredictiveMoco(MultimodalMoCo):
         #  q_l_moco = self.moco_predictor(q_l)
  
          with torch.no_grad():
-             k_s = self.shared_encoder_k(spectra_feat.unsqueeze(-1))[0]
-             k_l = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))[0]
+             k_s, _, _ = self.shared_encoder_k(spectra_feat.unsqueeze(-1))
+             k_l, _, _ = self.shared_encoder_k(lightcurve_feat.unsqueeze(-1))
  
             #  k_s = self.spectra_proj_k(spectra_feat)
             #  k_l = self.lightcurve_proj_k(lightcurve_feat)

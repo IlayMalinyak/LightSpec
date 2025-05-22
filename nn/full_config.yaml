@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: lightspec_dual_former_6_latent_giants_ablation
+  exp_num: lightspec_compare
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -24,12 +24,12 @@ Data:
   prediction_labels_lightspec: ["Teff",  "logg", "Prot",  "FeH", "Rstar",  "RUWE"]
   prediction_labels_lc: ['Teff', 'logg', 'Prot']
   prediction_labels_spec: ['Teff', 'logg', 'Prot']
-  prediction_labels_finetune: [final_age_norm, age_error_norm]
+  prediction_labels_finetune: ['final_age_norm', 'age_error_norm']
   prediction_labels_simulation: ['Period']
   target_norm: 'solar'
   test_run: False
   create_umap: False
-  load_checkpoint: False
+  load_checkpoint: True
   masked_transform: False
   use_acf: True
   use_fft: True
@@ -37,18 +37,22 @@ Data:
   combined_embed: False
   dim_lc: 4
   ssl_weight: 0.5
-  alpha: 0.1
+  alpha: 0
   freeze_backbone: True
   use_latent: True
-  pred_coeff_val: 0
-  approach: "dual_former"
+  pred_coeff_val: 1
+  approach: "moco"
   only_main_seq: False
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-18/lightspec_dual_former_latent_full.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-15/lightspec_dual_former_teff_logg_prot_duality_loss_freeze_backbone_latent_2.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss_mainseq.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-20/lightspec_dual_former_6_latent_proj_covloss_2.pth'
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-22/lightspec_dual_former_6_latent_proj_covloss_giants.pth'
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-22/lightspec_dual_former_6_latent_proj_covloss_giants.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-21/lightspec_compare_moco.pth'
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-21/lightspec_compare_jepa.pth'
+
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-16/lightspec_dual_former_6_latent_giants_ablation_2.pth'
 
 DoubleInputRegressor_lc:
   encoder_only: True
@@ -257,13 +261,13 @@ Conformer_lightspec:
 
 Transformer_lightspec:
   in_channels: 1
-  num_layers: 2
-  encoder_dim: 64
+  num_layers: 4
+  encoder_dim: 512
   dropout_p: 0.2
   num_heads: 8
   dropout: 0.0
-  output_dim: 64
-  pooling_method: 'cls_token'
+  output_dim: 512
+  pooling_method: 'mean'
   num_quantiles: 1
   checkpoint_num: 1
   load_checkpoint: False
@@ -277,7 +281,8 @@ Transformer_jepa:
   dropout_p: 0.2
   num_heads: 8
   dropout: 0.0
-  output_dim: 256
+  output_dim: 512
+  pooling_method: 'mean'
   num_quantiles: 1
   checkpoint_num: 1
   load_checkpoint: False
@@ -314,7 +319,7 @@ dual_former:
   pooling: "mean"  # Options: mean, max, cls, none
   use_prediction_head: False
   latent_dim: 0
-  attention_type: "cross_self" # Options: cross, self, cross_self?
+  attention_type: "cross_self" # Options: cross, self, cross_self
   projection_type: "transpose" # Options: transpose, normal
   
     
@@ -362,12 +367,12 @@ MoCo:
   m: 0.9
   T: 0.05
   hidden_dim: 512
-  projection_dim: 64
+  projection_dim: 512
   num_layers: 6
-  shared_dim: 64
-  freeze_lightcurve: False
-  freeze_spectra: False
-  freeze_combined: False
+  shared_dim: 512
+  freeze_lightcurve: True
+  freeze_spectra: True
+  freeze_combined: True
   bidirectional: True
   # deepnorm: True
   # beta: 1.0  # Default beta value
@@ -378,10 +383,10 @@ projector:
   out_dim: 64
 
 predictor:
-  in_dim: 64
+  in_dim: 256
   hidden_dim: 128
   out_dim: 64
-  w_dim: 3
+  w_dim: 6
 
 reg_predictor:
   in_dim: 128
@@ -393,7 +398,6 @@ loss:
   sim_coeff: 25
   std_coeff: 25 
   cov_coeff: 0.1
-
 
 Tuner:
   in_dim: 256
@@ -445,12 +449,11 @@ conv_args:
   
 Optimization:
   # Optimization
-  max_lr:  5e-5
+  max_lr:  2e-5
   weight_decay: 1e-6
   warmup_pct: 0.15
   steps_per_epoch: 3500
   momentum: 0.95
   nesterov: true
   optimizer: "adamw"
-  # quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
   quantiles: [0.5]

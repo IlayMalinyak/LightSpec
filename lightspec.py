@@ -59,11 +59,12 @@ datetime_dir = f"lightspec_{current_date}"
 
 def predict_and_save_dl(dl, local_rank, name, trainer):
     rank = torch.distributed.get_rank()
-    targets, kids, eigenvalues, eigenvectors, projections, \
-    umap_comb, umap_proj = trainer.predict(dl, local_rank, load_best=False)
+    targets, kids, eigenvalues, eigenvectors, embs_projections, \
+    final_features = trainer.predict(dl, local_rank, load_best=False)
 
-    df = pd.DataFrame({'kid': kids, 'umap_comb_X': umap_comb[:, 0], 'umap_comb_Y': umap_comb[:, 1],
-                       'umap_proj_X': umap_proj[:, 0], 'umap_proj_Y': umap_proj[:, 1]})
+    print("shapes of predictions: ", targets.shape, kids.shape, eigenvalues.shape, eigenvectors.shape, embs_projections.shape, final_features.shape)
+
+    df = pd.DataFrame({'kid': kids})
     # top_k = top_idx_comb.shape[1]
     # for i in range(1, top_k + 1):
     #     df[f'top_idx_comb_{i}'] = top_idx_comb[:, i - 1]
@@ -76,7 +77,8 @@ def predict_and_save_dl(dl, local_rank, name, trainer):
     if rank == 0:
         np.save(f"{data_args.log_dir}/{datetime_dir}/eigenvalues_{exp_num}_{name}.npy", eigenvalues)
         np.save(f"{data_args.log_dir}/{datetime_dir}/eigenvectors_{exp_num}_{name}.npy", eigenvectors)
-        np.save(f"{data_args.log_dir}/{datetime_dir}/projections_{exp_num}_{name}.npy", projections)
+        np.save(f"{data_args.log_dir}/{datetime_dir}/embedding_projections_{exp_num}_{name}.npy", embs_projections)
+        np.save(f"{data_args.log_dir}/{datetime_dir}/final_features_{exp_num}_{name}.npy", final_features)
     
     print("results saved in", f"{data_args.log_dir}/{datetime_dir}/preds_{exp_num}_{name}_{rank}.csv")
 # Function to aggregate results after all GPUs are done
@@ -210,7 +212,7 @@ if __name__ == "__main__":
     local_rank, world_size, gpus_per_node = setup()
     args_dir = '/data/lightSpec/nn/full_config.yaml'
     data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
-    exp_num = data_args.exp_num
+    exp_num = data_args.exp_num + '_' + data_args.approach
     light_model_name = data_args.light_model_name
     spec_model_name = data_args.spec_model_name
     combined_model_name = data_args.combined_model_name
@@ -279,6 +281,9 @@ if __name__ == "__main__":
                                                                                     local_rank,
                                                                                     )
 
+    num_params_all = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainble parameters in full model: {num_params_all}")
+
     # batch = next(iter(train_dataloader))
     # lc1, spec1, lc2, spec2, y, info = batch
 
@@ -316,19 +321,8 @@ if __name__ == "__main__":
         weight_decay=float(optim_args.weight_decay))
     scaler = GradScaler()
 
-    accumulation_step = 1
-    if data_args.approach == 'moco':
-        trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
-                            criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-                            scaler=scaler, grad_clip=True,
-                        scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
-                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                                exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                                accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=True,
-                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
-                            exp_name=f"{exp_num}") 
-    
-    elif data_args.approach == 'dual_former':
+    accumulation_step = 1        
+    if data_args.approach == 'dual_former':
         trainer = DualFormerTrainer(model=model, optimizer=optimizer,
                             criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
                             scaler=scaler, grad_clip=True, use_y_as_latent=data_args.use_latent,
@@ -338,18 +332,33 @@ if __name__ == "__main__":
                                 accumulation_step=accumulation_step, max_iter=np.inf, print_every=20,
                                 alpha=data_args.alpha,
                             exp_name=f"{exp_num}")
+    else:
+        if data_args.approach == 'jepa':
+            data_args.pred_coeff = 1
+            use_w = True
+        elif data_args.approach == 'moco':
+            data_args.pred_coeff = 0
+            use_w = False
+        trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
+                            criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+                            scaler=scaler, grad_clip=True,
+                        scheduler=None, train_dataloader=train_dataloader, full_input=False, only_lc=False,
+                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+                                exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
+                                accumulation_step=accumulation_step, max_iter=np.inf, stack_pairs=False, use_w=use_w,
+                            use_pred_coeff=True, pred_coeff_val=data_args.pred_coeff_val,
+                            exp_name=f"{exp_num}") 
     
-    elif data_args.approach == 'jepa':
-
-        trainer = JEPATrainer(
-                                model=model, optimizer=optimizer,
-                                criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
-                                train_dataloader=train_dataloader,
-                            val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
-                                    exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
-                                    accumulation_step=accumulation_step, max_iter=np.inf, use_y_as_latent=data_args.use_latent,
-                                exp_name=f"{exp_num}"
-                                )
+    # elif data_args.approach == 'jepa':
+    #     trainer = JEPATrainer(
+    #                             model=model, optimizer=optimizer,
+    #                             criterion=loss_fn, output_dim=len(data_args.prediction_labels_lightspec),
+    #                             train_dataloader=train_dataloader,
+    #                         val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
+    #                                 exp_num=datetime_dir, log_path=data_args.log_dir, alpha=data_args.alpha,
+    #                                 accumulation_step=accumulation_step, max_iter=np.inf, use_y_as_latent=data_args.use_latent,
+    #                             exp_name=f"{exp_num}"
+    #                             )
 
     complete_config.update(
         {"trainer": trainer.__dict__,
@@ -363,16 +372,15 @@ if __name__ == "__main__":
 
     print(f"Configuration (with model structure) saved at {config_save_path}.")
 
-    fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                            early_stopping=20, best='loss', conf=True) 
-    output_filename = f'{data_args.log_dir}/{datetime_dir}/{exp_num}_fit_res.json'
-    with open(output_filename, "w") as f:
-        json.dump(fit_res, f, indent=2)
-    fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-    plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{exp_num}.png")
-    plt.clf()
+    # fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+    #                         early_stopping=20, best='loss', conf=True) 
+    # output_filename = f'{data_args.log_dir}/{datetime_dir}/{exp_num}_fit_res.json'
+    # with open(output_filename, "w") as f:
+    #     json.dump(fit_res, f, indent=2)
+    # fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+    # plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{exp_num}.png")
+    # plt.clf()
 
-    # Add before prediction calls
     torch.cuda.empty_cache()
     torch.distributed.barrier()
 

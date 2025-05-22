@@ -851,7 +851,6 @@ class DualFormerTrainer(Trainer):
         acc = torch.tensor([0], device=device)
         return loss, acc, y
     
-    @staticmethod
     def _get_eigenspace(self, weight):
         print("max diff weight", torch.max(torch.abs(weight - weight.t())).item())
         if torch.abs(weight - weight.t()).sum() < 1e-6:
@@ -892,7 +891,8 @@ class DualFormerTrainer(Trainer):
         umap_data_comb = np.zeros((0, 2))
         umap_proj_comb = np.zeros((0, 2))
         kids = []
-        projections = []
+        embs_projections = []
+        projs = []
         # top_projection_indices_lc = []
         # top_projection_indices_spec = []
         # top_projection_indices_comb = []
@@ -920,7 +920,7 @@ class DualFormerTrainer(Trainer):
                 lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']
                 
                 projection_comb = (spec_emb + lc_emb) @ eigenvectors
-                projections.append(projection_comb.cpu().numpy())
+                embs_projections.append(projection_comb.cpu().numpy())
                 # projection_magnitudes_comb = torch.abs(projection_comb)
                 # top_values_comb, top_indices_comb = torch.topk(projection_magnitudes_comb, k=min(top_k, projection_comb.shape[1]), dim=1)
                 
@@ -933,11 +933,13 @@ class DualFormerTrainer(Trainer):
                 # reduced_data_spec = reducer.fit_transform(spec_proj.cpu().numpy())
                 # reduced_data_lc = reducer.fit_transform(lc_proj.cpu().numpy())
                 proj = np.concatenate((spec_proj.cpu().numpy(), lc_proj.cpu().numpy()), axis=1)
-                reduced_data_comb = reducer.fit_transform(proj)
-                umap_data_comb = np.concatenate((umap_data_comb, reduced_data_comb), axis=0)
+                projs.append(proj)
 
-                reduced_proj_comb = reducer.fit_transform(projection_comb.cpu().numpy())
-                umap_proj_comb = np.concatenate((umap_proj_comb, reduced_proj_comb), axis=0)
+                # reduced_data_comb = reducer.fit_transform(proj)
+                # umap_data_comb = np.concatenate((umap_data_comb, reduced_data_comb), axis=0)
+
+                # reduced_proj_comb = reducer.fit_transform(projection_comb.cpu().numpy())
+                # umap_proj_comb = np.concatenate((umap_proj_comb, reduced_proj_comb), axis=0)
 
                 # lc_loss = self.criterion(pred_lc, y)
                 # spec_loss = self.criterion(pred_spec, y)
@@ -948,7 +950,7 @@ class DualFormerTrainer(Trainer):
                 if i > self.max_iter:
                     break
         return (targets, np.array(kids), eigenvalues.detach().cpu().numpy(), eigenvectors.detach().cpu().numpy(),
-         np.concatenate(projections), umap_data_comb, umap_proj_comb)
+         np.concatenate(embs_projections), np.concatenate(projs))
 
 
 class JEPATrainer(Trainer):
@@ -969,20 +971,8 @@ class JEPATrainer(Trainer):
         #     w = torch.stack([i['w'] for i in info]).to(device)
         latent = y.nan_to_num(-1) if self.use_y_as_latent else None
         out = self.model(lc ,spectra, latent=latent)
-        # y_lc = y[:, self.lc_reg_idx:]
-        # y_spec = y[:, :self.lc_reg_idx]
-        # pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles)
-        # pred_spec = out['spectra_pred'].view(lc.shape[0], -1, self.num_quantiles)
-        # lc_loss = self.criterion(pred_lc, y_lc)
-        # lc_loss = lc_loss.nan_to_num(0).mean()
-        # spec_loss = self.criterion(pred_spec, y_spec)
-        # spec_loss = spec_loss.nan_to_num(0).mean()
-        # reg_loss = lc_loss + spec_loss
-        # self.lc_losses.append(lc_loss)
-        # self.spec_losses.append(spec_loss)
         
         jepa_loss = out['loss']
-        print("jepa loss: ", jepa_loss.item())
         self.jepa_losses.append(jepa_loss)
         loss = jepa_loss * (1 - self.alpha)
         loss.backward()
@@ -1006,30 +996,16 @@ class JEPATrainer(Trainer):
     def eval_batch(self,batch, batch_idx, device):
         lc, spectra, y, lc_target, spectra_target, info = batch 
         lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
-        w = None
-        if self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
         with torch.no_grad():
-            out = self.model(lc ,spectra, w=w)
-        y_lc = y[:, self.lc_reg_idx:]
-        y_spec = y[:, :self.lc_reg_idx]
-        pred_lc = out['lc_pred'].view(lc.shape[0], -1, self.num_quantiles)
-        pred_spec = out['spectra_pred'].view(lc.shape[0], -1, self.num_quantiles)
-        lc_loss = self.criterion(pred_lc, y_lc)
-        lc_loss = lc_loss.nan_to_num(0).mean()
-        spec_loss = self.criterion(pred_spec, y_spec)
-        spec_loss = spec_loss.nan_to_num(0).mean()
-        reg_loss = lc_loss + spec_loss
-        jepa_loss = out['loss']
-        loss = reg_loss * self.alpha + jepa_loss * (1 - self.alpha)
+            latent = y.nan_to_num(-1) if self.use_y_as_latent else None
+            out = self.model(lc ,spectra, latent=latent)
+        
+            jepa_loss = out['loss']
+            self.jepa_losses.append(jepa_loss)
+            loss = jepa_loss * (1 - self.alpha)
 
-        self.val_aux_loss_1.append(loss.item())
-        self.val_aux_loss_2.append(reg_loss.item())
-
-        lc_pred_med = pred_lc[: ,:, self.num_quantiles // 2]
-        spec_pred_med = pred_spec[: ,:, self.num_quantiles // 2]
-        pred_med = torch.cat([spec_pred_med, lc_pred_med], dim=-1)
-        acc = (torch.abs(pred_med - y) < y * 0.1).sum(0)
+            acc = 0
+        
 
         return loss, acc, y
 
@@ -1061,7 +1037,7 @@ class ContrastiveTrainer(Trainer):
         elif self.only_lc:
             out = self.model(lc, lc_target) 
         elif self.use_w:
-            w = torch.stack([i['w'] for i in info]).to(device)
+            w = y.nan_to_num(-1) 
             pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
             if self.full_input:
                 out = self.model(lightcurves=lc, spectra=spectra,
@@ -1144,7 +1120,7 @@ class ContrastiveTrainer(Trainer):
             elif self.only_lc:
                 out = self.model(lc, lc_target) 
             elif self.use_w:
-                w = torch.stack([i['w'] for i in info]).to(device)
+                w = y.nan_to_num(-1)
                 pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - batch_idx / (3 * len(self.train_dl)), 0.5)
                 if self.full_input:
                     out = self.model(lightcurves=lc, spectra=spectra,
@@ -1210,7 +1186,7 @@ class ContrastiveTrainer(Trainer):
                 elif self.only_lc:
                     out = self.model(lc, lc_target) 
                 elif self.use_w:
-                    w = torch.stack([i['w'] for i in info]).to(device)
+                    w = y.nan_to_num(-1)
                     pred_coeff = float(self.pred_coeff_val) if self.pred_coeff_val != 'None' else max(1 - i / (3 * len(self.train_dl)), 0.5)
                     if self.full_input:
                         out = self.model(lightcurves=lc, spectra=spectra,
@@ -1222,7 +1198,12 @@ class ContrastiveTrainer(Trainer):
                     out = self.model(lc, spectra)
             acc = 0
             loss = out['loss'] if 'loss' in out.keys() else 0
-            features.append(out['features'].cpu().numpy())
+            if 'q' in out.keys():
+                features.append(out['q'].cpu().numpy())
+            elif 'z' in out.keys():
+                features.append(out['z'].cpu().numpy())
+            elif 'features' in out.keys():
+                features.append(out['features'].cpu().numpy())
             kids.extend([i['KID'] for i in info])
             if self.criterion is not None:
                 y_pred = out['preds']
@@ -1240,18 +1221,19 @@ class ContrastiveTrainer(Trainer):
                 break
             pbar.set_description(f"test_loss: {loss.item():.4f}, test_acc: {acc}")
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return (targets, kids, np.zeros(len(kids)), np.zeros(len(kids)),
-         np.concatenate(features), np.zeros((len(kids), 2)), np.zeros((len(kids), 2)))
+        return (targets, np.array(kids), np.zeros((len(kids), 1)), np.zeros((len(kids),1)),
+         np.zeros((len(kids),1)), np.concatenate(features))
 
 class FineTuneTrainer(Trainer):
     def __init__(self, use_w, latent_vars,
                  loss_weight_name=None,
-                  only_lc=False, error_name=None, **kwargs):
+                  only_lc=False, only_spec=False, error_name=None, **kwargs):
         super().__init__(**kwargs)
         self.latent_vars = latent_vars
         self.use_w = use_w
         self.loss_weight_name = loss_weight_name
         self.only_lc = only_lc
+        self.only_spec = only_spec
         self.error_name = error_name
     
     def get_model_output(self, lc, spectra, lc2, spectra2, info, device, val=False):
@@ -1274,7 +1256,9 @@ class FineTuneTrainer(Trainer):
             w = torch.stack([i['w'] for i in info]).to(device)
             out = self.model(lc, spectra, w_tune=w) 
         elif self.only_lc:
-            out = self.model(lc, lc2)
+            out = self.model(lc, latent=latent)
+        elif self.only_spec:
+            out = self.model(spectra, latent=latent)
         else:
             out = self.model(lc, spectra, latent=latent)
         if isinstance(out, tuple):
@@ -1387,12 +1371,17 @@ class ClassificationTrainer(FineTuneTrainer):
 class RegressorTrainer(FineTuneTrainer):
     def __init__(self, use_w, latent_vars,
                  loss_weight_name=None,
-                  only_lc=False, error_name=None, **kwargs):
+                  only_lc=False,
+                  only_spec=False,
+                   error_name=None, **kwargs):
         super().__init__(use_w=use_w, latent_vars=latent_vars,
                  loss_weight_name=loss_weight_name,
-                  only_lc=only_lc, error_name=error_name, **kwargs)
+                  only_lc=only_lc, only_spec=only_spec, error_name=error_name, **kwargs)
     
-    
+    def physical_inc_loss(self, pred, info):
+        prot = torch.stack([item['Prot'] for item in info]) * 24 * 3600
+        R = torch.stack([item['R'] for item in info]) * R_SUN_KM
+        incs = pred * prot / (2 * np.pi * R)   
     def train_batch(self, batch, batch_idx, device):
         lc, spectra, y , lc2, spectra2, info = batch
         lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
@@ -1402,6 +1391,14 @@ class RegressorTrainer(FineTuneTrainer):
             y = y.squeeze(1)
         loss_reg = self.criterion(out, y).squeeze()
         loss = loss_reg
+
+
+        if 'age_ref' in info[0].keys():
+            loss_seismo = torch.tensor([loss[i][0].item() for i in range(len(loss)) if info[i]['age_ref'] == 'asteroseismology'])
+            loss_gyro = torch.tensor([loss[i][0].item() for i in range(len(loss)) if info[i]['age_ref'] == 'gyro_gyro'])
+            self.train_aux_loss_1.append(loss_seismo.mean().item())
+            self.train_aux_loss_2.append(loss_gyro.mean().item())
+        # print(info[0]['age_ref'])
         # sigma = sigma.squeeze()
         # print('out: ', out.shape, 'y: ', y.shape, 'sigma: ', sigma.shape, 'loss: ', loss.shape)
         # loss = 0.5 * torch.exp(-sigma) * loss_reg + 0.5 * sigma
@@ -1436,6 +1433,12 @@ class RegressorTrainer(FineTuneTrainer):
         # print("nans in y: ", y.isnan().sum(), "nans in out: ", out.isnan().sum())
         loss_reg = self.criterion(out, y).squeeze()
         loss = loss_reg
+
+        if 'age_ref' in info[0].keys():
+            loss_seismo = torch.tensor([loss[i][0].item() for i in range(len(loss)) if info[i]['age_ref'] == 'asteroseismology'])
+            loss_gyro = torch.tensor([loss[i][0].item() for i in range(len(loss)) if info[i]['age_ref'] == 'gyro_gyro'])
+            self.val_aux_loss_1.append(loss_seismo.mean().item())
+            self.val_aux_loss_2.append(loss_gyro.mean().item())
         # sigma = sigma.squeeze()
         # loss = 0.5 * torch.exp(-sigma) * loss + 0.5 * sigma
         if self.loss_weight_name is not None:
@@ -1468,6 +1471,7 @@ class RegressorTrainer(FineTuneTrainer):
         sigmas = np.zeros((0, 1))
         tot_kic = []
         tot_teff = []
+        emb_projections = []
         aggregated_info = {}
         pbar = tqdm(test_dataloader)
 
@@ -1510,11 +1514,13 @@ class RegressorTrainer(FineTuneTrainer):
             
             preds = np.concatenate((preds, out.cpu().numpy()))
             targets = np.concatenate((targets, y.cpu().numpy()))
-            sigmas = np.concatenate((sigmas, sigma.cpu().numpy()))
+            # sigmas = np.concatenate((sigmas, sigma.cpu().numpy()))
+
+            emb_projections.append(pred_dict['eigen_projection'].cpu().numpy())
             if i > self.max_iter:
                 break
         print("target len: ", len(targets), "dataset: ", len(test_dataloader.dataset))
-        return preds, targets.squeeze(), sigmas.squeeze(), aggregated_info
+        return preds, targets.squeeze(), sigmas.squeeze(), np.concatenate(emb_projections), aggregated_info
 
 class MaskedRegressorTrainer(Trainer):
     def __init__(self, w_name, w_init_val, ssl_criterion, ssl_weight=0.5, **kwargs):
