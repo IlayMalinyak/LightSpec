@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import os
-from eigenspace_analysis import transform_eigenspace, plot_diagrams, plot_umap, giant_cond, get_mag_data
+from eigenspace_analysis import transform_eigenspace, plot_diagrams, plot_umap, giant_cond, get_mag_data, latex_names, units
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score
 import umap
 import matplotlib.pyplot as plt
@@ -24,6 +24,22 @@ lamost_apogee_path = r"C:\Users\Ilay\projects\kepler\data\apogee\crossmatched_ca
 mist_path = r"C:\Users\Ilay\projects\kepler\data\binaries\tables\ks_mist_catalog_kepler_1e9_feh_interp_all.csv"
 kepler_meta_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\kepler_dr25_meta_data.csv"
 
+
+def get_df(results_dir, exp_name):
+    df = pd.read_csv(os.path.join(results_dir, f'preds_{exp_name}.csv'))
+    berger = pd.read_csv(berger_catalog_path)
+    lightpred = pd.read_csv(lightpred_full_catalog_path)
+    godoy = pd.read_csv(godoy_catalog_path)
+
+    df = df.merge(berger, right_on='KID', left_on='kid', how='left')
+    df = get_mag_data(df)
+    age_cols = [c for c in lightpred.columns if 'age' in c]  # Robustly find age columns
+    df = df.merge(lightpred[['KID', 'predicted period', 'mean_period_confidence'] + age_cols], right_on='KID',
+                  left_on='kid', how='left')
+    df = df.merge(godoy, right_on='KIC', left_on='kid', how='left', suffixes=['', '_godoy'])
+    df['subgiant'] = (df['flag_CMD'] == 'Subgiant').astype(int)
+    df['main_seq'] = df.apply(giant_cond, axis=1)
+    return df
 
 def plot_confusion_mat(y_true, y_pred, results_dir, file_name):
     cm = confusion_matrix(y_true, y_pred)
@@ -80,11 +96,11 @@ def plot_roc_curve(df, cls_names, results_dir, file_name):
 
 
     # --- PLOTTING ROC CURVES ---
-    plt.figure(figsize=(10, 8))
+    # plt.figure(figsize=(10, 8))
     for i in range(num_classes):
         plt.plot(fpr[i], tpr[i], label=f'{cls_names[i]} (AUC = {roc_auc[i]:.2f})')
 
-    plt.plot([0, 1], [0, 1], 'k--', label='Chance')
+    plt.plot([0, 1], [0, 1], 'k--')
     plt.xlim([0.0, 1.0])
     plt.ylim([0.0, 1.05])
     plt.xlabel('False Positive Rate')
@@ -154,16 +170,16 @@ def plot_cls_umap(df, umap_coords, results_dir, file_name):
     print("min value binary color: ", np.min(df['binary_color']))
 
     # Create the plot
-    fig, ax = plt.subplots(figsize=(6, 8))
+    fig, ax = plt.subplots()
 
     # Plot each group separately
     for value, color in color_dict.items():
         mask = df['binary_color'] == value
         ax.scatter(umap_coords[mask, 0], umap_coords[mask, 1],
-                   c=color, label=label_dict[value], s=10)
+                   c=color, label=label_dict[value], s=50)
 
     # Build custom legend automatically
-    ax.legend(fontsize=12, loc='best')
+    ax.legend(fontsize=20, loc='best')
 
     ax.set_xlabel('UMAP X', fontsize=20)
     ax.set_ylabel('UMAP Y', fontsize=20)
@@ -172,29 +188,18 @@ def plot_cls_umap(df, umap_coords, results_dir, file_name):
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, f'umap_{file_name}_binaries_color.png'))
     plt.show()
-def plot_classification_results(results_dir, exp_name):
-    df = pd.read_csv(os.path.join(results_dir, f'preds_{exp_name}.csv'))
-    berger = pd.read_csv(berger_catalog_path)
-    lightpred = pd.read_csv(lightpred_full_catalog_path)
-    godoy = pd.read_csv(godoy_catalog_path)
 
-    df = df.merge(berger, right_on='KID', left_on='kid', how='left')
-    df = get_mag_data(df)
-    age_cols = [c for c in lightpred.columns if 'age' in c]  # Robustly find age columns
-    df = df.merge(lightpred[['KID', 'predicted period', 'mean_period_confidence'] + age_cols], right_on='KID',
-                  left_on='kid', how='left')
-    df = df.merge(godoy, right_on='KIC', left_on='kid', how='left', suffixes=['', '_godoy'])
-    df['subgiant'] = (df['flag_CMD'] == 'Subgiant').astype(int)
-    df['main_seq'] = df.apply(giant_cond, axis=1)
+def plot_classification_results(results_dir, exp_name, plot_umap=False):
 
-    projections = np.load(os.path.join(results_dir, f'projections_{exp_name}.npy'))
-    features = np.load(os.path.join(results_dir, f'features_{exp_name}.npy'))
-    reducer_standard = umap.UMAP(n_components=2, random_state=42)  # Added random_state for reproducibility
-    U_proj = reducer_standard.fit_transform(projections)
-    U_feat = reducer_standard.fit_transform(features)
-    # plot_umap(df, U_proj, results_dir, exp_name + '_proj')
-    plot_umap(df, U_feat, results_dir, exp_name + '_feat')
-    plot_cls_umap(df, U_feat, results_dir, exp_name + '_feat')
+    df = get_df(results_dir, exp_name)
+    if plot_umap:
+        projections = np.load(os.path.join(results_dir, f'projections_{exp_name}.npy'))
+        features = np.load(os.path.join(results_dir, f'features_{exp_name}.npy'))
+        reducer_standard = umap.UMAP(n_components=2, random_state=42)  # Added random_state for reproducibility
+        U_proj = reducer_standard.fit_transform(projections)
+        U_feat = reducer_standard.fit_transform(features)
+        # plot_umap(df, U_proj, results_dir, exp_name + '_proj')
+        plot_cls_umap(df, U_feat, results_dir, exp_name + '_feat')
 
     y_true = df['target']
     y_pred = df['preds_cls']
@@ -213,3 +218,115 @@ def plot_classification_results(results_dir, exp_name):
     plot_confusion_mat(y_true, y_pred, results_dir, exp_name)
     plot_roc_curve(df, ['singles', 'binaries'], results_dir, exp_name)
     plot_precision_recall_curve(df, ['singles', 'binaries'], results_dir, exp_name)
+
+
+def compare_cls_experiments(dir):
+    files_nss = [f for f in os.listdir(dir) if f.endswith('csv') and f.startswith('preds_')]
+
+    # Define colors for different experiments
+    colors = plt.cm.tab10(np.linspace(0, 1, len(files_nss)))
+
+    # Create subplots for ROC and PR curves
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+
+    cls_names = ['singles', 'binaries']
+
+    colors = plt.cm.get_cmap('Paired', 8)
+
+    for i, file in enumerate(files_nss):
+        filename = file.replace('preds_', '').replace('.csv', '')
+        words = filename.split('_')
+        if words[-1] == 'spec' or words[-1] == 'light' or words[-1] == 'former' or words[-1] == 'uniqueLoader':
+            start_idx = -2
+            model_name = '_'.join(words[start_idx:])
+        else:
+            model_name = words[-1]
+
+        # Load the predictions file
+        df = pd.read_csv(os.path.join(dir, file))
+
+        # Get number of classes and prepare data
+        num_classes = len([col for col in df.columns if col.startswith('pred_')])
+        assert num_classes == len(cls_names)
+        df['target'] = df['target'].astype(int)
+
+        # Binarize ground truth labels for multiclass ROC/PR curves
+        if num_classes == 2:
+            y_true_bin = np.zeros((len(df), 2))
+            y_true_bin[np.arange(len(df)), df['target']] = 1
+        else:
+            y_true_bin = label_binarize(df['target'], classes=np.arange(num_classes))
+
+        # Stack predicted probabilities
+        y_score = df[[f'pred_{j}' for j in range(num_classes)]].values
+
+        color = colors(i)
+        model_name = latex_names[model_name]
+
+        # --- ROC CURVES ---
+        for class_idx in range(num_classes):
+            fpr, tpr, _ = roc_curve(y_true_bin[:, class_idx], y_score[:, class_idx])
+            roc_auc = auc(fpr, tpr)
+
+            # linestyle = '--' if cls_names[class_idx] == 'singles' else '-'
+            if cls_names[class_idx] == 'binaries':
+                ax1.plot(fpr, tpr,
+                         color=color,
+                         label=f'{model_name} - (AUC = {roc_auc:.2f})',
+                         )
+            # else:
+            #     ax1.plot(fpr, tpr,
+            #              color=colors(i),
+            #              label=f'{model_name} - (AUC = {roc_auc:.2f})',
+            #              )
+
+
+
+        # --- PRECISION-RECALL CURVES ---
+        for class_idx in range(num_classes):
+            precision, recall, _ = precision_recall_curve(y_true_bin[:, class_idx], y_score[:, class_idx])
+            average_precision = average_precision_score(y_true_bin[:, class_idx], y_score[:, class_idx])
+
+            # linestyle = '--' if cls_names[class_idx] == 'singles' else '-'
+            if cls_names[class_idx] == 'binaries':
+                ax2.plot(recall, precision,
+                         color=color,
+                         label=f'{model_name} (AP = {average_precision:.2f})')
+
+    # Configure ROC plot
+    ax1.plot([0, 1], [0, 1], 'k--', alpha=0.5)
+    ax1.set_xlim([0.0, 1.0])
+    ax1.set_ylim([0.0, 1.05])
+    ax1.set_xlabel('False Positive Rate')
+    ax1.set_ylabel('True Positive Rate')
+    # ax1.set_title('ROC Curves Comparison', fontsize=14)
+    ax1.legend(loc='lower right', fontsize=24)
+    ax1.grid(True, alpha=0.3)
+
+    # Configure Precision-Recall plot
+    ax2.set_xlabel('Recall')
+    ax2.set_ylabel('Precision')
+    # ax2.set_title('Precision-Recall Curves Comparison', fontsize=14)
+    ax2.legend(loc='lower left', fontsize=24)
+    ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(dir, 'experiments_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.show()
+
+    # Print summary statistics for each experiment
+    print("\nExperiment Summary:")
+    print("-" * 80)
+    for file in files_nss:
+        file_name = file.replace('preds_', '').replace('.csv', '')
+        df = pd.read_csv(os.path.join(dir, file))
+
+        y_true = df['target']
+        y_pred = df['preds_cls']
+
+        accuracy = accuracy_score(y_true, y_pred)
+        precision = precision_score(y_true, y_pred, average='weighted')
+        recall = recall_score(y_true, y_pred, average='weighted')
+        f1 = f1_score(y_true, y_pred, average='weighted')
+
+        print(f"{file_name:20} | Acc: {accuracy:.3f} | Prec: {precision:.3f} | Recall: {recall:.3f} | F1: {f1:.3f}")

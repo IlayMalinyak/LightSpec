@@ -6,12 +6,23 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import os
 import json
+import matplotlib as mpl
+
 import umap
 import seaborn as sns
 import torch
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from eigenspace_analysis import transform_eigenspace, plot_diagrams, plot_umap
-from classification_analysis import plot_classification_results
+from eigenspace_analysis import transform_eigenspace, plot_diagrams, plot_umap, combined_projection_analysis, compare_umaps
+from classification_analysis import plot_classification_results, compare_cls_experiments
+from regression_analysis import plot_regression_results, compare_regression_experiments
+
+mpl.rcParams['axes.linewidth'] = 4
+plt.rcParams.update({'font.size': 32, 'figure.figsize': (16,10), 'lines.linewidth': 4})
+mpl.rcParams['axes.prop_cycle'] = mpl.cycler(color=["r", "gray", "c", 'm', 'brown', 'yellow'])
+# mpl.rcParams['axes.prop_cycle'] = mpl.cycler(color=["r",  "black", "brown", "blue", "green",  "y",  "purple", "pink"])
+plt.rcParams.update({'xtick.labelsize': 30, 'ytick.labelsize': 30})
+plt.rcParams.update({'legend.fontsize': 26})
+plt.rcParams['image.cmap'] = 'hot'
 
 T_MIN =3483.11
 T_MAX = 7500.0
@@ -30,8 +41,10 @@ ebs_path =  r"C:\Users\Ilay\projects\kepler\data\binaries\tables\ebs.csv"
 berger_catalog_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\berger_catalog_full.csv"
 lamost_kepler_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\lamost_dr8_gaia_dr3_kepler_ids.csv"
 lamost_apogee_path = r"C:\Users\Ilay\projects\kepler\data\apogee\crossmatched_catalog_LAMOST.csv"
+inclination_dataset_path = r"C:\Users\Ilay\projects\kepler\data\lightPred\tables\inc_dataset.csv"
 
-
+units = {'teff': 'K', 'logg': 'dex', 'feh': 'dex', 'predicted period': 'Days'}
+latex_names = {'teff': '$T_{eff}$', 'logg': '$logg$', 'feh': '$FeH$', 'predicted period': '$P_{rot}$'}
 
 import torch
 
@@ -110,7 +123,9 @@ def epoch_avg(values, num_epochs):
 def plot_training_loss(log_path, exp_name='',
                        axes=None, plot_acc=False,
                        scale_type='none', use_epoch_avg=True,
-                       plot_aux=False, aux_names=['Vic-Reg', 'Constrastive']):
+                       plot_aux=False, aux_names=['Vic-Reg', 'Constrastive'],
+                       save_aggregated_data=True,
+                       logloss=False):
     """
     Plots training and validation loss from structured JSON log files with improved scaling options
     that preserve comparability between experiments.
@@ -123,21 +138,32 @@ def plot_training_loss(log_path, exp_name='',
         scale_type (str): Scaling method to use:
             - 'shifted_log': log(x + 1) transformation that preserves relative differences
             - 'raw': No scaling
+        save_aggregated_data (bool): Whether to save the aggregated data as a JSON file
+
+    Returns:
+        tuple: Axes, figure, and aggregated data dictionary
     """
     if axes is None:
         fig, axes = plt.subplots(nrows=1, ncols=2)
+
+    # Normalize the path to handle both / and \ separators
+    log_path = os.path.normpath(log_path)
+
     if os.path.isfile(log_path):
         log_files = [log_path]
-        exp_dir = log_path.split('/')[-2]
+        # Get the parent directory name for a single file
+        exp_dir = os.path.basename(os.path.dirname(log_path))
     else:
         log_files = [os.path.join(log_path, f) for f in os.listdir(log_path) if f.endswith('.json')
-                 and 'config' not in f]
-        exp_dir = log_path.split('/')[-1]
+                     and 'config' not in f]
+        # Get the directory name for a directory of files
+        exp_dir = os.path.basename(log_path)
     modal_type = get_modal_type(exp_dir)
 
     if not len(log_files):
         return axes
 
+    # Initialize lists to store aggregated data
     train_loss = []
     val_loss = []
     train_acc = []
@@ -230,6 +256,30 @@ def plot_training_loss(log_path, exp_name='',
     scaled_train_loss = scale_values(train_loss, scale_type)
     scaled_val_loss = scale_values(val_loss, scale_type)
 
+    # Prepare aggregated data dictionary for saving
+    aggregated_data = {
+        'train_loss': train_loss.tolist(),
+        'val_loss': val_loss.tolist(),
+        'train_acc': train_acc.tolist() if plot_acc else [],
+        'val_acc': val_acc.tolist() if plot_acc else [],
+    }
+
+    # Add auxiliary losses if they exist
+    if aux_train_loss_1 is not None and len(aux_train_loss_1) > 0:
+        aggregated_data['train_aux_loss_1'] = aux_train_loss_1
+        aggregated_data['val_aux_loss_1'] = aux_val_loss_1
+
+    if aux_train_loss_2 is not None and len(aux_train_loss_2) > 0:
+        aggregated_data['train_aux_loss_2'] = aux_train_loss_2
+        aggregated_data['val_aux_loss_2'] = aux_val_loss_2
+
+    # Save aggregated data as JSON if requested
+    if save_aggregated_data:
+        output_path = os.path.join(log_path, f'{exp_dir}_aggregated_data.json')
+        with open(output_path, 'w') as f:
+            json.dump(aggregated_data, f, indent=4)
+        print(f"Aggregated data saved to {output_path}")
+
     # Determine y-axis label based on scaling method
     y_label = 'log(1 + Loss)' if scale_type == 'shifted_log' else 'Loss'
 
@@ -240,17 +290,21 @@ def plot_training_loss(log_path, exp_name='',
     if not plot_acc:
         axes[0].plot(x_train, scaled_train_loss, label=exp_name)
         axes[0].set_xlabel('Epoch' if use_epoch_avg else 'Iteration')
-        axes[0].set_ylabel(f'Train {y_label}')
+        axes[0].set_ylabel(f'log(Train {y_label})')
         axes[0].legend()
+        if logloss:
+            axes[0].semilogy()
 
         axes[1].plot(x_val, scaled_val_loss, label=exp_name)
         axes[1].set_xlabel('Epoch' if use_epoch_avg else 'Iteration')
-        axes[1].set_ylabel(f'Validation {y_label}')
+        axes[1].set_ylabel(f'log(Validation {y_label})')
         axes[1].legend()
+        if logloss:
+            axes[1].semilogy()
         if plot_aux and len(aux_train_loss_1) > 0:
             axes[0].plot(x_train, aux_train_loss_1, label=aux_names[0], linestyle='--')
             axes[0].plot(x_train, aux_train_loss_2, label=aux_names[1], linestyle=':')
-            axes[1].plot(x_val, aux_val_loss_1,  label=aux_names[0], linestyle='--')
+            axes[1].plot(x_val, aux_val_loss_1, label=aux_names[0], linestyle='--')
             axes[1].plot(x_val, aux_val_loss_2, label=aux_names[1], linestyle=':')
             axes[0].legend()
     else:
@@ -272,7 +326,7 @@ def plot_training_loss(log_path, exp_name='',
     plt.savefig(os.path.join(os.path.dirname(__file__), '..', 'figs', modal_type, f'{exp_dir}_loss.png'))
     plt.show()
 
-    return axes, fig
+    return axes, fig, aggregated_data
 
 
 def seperate_aux_loss(log, log_dict,
@@ -315,7 +369,7 @@ def seperate_aux_loss(log, log_dict,
 
 def compare_losses(log_path, exp_names=[], axes=None,
                    scale_type='none', use_epoch_avg=True, plot_acc=True,
-                   plot_aux=False, aux_names=[],
+                   plot_aux=False, aux_names=[], logloss=False,
                    suffix=''):
     if axes is None:
         fig, axes = plt.subplots(nrows=1, ncols=2)
@@ -328,7 +382,7 @@ def compare_losses(log_path, exp_names=[], axes=None,
     if not len(log_files):
         return axes
 
-    colors = plt.cm.get_cmap('tab10', len(log_files))
+    colors = plt.cm.get_cmap('Pastel1', 8)
 
 
     for i, log in enumerate(log_files):
@@ -396,14 +450,12 @@ def compare_losses(log_path, exp_names=[], axes=None,
         # Create x-axis values based on whether we're using epoch averaging
         x_train = range(len(train_loss))
         x_val = range(len(val_loss))
-        print("min aux losses: train1 ", np.min(aux_train_loss_1), " val1 ", np.min(aux_val_loss_1),
-              "train2 ", np.min(aux_train_loss_2), "val2 ", np.min(aux_val_loss_2))
-        print("min losses: train", np.min(train_loss), " val", np.min(val_loss))
-        print("max acc: train", np.max(train_acc), " val", np.max(val_acc))
         axes[0].plot(x_train, train_loss, label=name, color=color)
         axes[0].set_xlabel('Epoch' if use_epoch_avg else 'Iteration')
         axes[0].set_ylabel(f'Train {y_label}')
-        axes[0].legend()
+        # axes[0].legend()
+        if logloss:
+            axes[0].semilogy()
         if plot_acc:
             axes[0].plot(x_val, val_loss, linestyle='--', color=color)
             axes[1].plot(x_train, train_acc, label=name, color=color)
@@ -417,11 +469,15 @@ def compare_losses(log_path, exp_names=[], axes=None,
                 axes[1].plot(x_val, aux_val_loss_2, linestyle='--', color=color)
             axes[1].plot(x_val, val_loss, label=name, color=color)
             axes[1].set_ylabel(f'Validation {y_label}')
+            if logloss:
+                axes[1].semilogy()
         axes[1].set_xlabel('Epoch' if use_epoch_avg else 'Iteration')
-        axes[1].legend()
+        axes[1].legend(loc='best')
 
     plt.tight_layout()
-    plt.savefig(os.path.join(os.path.dirname(__file__), '..', 'figs', modal_type, f'{exp_dir}_loss_comparison{suffix}.png'))
+    # plt.savefig(os.path.join(os.path.dirname(__file__), '..', 'figs', modal_type, f'{exp_dir}_loss_comparison{suffix}.png'))
+    plt.savefig(os.path.join(log_path, f'{exp_dir}_loss_comparison{suffix}.png'))
+
     plt.show()
 
     return axes, fig
@@ -448,7 +504,7 @@ def compare_with_catalog(cat_path, df, modal_type='spec', merge_on='KID', color=
         label = col.split('_')[-1]
         target_col = [c for c in catalog.columns if c.lower() == label.lower()][0]
 
-        plot_qunatile_property(df_merged,
+        plot_quantile_property(df_merged,
                                target_col, label,
                                color,
                                fraction,
@@ -471,7 +527,7 @@ def plot_quantile_predictions(df_path, merge_cat_path=None, left_on='obsid',
                               right_on='combined_obsid', target_prefix=None,
                               color=None, snr_cut=None, snr_max=np.inf, restrict_teff=False, suffix=''):
     df = pd.read_csv(df_path)
-    df = unnormalize_df(df)
+    # df = unnormalize_df(df)
     if 'obsid' in df.columns:
         df['obsid'] = df['obsid'].apply(lambda x: int(x.split('.')[0]))
     if merge_cat_path is not None:
@@ -497,9 +553,9 @@ def plot_quantile_predictions(df_path, merge_cat_path=None, left_on='obsid',
 
     for col in target_cols:
         if 'teff' in col.lower():
-            mult_fact = 1
-            # mult_fact = 5778
-            df = df[df[col] * mult_fact < 7500]
+            # mult_fact = 1
+            mult_fact = 5778
+            # df = df[df[col] * mult_fact < 7500]
         elif 'vsini' in col.lower():
             mult_fact = 100
         elif 'predicted period' in col.lower() or 'prot' in col.lower():
@@ -512,7 +568,6 @@ def plot_quantile_predictions(df_path, merge_cat_path=None, left_on='obsid',
             df_col = df
 
         label = col.split('target_')[-1]
-        print(label)
 
         scale_target = True
         if target_prefix is not None:
@@ -528,23 +583,28 @@ def plot_quantile_predictions(df_path, merge_cat_path=None, left_on='obsid',
                 continue
 
         snr_str = f'{snr_cut}-{snr_max}'
-        plot_qunatile_property(df_col,
+        plot_quantile_property(df_col,
                                col, label,
                                color,
                                fraction,
                                modal_type, mult_fact,
-                               snr_str,  scale_target=scale_target, suffix=suffix)
+                               snr_str, scale_target=scale_target, suffix=suffix)
 
 
-def plot_qunatile_property(df_col, target_col, label,
+def r2_score(targets, preds):
+    ss_res = np.sum((targets - preds) ** 2)
+    ss_tot = np.sum((targets - np.mean(targets)) ** 2)
+    return 1 - ss_res / ss_tot
+
+def plot_quantile_property(df_col, target_col, label,
                            color, fraction, modal_type,
                            mult_fact, snr_cut,
                            scale_target=True, suffix=''):
-    print(label, len(df_col))
+    print(label, "number of samples - ", len(df_col))
     df_col.dropna(subset=[target_col], inplace=True)
     targets = df_col[target_col].values
-    # if scale_target:
-    #     targets = targets * mult_fact
+    if scale_target:
+        targets = targets * mult_fact
 
     # Get predictions for all quantiles
     preds_median = df_col[f'pred_{label}_q0.500'].values * mult_fact
@@ -552,8 +612,12 @@ def plot_qunatile_property(df_col, target_col, label,
     preds_upper = df_col[f'pred_{label}_q0.900'].values * mult_fact
     # Calculate metrics using median predictions
     avg_err = np.mean(np.abs(targets - preds_median))
+    rms = np.sqrt(np.mean((targets - preds_median)**2))
+    r_squared = r2_score(targets, preds_lower)
     acc_10p = (np.abs(targets - preds_median) < (np.abs(targets) * 0.1)).sum() / len(targets)
     coverage = ((targets >= preds_lower) & (targets <= preds_upper)).sum() / len(targets)
+
+    print("metrics:\n ", "MAE:", avg_err, "RMSE:", rms, "R2:", r_squared, "ACC:", acc_10p, "80% coverage:", coverage)
     # Create figure with a specific size
     plt.figure(figsize=(10, 8))
     sort_idx = np.argsort(preds_median)
@@ -564,7 +628,13 @@ def plot_qunatile_property(df_col, target_col, label,
     targets = targets[sort_idx]
     if color is None:
         # For hexbin plot
-        plt.hexbin(preds_median, targets, mincnt=1, cmap='viridis')
+        plt.hexbin(preds_median, targets, mincnt=1)
+        plt.fill_between(preds_median,
+                         preds_lower,
+                         preds_upper,
+                         alpha=0.2,
+                         color='lightsalmon',
+                         label='80% confidence interval')
     else:
         # Check if color column contains strings
         if df_col[color].dtype == object:
@@ -598,12 +668,13 @@ def plot_qunatile_property(df_col, target_col, label,
                                color='lightsalmon',
                                label='80% confidence interval')
                 
-                plt.xlabel(f'Predicted {label}')
-                plt.ylabel(f'Target {label}')
-                plt.title(f'{label} - {group_val}\nMAE: {group_avg_err:.3f},'
-                        f' Accuracy: {group_acc_10p:.3f},'
-                        f' Coverage: {group_coverage:.3f},'
-                        f' SNR cut: {snr_cut}')
+                plt.xlabel(f'Predicted {label.upper()}')
+                plt.ylabel(f'Target {label.upper()}')
+                plt.title(f'{label} - {group_val}\nMAE: {group_avg_err:.3f}'
+                          )
+                        # f' Accuracy: {group_acc_10p:.3f},'
+                        # f' Coverage: {group_coverage:.3f},'
+                        # f' SNR cut: {snr_cut}')
                 
                 lims = [
                     np.min([plt.xlim()[0], plt.ylim()[0]]),  # min of both axes
@@ -630,12 +701,13 @@ def plot_qunatile_property(df_col, target_col, label,
                            alpha=0.2,
                            color='lightsalmon',
                            label='80% confidence interval')
-    plt.xlabel(f'Predicted {label}')
-    plt.ylabel(f'Target {label}')
-    plt.title(f'{label}\nMAE: {avg_err:.3f},'
-            f' Accuracy: {acc_10p:.3f},'
-            f' Coverage: {coverage:.3f},'
-            f' SNR cut: {snr_cut}')
+    plt.xlabel(f'Predicted {latex_names[label]} ({units[label]})')
+    plt.ylabel(f'Target {latex_names[label]} ({units[label]})')
+    plt.title(f'MAE: {avg_err:.3f} ({units[label]})'
+              )
+            # f' Accuracy: {acc_10p:.3f},'
+            # f' Coverage: {coverage:.3f},'
+            # f' SNR cut: {snr_cut}')
     lims = [
         np.min([plt.xlim()[0], plt.ylim()[0]]),  # min of both axes
         np.max([plt.xlim()[1], plt.ylim()[1]]),  # max of both axes
@@ -941,27 +1013,98 @@ def analyze_projection_distributions(projections, n_bins=50, top_n=10):
 
 
 
+def plots_for_poster():
+    root_dir = r'C:\Users\Ilay\projects\multi_modal\LightSpec\logs'
+    spec_df_path = os.path.join(root_dir, 'spec', 'spec_decode2_2025-02-11',
+                                'MultiTaskRegressor_spectra_decode2_5_cqr.csv')
+    lc_df_path = os.path.join(root_dir, 'light', 'light_2025-03-19',
+                              'DoubleInputRegressor_light_decode2_2_cqr.csv')
+    lightspec_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14')
+    finetune_nss_dir = os.path.join(root_dir, 'finetune', 'nss_finetune_2025-05-18')
+    nss_compare_dir = os.path.join(root_dir, 'finetune', 'nss_compare')
+
+
+    plot_quantile_predictions(lc_df_path, merge_cat_path=berger_catalog_path, left_on='KID', right_on='KID')
+    for cut in [None]:
+        snr_max = np.inf
+        plot_quantile_predictions(spec_df_path, merge_cat_path=lamost_apogee_path,
+                                  snr_cut=cut, snr_max=snr_max, target_prefix='APOGEE', restrict_teff=True, suffix='_apogee_restriced')
+
+    files = [f for f in os.listdir(lightspec_dir) if f.endswith('csv')]
+    for file in files:
+        if '6_latent' in file:
+            file_name = file.replace('preds_', '').replace('.csv', '')
+            plot_diagrams(lightspec_dir, file_name)
+
+    compare_cls_experiments(nss_compare_dir)
 
 
 
 
+def plots_comparisons():
+    root_dir = r'C:\Users\Ilay\projects\multi_modal\LightSpec\logs'
+    nss_compare_dir = os.path.join(root_dir, 'finetune', 'nss_compare')
+    age_compare_dir = os.path.join(root_dir, 'finetune', 'age_compare')
+    umap_compare = os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14', 'compare_umaps')
+
+    # compare_umaps(umap_compare, ['projections', 'features', 'features', 'features'], 'flag_CMD_numeric')
+    compare_regression_experiments(age_compare_dir,  ['final_age_norm', 'age_error_norm'], color_col='Teff')
+    compare_cls_experiments(nss_compare_dir)
+
+    compare_losses(os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14', 'compare'),
+                   exp_names=['cross attn', 'self attn', 'cross + self attn'],
+                   plot_acc=False,
+                   plot_aux=False, aux_names=['ssl', 'reg'],
+                   logloss=True,
+                   suffix='_dualformer_ablation')
+
+    compare_losses(os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14', 'compare_A'),
+                   exp_names=['Transpose', 'Non-Transpose'],
+                   plot_acc=False,
+                   plot_aux=False, aux_names=['ssl', 'reg'],
+                   logloss=True,
+                   suffix='_dualformer_ablation')
 
 
 if __name__ == '__main__':
+    # plots_for_poster()
+    # exit()
+    plots_comparisons()
+    exit()
+
 
     root_dir = r'C:\Users\Ilay\projects\multi_modal\LightSpec\logs'
     spec_df_path = os.path.join(root_dir, 'spec', 'spec_decode2_2025-02-11',
                                 'MultiTaskRegressor_spectra_decode2_5_cqr.csv')
     lc_df_path = os.path.join(root_dir, 'light', 'light_2025-03-19',
-                              'DoubleInputRegressor_lc_decode2_3_1_ssl_cqr.csv')
-    lightspec_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-04-22')
-    finetune_nss_dir = os.path.join(root_dir, 'finetune', 'nss_finetune_2025-04-29')
-    finetune_age_dir = os.path.join(root_dir, 'finetune', 'age_finetune_2025-04-30')
-    files = [f for f in os.listdir(finetune_age_dir) if f.endswith('csv')]
-    for file in files:
-        if file.endswith('.csv'):
-            plot_quantile_predictions(os.path.join(finetune_age_dir, file))
-        # if 'hard' in file:
+                              'DoubleInputRegressor_light_decode2_2_cqr.csv')
+    lightspec_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14')
+    finetune_nss_dir = os.path.join(root_dir, 'finetune', 'nss_finetune_2025-05-1')
+    nss_compare_dir = os.path.join(root_dir, 'finetune', 'nss_compare')
+    age_compare_dir = os.path.join(root_dir, 'finetune', 'age_compare')
+    umap_compare = os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14', 'compare_umaps')
+    finetune_age_dir = os.path.join(root_dir, 'finetune', 'age_finetune_2025-05-22')
+    finetune_inc_dir = os.path.join(root_dir, 'finetune', 'inc_finetune_2025-05-19')
+    moco_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-22-moco')
+    jepa_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-22')
+    inc_dataset = pd.read_csv(inclination_dataset_path)
+
+    # combined_projection_analysis(inc_dataset, finetune_inc_dir)
+    # exit()
+
+    # files = [f for f in os.listdir(finetune_age_dir)]
+    # age_df = None
+    # for file in files:
+    #     if file.endswith('.csv'):
+    #         if file.startswith('predictions'):
+    #             file_name = file.replace('predictions_', '').replace('.csv', '')
+    #             plot_regression_results(finetune_age_dir, file_name,
+    #                                     ['final_age_norm', 'age_error_norm'],
+    #                                     to_merge='updated_finetune_age_df.csv',
+    #                                     color_col='Teff')
+    #     elif file.endswith('.json'):
+    #         plot_training_loss(finetune_age_dir, file, plot_aux=True, aux_names=['asterosiesmology', 'gyro'],
+    #                            plot_acc=False, save_aggregated_data=False)
         #     file_name = file.replace('preds_', '').replace('.csv', '')
         #     plot_classification_results(finetune_nss_dir, file_name)
     # exit()
@@ -970,78 +1113,30 @@ if __name__ == '__main__':
     #     if '6_latent' in file:
     #         file_name = file.replace('preds_', '').replace('.csv', '')
     #         plot_diagrams(lightspec_dir, file_name)
-            # plot_eigenspace(lightspec_dir, file_name)
+    # exit()
+    files = [f for f in os.listdir(moco_dir) if f.endswith('csv')]
+    for file in files:
+        file_name = file.replace('preds_', '').replace('.csv', '')
+        plot_diagrams(moco_dir, file_name, umap_input='features')
+
+    files = [f for f in os.listdir(jepa_dir) if f.endswith('csv')]
+    for file in files:
+        file_name = file.replace('preds_', '').replace('.csv', '')
+        plot_diagrams(jepa_dir, file_name, umap_input='features')
+
     exit()
-    lightspec_best_dir = os.path.join(root_dir, 'lightspec', 'lightspec_2025-03-28',)
-    spec_dir = os.path.join(root_dir, 'spec', 'spec_decode2_2025-04-07',)
-    postprocess_dir(spec_dir,'MultiTaskRegressor_spectra_decode2_spec_minmax_targets_2_cqr.csv')
-    lightspec_df_path = os.path.join(lightspec_best_dir,
-                                     'lightspec_ssl_cqr.csv')
-    model_path = os.path.join(lightspec_best_dir,
-                                     'lightspec_5_mlp_non_freeze.pth')
-    output_path = model_path.replace('.pth', '.onnx')
-    # convert_to_onnx(model_path,
-    #                 [(4,34560), (1,4096), (4,34560), (1,4096)],
-    #                 output_path)
-    # plot_quantile_predictions(lc_df_path, merge_cat_path=berger_cat, left_on='KID', right_on='KID',
-    #                           )
-    spec_df = pd.read_csv(spec_df_path)
-    lamost_kepler = pd.read_csv(lamost_kepler_path)
-    # lamost_kepler['obsid'] = lamost_kepler['obsid'].astype(np.int64)
-    # spec_df['obsid'] = spec_df['obsid'].apply(lambda x: x.split('.')[0]).astype(np.int64)
-    # spec_kepler = spec_df.merge(lamost_kepler, on='obsid')
-    # spec_kepler.rename(columns={'kepid': 'KID'}, inplace=True)
-    # compare_with_catalog(berger_cat, spec_kepler)
-    # plot_quantile_predictions(spec_df_path)
-    # for cut in [None, 5, 10, 20, 50]:
-        # snr_max = 20 if (cut is not None and cut < 20) else np.inf
-        # snr_max = np.inf
-        # plot_quantile_predictions(spec_df_path, merge_cat_path=lamost_apogee_path,
-        #                           snr_cut=cut, snr_max=snr_max, target_prefix='APOGEE', suffix='_apogee')
-        # plot_quantile_predictions(spec_df_path, merge_cat_path=lamost_apogee_path,
-        #                           snr_cut=cut, snr_max=snr_max, target_prefix='APOGEE', restrict_teff=True, suffix='_apogee_restriced')
-        # plot_quantile_predictions(spec_df_path, merge_cat_path=lamost_catalog_path,
-        #                           snr_cut=cut, snr_max=snr_max, target_prefix=None, suffix='_lasp')
-    # plot_error_vs_snr(spec_df_path, bins=20)
-    # plot_error_vs_prediction_interval(spec_df_path, snr_cut=0)
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs',
-    #                                 'light', 'light_2025-02-28'), plot_acc=True)
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs', 'spec', 'spec_decode2_2025-02-11'), plot_acc=True)
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-02-11'), plot_acc=False)
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs', 'lightspec', 'lightspec_2025-03-02'), plot_acc=True, use_epoch_avg=True)
-    plot_training_loss(os.path.join(root_dir, 'lightspec', 'lightspec_2025-03-23'), plot_acc=False,
-                       use_epoch_avg=True, plot_aux=True,
-                       aux_names=['ssl loss', 'reg loss'], exp_name='_multitask')
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-03-03', 'MultiEncoder_lc_3.json'), plot_acc=False,
-    #                    use_epoch_avg=True, plot_aux=True,
-    #                    aux_names=['ssl loss', 'reg loss'], exp_name='_multitask')
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-03-12', 'MultiEncoder_lc_1.json'), plot_acc=False,
-    #                    use_epoch_avg=True, plot_aux=True,
-    #                    aux_names=['ssl loss', 'reg loss'], exp_name='_multitask')
-    # plot_training_loss(os.path.join(os.path.dirname(__file__), '..', 'logs', 'lightspec', 'lightspec_2025-03-03'),
-    #                    plot_acc=True, plot_aux=True, aux_names=['ssl', 'reg'])
-    compare_losses(os.path.join(root_dir, 'lightspec', 'lightspec_2025-03-23', 'compare'),
-                   exp_names=['shared projector', 'mlp freeze', 'mlp non freeze'],
+
+
+    compare_losses(os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14', 'compare'),
+                   exp_names=['cross attn', 'self attn', 'cross + self attn'],
                    plot_acc=False,
                    plot_aux=False, aux_names=['ssl', 'reg'],
-                   suffix='_multitask_simsiam')
-    # compare_losses(os.path.join(os.path.dirname(__file__), '..', 'logs', 'lightspec', 'lightspec_2025-02-24'),
-    #                exp_names=['Vic Reg + Contrastive', 'Vic Reg'], suffix='_vic_contrastive')
-    # compare_losses(os.path.join(os.path.dirname(__file__), '..', 'logs', 'lightspec', 'lightspec_2025-03-03'),
-    #                exp_names=['1', '2'], suffix='_test', plot_acc=True)
-    # compare_losses(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-03-03'),
-    #                exp_names=['logg', 'teff-logg-M-L', 'only ssl'], suffix='_preds', plot_acc=True)
-    # plot_umap(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-03-03'),
-    #           color_cols=['mean_period_confidence', 'predicted period', 'logg'],
-    #           merge_cat=[lightpred_catalog_path, berger_catalog_path], left_on='KID', right_on='KID')
-    # plot_umap(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-03-19'),
-    #           color_cols=['Prot', 'mean_period_confidence', 'RUWE'],
-    #           merge_cat=[berger_catalog_path, lightpred_catalog_path], left_on='KID', right_on='KID')
-    # plot_umap(os.path.join(os.path.dirname(__file__), '..', 'logs', 'light', 'light_2025-02-11'),
-    #           color_cols=['mean_period_confidence', 'predicted period', 'RUWE'],
-    #           merge_cat=[lightpred_catalog_path, berger_catalog_path], left_on='KID', right_on='KID')
-    # plot_umap(os.path.join(os.path.dirname(__file__), '..', 'logs', 'spec', 'spec_decode2_2025-02-11'),
-    #           color_cols=['Teff', 'logg', 'FeH'])
-    plot_umap(os.path.join(root_dir, 'lightspec', 'lightspec_2025-03-26'),
-              color_cols=['Teff', 'logg', 'Rstar', 'RUWE', 'Prot', 'FeH'],
-              suffix='')
+                   logloss=True,
+                   suffix='_dualformer_ablation')
+
+    compare_losses(os.path.join(root_dir, 'lightspec', 'lightspec_2025-05-14', 'compare_A'),
+                   exp_names=['Transpose', 'Non-Transpose'],
+                   plot_acc=False,
+                   plot_aux=False, aux_names=['ssl', 'reg'],
+                   logloss=True,
+                   suffix='_dualformer_ablation')
