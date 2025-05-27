@@ -51,6 +51,7 @@ R_SUN_KM = 6.957e5
 
 # finetune_checkpoint_path =  '/data/lightSpec/logs/nss_finetune_2025-04-29/nss_finetune_lightspec_dual_former_6_latent_giants_finetune_nss_hard.pth'
 finetune_checkpoint_path = '/data/lightSpec/logs/nss_finetune_2025-05-17/nss_finetune_lightspec_dual_former_6_latent_giants_nss_finetune.pth'
+jepa_checkpoint_path = '/data/lightSpec/logs/nss_finetune_2025-05-22/nss_finetune_lightspec_compare_jepa.pth'
 
 torch.cuda.empty_cache()
 
@@ -138,9 +139,7 @@ elif data_args.approach == 'unimodal_spec':
     only_spec = True
     only_lc = False
     model = UniModalFineTuner(spec_model.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
-elif data_args.approach == 'moco':
-    model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
-elif data_args.approach == 'jepa':
+elif data_args.approach == 'moco' or data_args.approach == 'simsiam' or data_args.approach == 'jepa':
     model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 elif data_args.approach == 'dual_former':
     model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
@@ -148,8 +147,9 @@ elif data_args.approach == 'dual_former':
 #         param.requires_grad = False
 
 # tuner_args.out_dim = tuner_args.out_dim 
-# model = load_checkpoints_ddp(model, finetune_checkpoint_path)
-# model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+# model = load_checkpoints_ddp(model, jepa_checkpoint_path)
+
+model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
 num_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 all_params = sum(p.numel() for p in model.parameters())

@@ -729,13 +729,14 @@ class MaskedSSLTrainer(Trainer):
 
 
 class DualFormerTrainer(Trainer):
-    def __init__(self, use_y_as_latent=False, alpha=0.5, print_every=500, **kwargs):
+    def __init__(self, use_y_as_latent=False, alpha=0.5, print_every=500, calc_variance=False, **kwargs):
         super().__init__(**kwargs)
         self.use_y_as_latent = use_y_as_latent
         self.alpha = alpha
         # self.lc_losses = []
         # self.spec_losses = []
         self.print_every = print_every
+        self.calc_variance = calc_variance
     
     def off_diagonal(self, x):
         n, m = x.shape
@@ -753,6 +754,12 @@ class DualFormerTrainer(Trainer):
             num_features
         ) + self.off_diagonal(cov_y).pow_(2).sum().div(num_features)
         + self.off_diagonal(cov_xy).pow_(2).sum().div(num_features)
+
+        if self.calc_variance:
+            std_x = torch.sqrt(x.var(dim=0) + 0.0001)
+            std_y = torch.sqrt(y.var(dim=0) + 0.0001)
+            std_loss = torch.mean(F.relu(1 - std_x)) / 2 + torch.mean(F.relu(1 - std_y)) / 2
+            cov_loss += std_loss
         return cov_loss
 
     def _duality_loss(self, proj1, proj2, emb1, emb2):
@@ -1200,8 +1207,9 @@ class ContrastiveTrainer(Trainer):
             loss = out['loss'] if 'loss' in out.keys() else 0
             if 'q' in out.keys():
                 features.append(out['q'].cpu().numpy())
-            elif 'z' in out.keys():
-                features.append(out['z'].cpu().numpy())
+            elif 'z1' in out.keys() and 'z2' in out.keys():
+                z = torch.cat((out['z1'], out['z2']), dim=1)
+                features.append(z.cpu().numpy())
             elif 'features' in out.keys():
                 features.append(out['features'].cpu().numpy())
             kids.extend([i['KID'] for i in info])
@@ -1217,6 +1225,8 @@ class ContrastiveTrainer(Trainer):
                 preds_med = y_pred[: ,:, self.num_quantiles // 2]
                 acc = (torch.abs(preds_med - y) < y * 0.1).sum(0)
             targets = np.concatenate((targets, y.cpu().numpy()))
+
+            print(len(features))
             if i > self.max_iter:
                 break
             pbar.set_description(f"test_loss: {loss.item():.4f}, test_acc: {acc}")
@@ -1385,6 +1395,7 @@ class RegressorTrainer(FineTuneTrainer):
     def train_batch(self, batch, batch_idx, device):
         lc, spectra, y , lc2, spectra2, info = batch
         lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+        y = y.nan_to_num(-1)
         
         out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2, spectra2, info, device)
         if len(y.shape) == 2 and y.shape[1] == 1:
@@ -1425,6 +1436,7 @@ class RegressorTrainer(FineTuneTrainer):
     def eval_batch(self, batch, batch_idx, device):
         lc, spectra, y , lc2, spectra2, info = batch
         lc, spectra, y = lc.to(device).float(), spectra.to(device).float(), y.to(device)
+        y = y.nan_to_num(-1)
         with torch.no_grad():
             out, sigma, pred_dict, w_loss, latent, err = self.get_model_output(lc, spectra, lc2,
                                                 spectra2, info, device, val=True)

@@ -213,6 +213,7 @@ def get_model(data_args,
     conformer_args_spec = Container(**yaml.safe_load(open(args_dir, 'r'))['Conformer_spec'])
     astroconformer_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['AstroConformer_lc'])
     cnn_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['CNNEncoder_lc'])
+    simsiam_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiModalSimSiam'])
     # lstm_args_lc = Container(**yaml.safe_load(open(args_dir, 'r'))['LSTMEncoder_lc'])
     lightspec_args = Container(**yaml.safe_load(open(args_dir, 'r'))['MultiEncoder_lightspec'])
     transformer_args_lightspec = Container(**yaml.safe_load(open(args_dir, 'r'))['Transformer_lightspec'])
@@ -292,6 +293,7 @@ def get_model(data_args,
         
         print("Using JEPA with transformer args: ", transformer_args_jepa)
         print("Using projector args: ", projector_args)
+        print("Using predictor args: ", predictor_args.get_dict())
 
         model = PredictiveMoco(spec_model.encoder, light_model.simsiam.encoder,
                              transformer_args_lightspec,
@@ -318,6 +320,11 @@ def get_model(data_args,
         print(f"Using transformer_args_lightspec with num_layers={transformer_args_lightspec.num_layers}, beta={getattr(transformer_args_lightspec, 'beta', 1.0)}")
         deepnorm_init(model.shared_encoder_q, transformer_args_lightspec)
         deepnorm_init(model.shared_encoder_k, transformer_args_lightspec)
+    
+    elif data_args.approach == 'simsiam':
+        backbone = Transformer(transformer_args_lightspec)
+        model = MultiModalSimSiam(backbone, light_model.simsiam.encoder, spec_model.encoder, simsiam_args).to(local_rank)
+        tuner_args.in_dim = light_model.simsiam.encoder.output_dim
 
 
     if data_args.load_checkpoint:

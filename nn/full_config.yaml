@@ -24,7 +24,7 @@ Data:
   prediction_labels_lightspec: ["Teff",  "logg", "Prot",  "FeH", "Rstar",  "RUWE"]
   prediction_labels_lc: ['Teff', 'logg', 'Prot']
   prediction_labels_spec: ['Teff', 'logg', 'Prot']
-  prediction_labels_finetune: ['final_age_norm', 'age_error_norm']
+  prediction_labels_finetune: ['final_age_norm', 'Mstar']
   prediction_labels_simulation: ['Period']
   target_norm: 'solar'
   test_run: False
@@ -41,16 +41,19 @@ Data:
   freeze_backbone: True
   use_latent: True
   pred_coeff_val: 1
-  approach: "moco"
+  approach: "simsiam"
   only_main_seq: False
+  calc_variance: True
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-18/lightspec_dual_former_latent_full.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-15/lightspec_dual_former_teff_logg_prot_duality_loss_freeze_backbone_latent_2.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-19/lightspec_dual_former_latent_full_proj_covloss_mainseq.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-20/lightspec_dual_former_6_latent_proj_covloss_2.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-04-22/lightspec_dual_former_6_latent_proj_covloss_giants.pth'
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-21/lightspec_compare_moco.pth'
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-21/lightspec_compare_moco.pth'
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-21/lightspec_compare_jepa.pth'
+  # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-23/lightspec_compare_moco.pth'
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-26/lightspec_compare_simsiam.pth'
 
   # checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-16/lightspec_dual_former_6_latent_giants_ablation_2.pth'
 
@@ -383,7 +386,7 @@ projector:
   out_dim: 64
 
 predictor:
-  in_dim: 256
+  in_dim: 128
   hidden_dim: 128
   out_dim: 64
   w_dim: 6
@@ -392,7 +395,7 @@ reg_predictor:
   in_dim: 128
   hidden_dim: 512
   out_dim: 20
-  w_dim: 0
+  w_dim: 6
 
 loss:
   sim_coeff: 25
@@ -403,7 +406,7 @@ Tuner:
   in_dim: 256
   hidden_dim: 64
   out_dim: 2
-  w_dim: 0
+  w_dim: 6
 
 Test_Tuner:
   encoder_dim: 256
@@ -415,7 +418,7 @@ Test_Tuner:
   
 MultiModalSimSiam:
   # Model
-  input_dim: 512
+  input_dim: 128
   hidden_dim: 64
   projection_dim: 32
   output_dim: 32

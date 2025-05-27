@@ -9,7 +9,7 @@ def D(p, z, version='simplified'): # negative cosine similarity
         z = F.normalize(z, dim=1) # l2-normalize 
         return -(p*z).sum(dim=1).mean()
 
-    elif version == 'simplified':# same thing, much faster. Scroll down, speed test in __main__
+    elif version == 'simplified':# same thing, much faster.
         return - F.cosine_similarity(p, z.detach(), dim=-1).mean()
     else:
         raise Exception
@@ -256,4 +256,4 @@ class MultiModalSimSiam(nn.Module):
         z1, z2 = f(x1), f(x2)
         p1, p2 = h(z1), h(z2)
         L = D(p1, z2) / 2 + D(p2, z1) / 2
-        return {'loss': L, 'logits1': z1, 'logits2': z2}
+        return {'loss': L, 'z1': z1, 'z2': z2}

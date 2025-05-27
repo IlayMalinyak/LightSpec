@@ -228,49 +228,52 @@ if __name__ == "__main__":
 
     test_dataset_samples(train_dataset, num_iters=100)
 
-    # train_dataloader = create_unique_loader(train_dataset,
-    #                                       batch_size=int(data_args.batch_size), \
-    #                                       num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-    #                                       collate_fn=kepler_collate_fn )
+    if data_args.approach == 'moco':
 
-    # val_dataloader = create_unique_loader(val_dataset,
-    #                                     batch_size=int(data_args.batch_size),
-    #                                     num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-    #                                     collate_fn=kepler_collate_fn,
-    #                                      drop_last=True
-    #                                     )
+        train_dataloader = create_unique_loader(train_dataset,
+                                            batch_size=int(data_args.batch_size), \
+                                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                            collate_fn=kepler_collate_fn )
 
-    # test_dataloader = DataLoader(test_dataset,
-    #                              batch_size=int(data_args.batch_size),
-    #                              collate_fn=kepler_collate_fn,
-    #                              num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-    #                              drop_last=True
-                                #  )
+        val_dataloader = create_unique_loader(val_dataset,
+                                            batch_size=int(data_args.batch_size),
+                                            num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                            collate_fn=kepler_collate_fn,
+                                            drop_last=True
+                                            )
 
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
-    train_dataloader = DataLoader(train_dataset,
-                                batch_size=int(data_args.batch_size), \
-                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                collate_fn=kepler_collate_fn,
-                                sampler=train_sampler
-                                )
+        test_dataloader = create_unique_loader(test_dataset,
+                                    batch_size=int(data_args.batch_size),
+                                    collate_fn=kepler_collate_fn,
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                    drop_last=True
+                                    )
+    else:
 
-    val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
-    val_dataloader = DataLoader(val_dataset,
-                                batch_size=int(data_args.batch_size),
-                                collate_fn=kepler_collate_fn,
-                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                sampler=val_sampler
-                                )
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
+        train_dataloader = DataLoader(train_dataset,
+                                    batch_size=int(data_args.batch_size), \
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                    collate_fn=kepler_collate_fn,
+                                    sampler=train_sampler
+                                    )
 
-    test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
-    test_dataloader = DataLoader(test_dataset,
-                                batch_size=int(data_args.batch_size),
-                                collate_fn=kepler_collate_fn,
-                                num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
-                                sampler=test_sampler,
-                                drop_last=True
-                                )
+        val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, num_replicas=world_size, rank=local_rank)
+        val_dataloader = DataLoader(val_dataset,
+                                    batch_size=int(data_args.batch_size),
+                                    collate_fn=kepler_collate_fn,
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                    sampler=val_sampler
+                                    )
+
+        test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num_replicas=world_size, rank=local_rank)
+        test_dataloader = DataLoader(test_dataset,
+                                    batch_size=int(data_args.batch_size),
+                                    collate_fn=kepler_collate_fn,
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]),
+                                    sampler=test_sampler,
+                                    drop_last=True
+                                    )
 
     print("len train dataloader ", len(train_dataloader))
 
@@ -336,7 +339,7 @@ if __name__ == "__main__":
         if data_args.approach == 'jepa':
             data_args.pred_coeff = 1
             use_w = True
-        elif data_args.approach == 'moco':
+        elif data_args.approach == 'moco' or data_args.approach == 'simsiam':
             data_args.pred_coeff = 0
             use_w = False
         trainer = ContrastiveTrainer(model=model, optimizer=optimizer,
@@ -390,7 +393,6 @@ if __name__ == "__main__":
 
     # Make sure all processes are done before aggregating
     torch.distributed.barrier()
-
     # Only run aggregation on the main process
     if local_rank == 0:
         world_size = torch.distributed.get_world_size()

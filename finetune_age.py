@@ -53,6 +53,7 @@ MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEnco
 
 # finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-04-30/age_finetune_lightspec_dual_former_6_latent_giants_finetune_age_gyro.pth'
 finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-17/age_finetune_lightspec_dual_former_6_latent_giants_nss_finetune_age_gyro.pth'
+jepa_checkpoint_path= '/data/lightSpec/logs/age_finetune_2025-05-22/age_finetune_lightspec_compare_jepa.pth'
 
 
 R_SUN_KM = 6.957e5
@@ -105,10 +106,12 @@ def create_train_test_dfs(meta_columns):
     lamost_kepler_df.drop(columns=unamed_cols, inplace=True)
     lamost_kepler_df = lamost_kepler_df.merge(period_catalog, on='KID', how='left', suffixes=('_lamost', '')).drop_duplicates('KID')
     
-    # age_df = pd.read_csv('/data/lightPred/tables/ages_dataset.csv')
-    age_df = pd.read_csv('/data/lightPred/tables/ages_dataset_gyro.csv')
+    astero_age_df = pd.read_csv('/data/lightPred/tables/ages_dataset.csv')
+    gyro_age_df = pd.read_csv('/data/lightPred/tables/ages_dataset_gyro.csv')
+    unamed_cols = [col for col in gyro_age_df.columns if 'Unnamed' in col]
 
-    unamed_cols = [col for col in age_df.columns if 'Unnamed' in col]
+    age_df = pd.concat([gyro_age_df, astero_age_df, ]).drop_duplicates('KID')
+
     age_df.drop(columns=unamed_cols, inplace=True)
     
     final_df = lamost_kepler_df.merge(age_df, on='KID', suffixes=('', '_ages')).drop_duplicates('KID')
@@ -204,9 +207,7 @@ elif data_args.approach == 'unimodal_spec':
     only_spec = True
     only_lc = False
     model = UniModalFineTuner(spec_model.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
-elif data_args.approach == 'moco':
-    model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
-elif data_args.approach == 'jepa':
+elif data_args.approach == 'moco' or data_args.approach == 'simsiam' or data_args.approach == 'jepa':
     model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 elif data_args.approach == 'dual_former':
     model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
@@ -215,8 +216,7 @@ elif data_args.approach == 'dual_former':
 #         param.requires_grad = False
 
 # print("loading finetune checkpoints from best run...")
-# model = load_checkpoints_ddp(model, finetune_checkpoint_path)
-
+# model = load_checkpoints_ddp(model, jepa_checkpoint_path)
 
 
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
