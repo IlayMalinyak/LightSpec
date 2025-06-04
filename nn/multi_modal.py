@@ -263,13 +263,19 @@ class ContrastiveFineTuner(nn.Module):
         
     def forward(self, lc, spectra, latent=None):
         model_out = self.model(lc, spectra, latent)
-        predictions = self.head(model_out['q'])
+        if 'q' in model_out:
+            features = model_out['q']
+        elif 'z1' in model_out and 'z2' in model_out:
+            features = torch.cat((model_out['z1'], model_out['z2']), dim=1)
+        predictions = self.head(features)
         if isinstance(predictions, tuple):
             predictions = predictions[0]
-        pred_dict = {'head_features': model_out['q']}
-        pred_dict['eigen_projection'] = torch.zeros_like(model_out['q'])
+        else:
+            raise ValueError("Model output does not contain 'q', 'z1', or 'z2'.")
+        pred_dict = {'head_features': features}
+        pred_dict['eigen_projection'] = torch.zeros_like(features)
         if self.use_sigma:
-            sigma = self.sigma_head(model_out['q'])
+            sigma = self.sigma_head(features)
         else:
             sigma = None
         return predictions, sigma, pred_dict

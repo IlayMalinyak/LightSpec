@@ -54,8 +54,7 @@ MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEnco
 # finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-04-30/age_finetune_lightspec_dual_former_6_latent_giants_finetune_age_gyro.pth'
 finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-17/age_finetune_lightspec_dual_former_6_latent_giants_nss_finetune_age_gyro.pth'
 jepa_checkpoint_path= '/data/lightSpec/logs/age_finetune_2025-05-22/age_finetune_lightspec_compare_jepa.pth'
-
-
+simsiam_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-28/age_finetune_lightspec_compare_simsiam.pth'
 R_SUN_KM = 6.957e5
 
 torch.cuda.empty_cache()
@@ -110,7 +109,8 @@ def create_train_test_dfs(meta_columns):
     gyro_age_df = pd.read_csv('/data/lightPred/tables/ages_dataset_gyro.csv')
     unamed_cols = [col for col in gyro_age_df.columns if 'Unnamed' in col]
 
-    age_df = pd.concat([gyro_age_df, astero_age_df, ]).drop_duplicates('KID')
+    age_df = gyro_age_df
+    # age_df = pd.concat([gyro_age_df, astero_age_df, ]).drop_duplicates('KID')
 
     age_df.drop(columns=unamed_cols, inplace=True)
     
@@ -215,8 +215,8 @@ elif data_args.approach == 'dual_former':
 # for param in pre_trained_model.parameters():
 #         param.requires_grad = False
 
-# print("loading finetune checkpoints from best run...")
-# model = load_checkpoints_ddp(model, jepa_checkpoint_path)
+print("loading finetune checkpoints from simsiam best run...")
+model = load_checkpoints_ddp(model, simsiam_checkpoint_path)
 
 
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
@@ -276,14 +276,14 @@ with open(config_save_path, "w") as config_file:
 
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
-fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=10, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_age_{exp_num}.json'
-with open(output_filename, "w") as f:
-    json.dump(fit_res, f, indent=2)
-fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_age_{exp_num}.png")
-plt.clf()
+# fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+#                         early_stopping=10, best='loss', conf=True) 
+# output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_age_{exp_num}.json'
+# with open(output_filename, "w") as f:
+#     json.dump(fit_res, f, indent=2)
+# fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_age_{exp_num}.png")
+# plt.clf()
 
 preds, targets, sigmas, projections, aggregated_info = trainer.predict(test_dataloader, device=local_rank)
 

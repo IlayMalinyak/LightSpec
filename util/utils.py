@@ -480,7 +480,7 @@ def save_predictions_to_dataframe(preds, targets, info, prediction_labels, quant
                 for q_idx, quantile in enumerate(quantiles)
             },
             # Add info dictionary
-            # id_name: info[id_name],
+            id_name: info[id_name],
             # 'Teff': info['Teff']
             # Add info dictionary
             # **info

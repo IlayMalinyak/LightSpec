@@ -177,7 +177,7 @@ test_dataloader = DataLoader(test_dataset,
                             collate_fn=kepler_collate_fn,
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
-_, optim_args, complete_config, model, _ = generator.get_model(data_args, args_dir, complete_config, local_rank)
+_, optim_args, tuner_args, complete_config, model, _ = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
 model = model.to(local_rank)
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)

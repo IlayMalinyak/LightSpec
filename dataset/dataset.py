@@ -388,9 +388,16 @@ class SpectraDataset(Dataset):
         obsdir = str(obsid)[:4]
         spectra_filename = os.path.join(self.data_dir, f'{obsdir}/{obsid}.fits')
         try:
-            spectra, meta = self.read_lamost_spectra(spectra_filename)
-            spec_time = time.time() - start
-            meta['obsid'] = obsid
+            if not self.df.iloc[idx]['APOGEE_ID'].isnan():     
+                filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
+                spectra, meta = self.read_apogee_spectra(filepath)
+            else:
+                obsid = int(self.df.iloc[idx]['combined_obsid'])
+                obsdir = str(obsid)[:4]
+                spectra_filename = os.path.join(self.data_dir, f'{obsdir}/{obsid}.fits')
+                spectra, meta = self.read_lamost_spectra(spectra_filename)
+                spec_time = time.time() - start
+                meta['obsid'] = obsid
         except OSError as e:
             print("Error reading file ", obsid, e)
             # spectra = np.zeros((self.spec_seq_len))
@@ -400,7 +407,7 @@ class SpectraDataset(Dataset):
                     torch.zeros(4),
                     torch.zeros(self.max_len, dtype=torch.bool),
                     torch.zeros(self.max_len, dtype=torch.bool),
-                    {'obsid': obsid})
+                    {'obsid': obsid, 'snrg': 1e-4, 'snri': 1e-4, 'snrr': 1e-4, 'snrz': 1e-4})
             
         # if self.df is not None:
         #     if 'APOGEE' in self.id:     
@@ -434,6 +441,7 @@ class SpectraDataset(Dataset):
             else:
                 target, info = self.create_lamost_target(row, meta)
         else:
+            print("no df!")
             target = torch.zeros_like(mask)
         t3 = time.time()
         if spectra_masked.shape[-1] < self.max_len:

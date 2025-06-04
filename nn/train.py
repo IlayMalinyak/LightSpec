@@ -21,6 +21,7 @@ from util.utils import kepler_collate_fn
 from pathlib import Path
 import io
 import zipfile
+from codecarbon import track_emissions
 # import wandb
 
 def count_occurence(x,y):
@@ -137,7 +138,7 @@ class Trainer(object):
             return dataloader.batch_sampler.sampler
         
         return None
-    
+    @track_emissions
     def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False):
         """
         Fits the model for the given number of epochs.

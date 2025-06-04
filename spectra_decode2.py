@@ -324,7 +324,7 @@ test_dataloader = DataLoader(test_dataset,
                             sampler=test_sampler, \
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
-_, optim_args, complete_config, _, model = generator.get_model(data_args, args_dir, complete_config, local_rank)
+_, optim_args, tuner_args, complete_config, _, model = generator.get_model(data_args, args_dir, complete_config, local_rank)
 
 model = model.to(local_rank)
 
@@ -350,7 +350,7 @@ trainer = MaskedRegressorTrainer(model=model, optimizer=optimizer,
                        scheduler=None, train_dataloader=train_dataloader,
                        val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
                            exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
-                                 accumulation_step=1, max_iter=200, w_name='snrg',
+                                 accumulation_step=1, max_iter=1000, w_name='snrg',
                            w_init_val=1,  exp_name=f"spectra_decode_{exp_num}") 
 
 complete_config.update(
@@ -365,15 +365,19 @@ with open(config_save_path, "w") as config_file:
 
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
-# fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-#                        early_stopping=40, best='loss', conf=True) 
-# output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_{exp_num}.json'
-# with open(output_filename, "w") as f:
-#     json.dump(fit_res, f, indent=2)
-# fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_{exp_num}.png")
-# plt.clf()
+fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+                       early_stopping=40, best='loss', conf=True) 
+output_filename = f'{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode_{exp_num}.json'
+with open(output_filename, "w") as f:
+    json.dump(fit_res, f, indent=2)
+fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_{model_name}_spectra_decode_{exp_num}.png")
+plt.clf()
 
+# predict_results(trainer, val_dataloader, test_dataloader, loss_fn,
+#                  data_args.prediction_labels_lc,
+#                  data_args, optim_args, 'light', exp_num,
+#                   datetime_dir, local_rank, world_size)
 
 preds_val, targets_val, info = trainer.predict(val_dataloader, device=local_rank)
 
@@ -390,17 +394,31 @@ preds_cqr = loss_fn.predict(preds, cqr_errs)
 
 low_q = preds_cqr[:, :, 0]
 high_q = preds_cqr[:, :, -1]
-coverage = np.mean((targets >= low_q) & (targets <= high_q))
-print('coverage after calibration: ', coverage)
-df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
-df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv") 
-df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, prediction_labels, optim_args.quantiles)
-df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv", index=False)
-print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv")
+coverage = np.mean((targets >= low_q) & (targets <= high_q), axis=0)
 
-umap_df = create_umap(model.module.encoder, test_dataloader, local_rank, use_w=False, dual=False)
-print("umap created: ", umap_df.shape)
-umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
-print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
-exit(0)
+obsids = info['obsid']
+df = pd.DataFrame({
+    'obsid': obsids,
+})
+for i, label in enumerate(prediction_labels):
+    df[f'target_{label}'] = targets[:, i]
+    for j, q in enumerate(optim_args.quantiles):
+        print(label, q)
+        df[f'pred_{label}_q{q:.3f}'] = preds_cqr[:, i, j]
+print(df.head)
+print('coverage after calibration: ', coverage)
+df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv", index=False)
+
+
+# df = save_predictions_to_dataframe(preds, targets, info, prediction_labels, optim_args.quantiles)
+# df.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv", index=False)
+# print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}.csv") 
+# df_cqr = save_predictions_to_dataframe(preds_cqr, targets, info, prediction_labels, optim_args.quantiles)
+# df_cqr.to_csv(f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv", index=False)
+# print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/{model_name}_spectra_decode2_{exp_num}_cqr.csv")
+
+# umap_df = create_umap(model.module.encoder, test_dataloader, local_rank, use_w=False, dual=False)
+# print("umap created: ", umap_df.shape)
+# umap_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv", index=False)
+# print(f"umap saved at {data_args.log_dir}/{datetime_dir}/umap_{exp_num}_ssl.csv")
+# exit(0)
