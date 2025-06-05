@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: 5_2_mlp_non_freeze
+  exp_num: lightspec_carbon
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -11,32 +11,47 @@ Data:
   spectra_dir: '/data/lamost/data'
   batch_size: 16
   num_epochs: 1000
-  max_len_spectra: 4096
+  max_len_spectra: 8704
   max_days_lc: 720
   max_len_lc: 34560
   lc_freq: 0.0208
   continuum_norm: True
-  meta_columns: ['Teff', 'Mstar', 'RUWE']
-  prediction_labels_lightspec: ['Teff', 'logg', 'FeH', 'Rstar', 'Prot']
-  prediction_labels_lc: ['Prot']
-  prediction_labels_spec: ['Teff', 'logg', 'FeH']
+  meta_columns_lightspec: ['Teff', 'Mstar', 'RUWE']
+  meta_columns_lc: []
+  meta_columns_spec: []
+  meta_columns_finetune: []
+  meta_columns_simulation: []
+  prediction_labels_lightspec: ["Teff",  "logg", "Prot",  "FeH", "Rstar",  "RUWE"]
+  prediction_labels_lc: ['Teff', 'logg', 'Prot']
+  prediction_labels_spec: ['Teff', 'logg', 'FeH', 'vsini']
+  prediction_labels_finetune: ['final_age_norm', 'age_error_norm']
+  prediction_labels_simulation: ['Period']
+  target_norm: 'solar'
   test_run: False
   create_umap: False
-  load_checkpoint: True
+  load_checkpoint: False
   masked_transform: False
   use_acf: True
   use_fft: True
   scale_flux: False
   combined_embed: False
-  in_channels: 3
-  pred_coeff_val: None
-  approach: "multitask"
-  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-03-23/lightspec_freeze.pth'
+  dim_lc: 4
+  ssl_weight: 0.5
+  alpha: 0
+  freeze_backbone: True
+  use_latent: True
+  pred_coeff_val: 1
+  approach: "dual_former"
+  only_main_seq: False
+  calc_variance: True
+  add_wv: True
+ 
+  checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-16/lightspec_dual_former_6_latent_giants_ablation_2.pth'
 
 DoubleInputRegressor_lc:
   encoder_only: True
   stacked_input: True
-  in_channels: 3
+  in_channels: 2
   load_checkpoint: True
   output_dim: 1
   num_quantiles: 5
@@ -77,6 +92,8 @@ AstroConformer_lc:
   output_dim: 3
   encoder_only: True
   norm: "postnorm"
+  deepnorm: True
+  beta: 0.913  
   load_checkpoint: False
   spec_checkpoint_path: '/data/lightSpec/logs/exp6/astroconf_spectra_3.pth'
 
@@ -149,21 +166,22 @@ MultiTaskSimSiam_lc:
 
 MultiTaskRegressor_spec:
   backbone: 'cnn'
-  in_channels: 1
+  in_channels: 2
   num_layers: 5
   stride: 1
   encoder_dims: [64,128,256,1024,2048]
   transformer_layers: 4
   kernel_size: 3
   dropout_p: 0.2
-  avg_output: True
-  output_dim: 3
+  avg_output: False
+  output_dim: 4
   num_quantiles: 5
   beta: 1
-  load_checkpoint: True
+  load_checkpoint: False
   checkpoint_num: 1
   activation: "silu"
-  checkpoint_path: "/data/lightSpec/logs/spec_decode2_2025-02-16/MultiTaskRegressor_spectra_decode_4.pth"
+  checkpoint_path: ""
+  # checkpoint_path: "/data/lightSpec/logs/spec_decode2_2025-04-01/spectra_decode_spec_minmax_targets.pth"
 
 
 Conformer_spec:
@@ -175,6 +193,8 @@ Conformer_spec:
   kernel_size: 3
   dropout_p: 0.2
   norm: "postnorm"
+  deepnorm: True
+  beta: 0.866    # Calculated as (num_layers/6)^(-0.5) for 8 layers
 
 
 MultiEncoder_combined:
@@ -235,15 +255,33 @@ Conformer_lightspec:
 
 Transformer_lightspec:
   in_channels: 1
-  num_layers: 2
-  encoder_dim: 256
+  num_layers: 4
+  encoder_dim: 512
   dropout_p: 0.2
   num_heads: 8
   dropout: 0.0
-  output_dim: 64
+  output_dim: 512
+  pooling_method: 'mean'
   num_quantiles: 1
   checkpoint_num: 1
   load_checkpoint: False
+  deepnorm: True
+  beta: 1.225    # Calculated as (num_layers/6)^(-0.5) for 2 layers
+
+Transformer_jepa:
+  in_channels: 1
+  num_layers: 4
+  encoder_dim: 512
+  dropout_p: 0.2
+  num_heads: 8
+  dropout: 0.0
+  output_dim: 512
+  pooling_method: 'mean'
+  num_quantiles: 1
+  checkpoint_num: 1
+  load_checkpoint: False
+  deepnorm: True
+  beta: 0.866    # Calculated as (num_layers/6)^(-0.5) for 4 layers
 
 
 Conformer_lightspec:
@@ -257,6 +295,28 @@ Conformer_lightspec:
   dropout_p: 0.2
   output_dim: 256
   norm: "shortcut"
+
+dual_former:
+  input_dim: 1
+  embed_dim: 256
+  output_dim: 3
+  num_heads: 8
+  num_layers: 4
+  ffn_dim: 2048
+  dropout: 0.1
+  attention_dropout: 0.1
+  activation: "gelu"
+  bidirectional: True
+  norm_first: True
+  use_positional_encoding: True
+  max_seq_len: 5000
+  pooling: "mean"  # Options: mean, max, cls, none
+  use_prediction_head: False
+  latent_dim: 0
+  attention_type: "cross_self" # Options: cross, self, cross_self
+  projection_type: "transpose" # Options: transpose, normal
+  
+    
 
 CNNEncoder:
   # Model
@@ -301,12 +361,15 @@ MoCo:
   m: 0.9
   T: 0.05
   hidden_dim: 512
-  projection_dim: 64
+  projection_dim: 512
   num_layers: 6
-  freeze_lightcurve: False
-  freeze_spectra: False
-  freeze_combined: False
+  shared_dim: 512
+  freeze_lightcurve: True
+  freeze_spectra: True
+  freeze_combined: True
   bidirectional: True
+  # deepnorm: True
+  # beta: 1.0  # Default beta value
 
 projector:
   in_dim: 256
@@ -314,30 +377,27 @@ projector:
   out_dim: 64
 
 predictor:
-  in_dim: 64
-  hidden_dim: 256
+  in_dim: 128
+  hidden_dim: 128
   out_dim: 64
-  w_dim: 2
-
+  w_dim: 6
 
 reg_predictor:
   in_dim: 128
   hidden_dim: 512
-  out_dim: 25
-  w_dim: 0
-
+  out_dim: 20
+  w_dim: 6
 
 loss:
   sim_coeff: 25
   std_coeff: 25 
-  cov_coeff: 1
-
+  cov_coeff: 0.1
 
 Tuner:
-  in_dim: 128
+  in_dim: 256
   hidden_dim: 64
-  out_dim: 1
-  w_dim: 0
+  out_dim: 2
+  w_dim: 6
 
 Test_Tuner:
   encoder_dim: 256
@@ -349,7 +409,7 @@ Test_Tuner:
   
 MultiModalSimSiam:
   # Model
-  input_dim: 512
+  input_dim: 128
   hidden_dim: 64
   projection_dim: 32
   output_dim: 32
@@ -383,12 +443,11 @@ conv_args:
   
 Optimization:
   # Optimization
-  max_lr:  5e-5
+  max_lr:  2e-5
   weight_decay: 1e-6
   warmup_pct: 0.15
   steps_per_epoch: 3500
   momentum: 0.95
   nesterov: true
   optimizer: "adamw"
-  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
-
+  quantiles: [0.1,0.25,0.5,0.75,0.9]

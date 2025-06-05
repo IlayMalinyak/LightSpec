@@ -641,6 +641,14 @@ class LAMOSTSpectrumPreprocessor:
             merged_ax.plot(wavelength.squeeze(), spectrum.squeeze())
             merged_ax.set_title("Original Spectrum")
         
+        if info['spectra_type'] == 'APOGEE':
+           
+            spectrum = self._median_filter_denoise(spectrum.squeeze())
+            # spectrum = self._continuum_normalization(spectrum)
+            spectrum = self._secondary_normalization(spectrum)
+            return spectrum[None,:], mask, info
+
+
         # 1. Wavelength Correction
         if self.rv_norm:
             corrected_wavelength = self._wavelength_correction(wavelength, radial_velocity)
@@ -692,8 +700,8 @@ class LAMOSTSpectrumPreprocessor:
         
         if self.continuum_norm:
             # 4. Continuum Normalization (Separately)
-            blue_normalized = self._continuum_normalization(blue_denoised, is_blue=True)
-            red_normalized = self._continuum_normalization(red_denoised, is_blue=False)
+            blue_normalized = self._continuum_normalization(blue_denoised)
+            red_normalized = self._continuum_normalization(red_denoised)
             # blue_final_norm = self._secondary_normalization(blue_normalized)
             # red_final_norm = self._secondary_normalization(red_normalized)
             # final_norm = np.concatenate([blue_final, red_final])[None,:]
@@ -766,7 +774,7 @@ class LAMOSTSpectrumPreprocessor:
         """
         return medfilt(spectrum, kernel_size=self.median_filter_size)
 
-    def _continuum_normalization(self, spectrum, is_blue=True):
+    def _continuum_normalization(self, spectrum):
         """
         Estimate and normalize continuum using polynomial fitting.
         """

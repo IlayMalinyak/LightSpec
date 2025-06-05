@@ -47,7 +47,7 @@ MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEnco
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
 DATASETS = {'LightSpec': LightSpecDataset, 'FineTune': FineTuneDataset, 'Simulation': SimulationDataset, 'Kepler':
-                KeplerDataset, 'Spectra': SpectraDataset}
+                LightCurveDataset, 'Spectra': SpectraDataset}
 
 SIMULATION_DATA_DIR = '/data/simulations/dataset_big/lc'
 SIMULATION_LABELS_PATH = '/data/simulations/dataset_big/simulation_properties.csv'
@@ -55,7 +55,7 @@ SIMULATION_LABELS_PATH = '/data/simulations/dataset_big/simulation_properties.cs
 
 def get_kepler_data(data_args, df, transforms):
 
-    return KeplerDataset(df=df,
+    return LightCurveDataset(df=df,
                         transforms=transforms,
                         target_transforms=transforms,
                         npy_path = '/data/lightPred/data/raw_npy',

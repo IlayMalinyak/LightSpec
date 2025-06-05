@@ -21,7 +21,7 @@ from util.utils import kepler_collate_fn
 from pathlib import Path
 import io
 import zipfile
-from codecarbon import track_emissions
+# from codecarbon import track_emissions
 # import wandb
 
 def count_occurence(x,y):
@@ -138,7 +138,8 @@ class Trainer(object):
             return dataloader.batch_sampler.sampler
         
         return None
-    @track_emissions
+
+    # @track_emissions
     def fit(self, num_epochs, device,  early_stopping=None, start_epoch=0, best='loss', conf=False):
         """
         Fits the model for the given number of epochs.
@@ -1536,26 +1537,33 @@ class RegressorTrainer(FineTuneTrainer):
         return preds, targets.squeeze(), sigmas.squeeze(), np.concatenate(emb_projections), aggregated_info
 
 class MaskedRegressorTrainer(Trainer):
-    def __init__(self, w_name, w_init_val, ssl_criterion, ssl_weight=0.5, **kwargs):
+    def __init__(self, w_name, w_init_val,
+                 ssl_criterion, ssl_weight=0.5, add_wv=False,
+                  **kwargs):
         super().__init__(**kwargs)
         self.w_name = w_name
         self.ssl_criterion = ssl_criterion
         self.w_init_val = w_init_val
         self.ssl_weight = ssl_weight  # Weight to balance between SSL and regression
-        self.drop_first_y = False
+        self.add_wv = add_wv  # Whether to add the wv feature to the model
         
     def train_batch(self, batch, batch_idx, device):
         const = self.w_init_val/(1+self.epoch)
         x_masked, x, y, mask, _, info= batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
+        y = y.nan_to_num(-1)  # Replace NaNs with -1
+        if self.add_wv:
+            # Add wv feature to x_masked and x
+            wv = torch.stack([torch.tensor(i['wavelength']) for i in info]).to(device).float()
+            x_masked = torch.cat((x_masked.unsqueeze(1), wv.unsqueeze(1)), dim=1)
         
         # Get proximity weights for regression
         if self.w_name is None:
             w = torch.ones(x_masked.size(0)).to(device)
         else:
             w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        # w = const * torch.exp(w*const)
+        
         
         # Forward pass for both tasks
         reg_out,ssl_out,_  = self.model(x_masked, x)
@@ -1572,9 +1580,6 @@ class MaskedRegressorTrainer(Trainer):
         reg_out = reg_out.view(b, -1, self.num_quantiles)
         out_diff = int(y.shape[1] - reg_out.shape[1])
         y = y[:, out_diff:]
-        if self.drop_first_y:
-            reg_out = reg_out[:, 1:]
-            y = y[:, 1:]
         reg_loss = self.criterion(reg_out, y)
         reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
         out_median = reg_out[..., reg_out.shape[-1]//2]
@@ -1613,6 +1618,12 @@ class MaskedRegressorTrainer(Trainer):
         x_masked, x, y, mask, _, info = batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
+        y = y.nan_to_num(-1)  # Replace NaNs with -1
+
+        if self.add_wv:
+            # Add wv feature to x_masked and x
+            wv = torch.stack([torch.tensor(i['wavelength']) for i in info]).to(device).float()
+            x_masked = torch.cat((x_masked.unsqueeze(1), wv.unsqueeze(1)), dim=1)
         
         if self.w_name is None:
             w = torch.ones(x_masked.size(0)).to(device)
@@ -1665,6 +1676,10 @@ class MaskedRegressorTrainer(Trainer):
         for i,(x_masked, x, y, mask, _ , info) in enumerate(pbar):
             x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
             b = x_masked.shape[0]
+            if self.add_wv:
+                # Add wv feature to x_masked and x
+                wv = torch.stack([torch.tensor(i['wavelength']) for i in info]).to(device).float()
+                x_masked = torch.cat((x_masked.unsqueeze(1), wv.unsqueeze(1)), dim=1)
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)

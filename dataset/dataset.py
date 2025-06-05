@@ -330,46 +330,47 @@ class SpectraDataset(Dataset):
     def read_apogee_spectra(self, filename):
         with fits.open(filename) as hdul:
             data = hdul[1].data.astype(np.float32).squeeze()[None]
-        meta = {}
+            header = hdul[1].header
+        # Create pixel array (1-indexed for FITS convention)
+        pixels = np.arange(1, self.max_len + 1)
+        
+        # Calculate log10(wavelength):
+        # log_wave = CRVAL1 + CDELT1 * (pixel - CRPIX1)
+        log_wavelength = header['CRVAL1'] + header['CDELT1'] * (pixels - header['CRPIX1'])
+        
+        # Convert to linear wavelength in Angstroms
+        wv = 10**log_wavelength
+        meta = {'wavelength': wv}
         return data, meta
     
-    def create_lamost_target(self, row, info):
+    
+    def create_lamost_info(self, row, info):
         info['Teff'] = row['combined_teff']
         info['rv2'] = row['combined_rv']
         info['logg'] = row['combined_logg']
         info['FeH'] = row['combined_feh']
         info['snrg'] = row['combined_snrg'] / 1000
         info['snri'] = row['combined_snri'] / 1000
-        info['snrr'] = row['combined_snrr'] / 1000
         info['snrz'] = row['combined_snrz'] / 1000
+        info['vsini'] = -1
         
         # Add joint probability information if available
         if 'joint_prob' in row:
             info['joint_prob'] = row['joint_prob']
             info['joint_weight'] = row['joint_weight']
             
-        if self.target_norm =='solar':
-            target = torch.tensor([-999, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
-        elif self.target_norm == 'minmax':
-            teff = (info['Teff'] - T_MIN) / (T_MAX - T_MIN)
-            logg = (info['logg'] - LOGG_MIN) / (LOGG_MAX - LOGG_MIN)
-            feh = (info['FeH'] - FEH_MIN) / (FEH_MAX - FEH_MIN)
-            target = torch.tensor([-999, teff, logg, feh], dtype=torch.float32)
-        else:
-            raise ValueError("Unknown target normalization method")
-        return target, info
+        return info
     
-    def create_apogee_target(self, row, info):
+    def create_apogee_info(self, row, info):
         info['Teff'] = row['TEFF']
         info['logg'] = row['LOGG']
         info['FeH'] = row['FE_H']
-        info['snrg'] = row['SNR'] / 1000
-        info['snri'] = row['SNR'] / 1000
-        info['snrr'] = row['SNR'] / 1000
-        info['snrz'] = row['SNR'] / 1000
+        info['snrg'] = row['SNR'] / 5000 # factor of 5 to match LAMOST median snr
+        info['snri'] = row['SNR'] / 5000
+        info['snrz'] = row['SNR'] / 5000
         info['vsini'] = row['VSINI']
-        target = torch.tensor([info['vsini'] / VSINI_MAX, info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
-        return target, info
+        info['RV'] = row['VHELIO_AVG']
+        return info
 
     def create_empty_info(self, info):
         info['Teff'] = np.nan
@@ -384,22 +385,27 @@ class SpectraDataset(Dataset):
 
     def __getitem__(self, idx):
         start = time.time()
-        obsid = int(self.df.iloc[idx]['combined_obsid'])
-        obsdir = str(obsid)[:4]
-        spectra_filename = os.path.join(self.data_dir, f'{obsdir}/{obsid}.fits')
+        row = self.df.iloc[idx]
+
         try:
-            if not self.df.iloc[idx]['APOGEE_ID'].isnan():     
-                filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
+            if 'APOGEE_ID' in row and not pd.isna(row['APOGEE_ID']):
+                obsid = row['APOGEE_ID']  
+                filepath = f"/data/apogee/data/aspcapStar-dr17-{obsid}.fits"
                 spectra, meta = self.read_apogee_spectra(filepath)
+                meta['id'] = obsid
+                meta['spectra_type'] = 'APOGEE'
+                info = self.create_apogee_info(row, meta)
             else:
-                obsid = int(self.df.iloc[idx]['combined_obsid'])
+                obsid = int(row['combined_obsid'])
                 obsdir = str(obsid)[:4]
                 spectra_filename = os.path.join(self.data_dir, f'{obsdir}/{obsid}.fits')
                 spectra, meta = self.read_lamost_spectra(spectra_filename)
-                spec_time = time.time() - start
-                meta['obsid'] = obsid
+                meta['id'] = obsid
+                meta['spectra_type'] = 'LAMOST'
+                info = self.create_lamost_info(row, meta)
+
         except OSError as e:
-            print("Error reading file ", obsid, e)
+            # print("Error reading file ", obsid, e)
             # spectra = np.zeros((self.spec_seq_len))
             # meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
             return (torch.zeros(self.max_len),
@@ -407,43 +413,25 @@ class SpectraDataset(Dataset):
                     torch.zeros(4),
                     torch.zeros(self.max_len, dtype=torch.bool),
                     torch.zeros(self.max_len, dtype=torch.bool),
-                    {'obsid': obsid, 'snrg': 1e-4, 'snri': 1e-4, 'snrr': 1e-4, 'snrz': 1e-4})
+                    {'obsid': obsid, 'snrg': 1e-4, 'snri': 1e-4,
+                     'snrz': 1e-4, 'spectra_type': 'missing', 'wavelength': np.zeros(self.max_len)})
+        
             
-        # if self.df is not None:
-        #     if 'APOGEE' in self.id:     
-        #         filepath = f"{self.data_dir}/aspcapStar-dr17-{self.df.iloc[idx][self.id]}.fits"
-        #     else:
-        #         filepath = self.df.iloc[idx]['data_path']
-        #         # filepath = filepath.replace('data', 'storage', 1)
-        #     target_size = 4
-        # else: 
-        #     filepath = self.path_list[idx]
-        #     target_size = self.max_len    
-        # obsid = os.path.basename(filepath)
-        # try:
-        #     if 'APOGEE' in self.id:
-        #         spectra, meta = self.read_apogee_spectra(filepath)
-        #     else:
-        #         spectra, meta = self.read_lamost_spectra(filepath)
-        # except (OSError, FileNotFoundError) as e:
-        #     info = self.create_empty_info({self.id: obsid})
-        #     print("Error reading file ", filepath, "\n", e)
-        meta[self.id] = obsid
-        t1 = time.time()
         if self.transforms:
-            spectra, _, info = self.transforms(spectra, None, meta)
+            spectra, _, info = self.transforms(spectra, None, info)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, info)
-        t2 = time.time()
-        if self.df is not None:
-            row = self.df.iloc[idx]
-            if 'APOGEE' in self.id:
-                target, info = self.create_apogee_target(row, meta)
-            else:
-                target, info = self.create_lamost_target(row, meta)
+        info['wavelength'] = info['wavelength'].squeeze()
+
+        if self.target_norm =='solar':
+            target = torch.tensor([info['vsini'], info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
+        elif self.target_norm == 'minmax':
+            teff = (info['Teff'] - T_MIN) / (T_MAX - T_MIN)
+            logg = (info['logg'] - LOGG_MIN) / (LOGG_MAX - LOGG_MIN)
+            feh = (info['FeH'] - FEH_MIN) / (FEH_MAX - FEH_MIN)
+            target = torch.tensor([info['vsini'], teff, logg, feh], dtype=torch.float32)
         else:
-            print("no df!")
-            target = torch.zeros_like(mask)
-        t3 = time.time()
+            raise ValueError("Unknown target normalization method")
+            
         if spectra_masked.shape[-1] < self.max_len:
             pad = torch.zeros(1, self.max_len - spectra_masked.shape[-1])
             spectra_masked = torch.cat([spectra_masked, pad], dim=-1)
@@ -451,6 +439,8 @@ class SpectraDataset(Dataset):
             mask = torch.cat([mask, pad_mask], dim=-1)
             pad_spectra = torch.zeros(1, self.max_len - spectra.shape[-1])
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
+            pad_wv = torch.zeros(self.max_len - meta['wavelength'].shape[-1])
+            meta['wavelength'] = torch.cat([torch.tensor(meta['wavelength']), pad_wv], dim=0)
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
         t4 = time.time()
@@ -458,8 +448,7 @@ class SpectraDataset(Dataset):
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
          target.float(), mask.squeeze(0), mask.squeeze(0), info)
 
-
-class KeplerDataset():
+class LightCurveDataset():
     """
     A dataset for Kepler data.
     """
@@ -525,6 +514,11 @@ class KeplerDataset():
         x = df['PDCSAP_FLUX']
         time = df['TIME'].values
         return x,time, meta
+    
+    def read_tess_lc(self, filepath):
+        with fits.open(filepath) as hdulist:
+            data = hdulist[1].data
+        return data['FLUX'], data['TIME']
 
     def read_row(self, idx):
         """
@@ -539,18 +533,29 @@ class KeplerDataset():
             y_val = np.nan
 
         if self.npy_path is not None:
-            try:
-                file_path = os.path.join(self.npy_path, f"{int(row['KID'])}.npy")
-                x = np.load(file_path)            
-                if not isinstance(x, np.ndarray) or x.size == 0:
-                    print(f"Warning: Empty or invalid numpy array for {row['KID']}")
+            if 'KID' in row and not pd.isna(row['KID']):
+                try:
+                    file_path = os.path.join(self.npy_path, f"{int(row['KID'])}.npy")
+                    x = np.load(file_path)   
+                    if not isinstance(x, np.ndarray) or x.size == 0:
+                        print(f"Warning: Empty or invalid numpy array for {row['KID']}")
+                        x = np.zeros((self.seq_len, 1))
+                except FileNotFoundError as e:
+                    # print(f"Error: File not found for {row['KID']}", e)
                     x = np.zeros((self.seq_len, 1))
-            except FileNotFoundError as e:
-                # print(f"Error: File not found for {row['KID']}", e)
-                x = np.zeros((self.seq_len, 1))
-            except Exception as e:
-                print(f"Error loading file for {row['KID']}: {str(e)}")
-                x = np.zeros((self.seq_len, 1))
+                except Exception as e:
+                    print(f"Error loading file for {row['KID']}: {str(e)}")
+                    x = np.zeros((self.seq_len, 1))
+                time = np.linspace(0, len(x)//48, len(x))  # Assuming 48 data points per day 
+            elif 'TID' in row and not pd.isnan(row['TID']):
+                # read TESS sample
+                try:
+                    file_path = os.path.join('/data/tess', f"{int(row['TID'])}.fits")
+                    x, time = self.read_tess_lc(file_path)
+                except FileNotFoundError as e:
+                    # print(f"Error: File not found for {row['TID']}", e)
+                    x = np.zeros((self.seq_len, 1))
+                    time = np.linspace(0, len(x)//720, len(x)) # Assuming 720 data points per day
             if 'Teff' in row.keys():
                 meta = {'TEFF': row['Teff'],
                             'RADIUS': row['Rstar'],
@@ -720,7 +725,7 @@ class KeplerDataset():
         return result
 
 
-class LightSpecDataset(KeplerDataset):
+class LightSpecDataset(LightCurveDataset):
     """
     A Multimodal dataset for spectra and lightcurve.
     Args:
@@ -813,7 +818,7 @@ class LightSpecDataset(KeplerDataset):
          light_target.float().squeeze(0), masked_spectra.float().squeeze(0), info)
     
 
-class LightSpecDatasetV2(KeplerDataset):
+class LightSpecDatasetV2(LightCurveDataset):
     def __init__(self, lc_df:pd.DataFrame=None,
                  lc_data_dir:str=None,
                  spec_df:pd.DataFrame=None,
