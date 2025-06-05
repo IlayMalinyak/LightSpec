@@ -26,7 +26,7 @@ sys.path.append(ROOT_DIR)
 print("running from ", ROOT_DIR) 
 
 from transforms.transforms import *
-from dataset.dataset import KeplerDataset
+from dataset.dataset import LightCurveDataset
 from nn.astroconf import Astroconformer
 from nn.models import *
 # from nn.mamba import MambaEncoder
@@ -104,7 +104,7 @@ def create_train_test_dfs(meta_columns):
 def create_raw_samples(data_args, num_samples=10):
     train_df, test_df = create_train_test_dfs(data_args.meta_columns_lc)
     transforms = Compose([MovingAvg(13), ToTensor()])
-    ds = KeplerDataset(df=train_df,
+    ds = LightCurveDataset(df=train_df,
                         transforms=transforms,
                         target_transforms=transforms,
                         npy_path = '/data/lightPred/data/raw_npy',
