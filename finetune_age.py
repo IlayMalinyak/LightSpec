@@ -52,9 +52,11 @@ MODELS = {'Astroconformer': Astroconformer, 'CNNEncoder': CNNEncoder, 'MultiEnco
            'AstroEncoderDecoder': AstroEncoderDecoder, 'CNNEncoderDecoder': CNNEncoderDecoder,}
 
 # finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-04-30/age_finetune_lightspec_dual_former_6_latent_giants_finetune_age_gyro.pth'
-finetune_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-17/age_finetune_lightspec_dual_former_6_latent_giants_nss_finetune_age_gyro.pth'
+dualformer_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-22/age_finetune_lightspec_finetune_dual_former.pth'
 jepa_checkpoint_path= '/data/lightSpec/logs/age_finetune_2025-05-22/age_finetune_lightspec_compare_jepa.pth'
 simsiam_checkpoint_path = '/data/lightSpec/logs/age_finetune_2025-05-28/age_finetune_lightspec_compare_simsiam.pth'
+
+
 R_SUN_KM = 6.957e5
 
 torch.cuda.empty_cache()
@@ -96,8 +98,6 @@ def get_kepler_meta_df():
 
 def create_train_test_dfs(meta_columns):
     period_catalog = get_kepler_meta_df().drop_duplicates('KID')
-
-
     lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv').rename(columns={'kepid':'KID'})
     lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
     lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
@@ -146,6 +146,22 @@ def create_train_test_dfs(meta_columns):
     return train_df, val_df
 
 
+def get_lamost_kepler_samples():
+    lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
+    berger_df = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
+    kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+
+    lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
+    lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
+    unamed_cols = [col for col in lamost_kepler_df.columns if 'Unnamed' in col]
+    lamost_kepler_df.drop(columns=unamed_cols, inplace=True)
+    lamost_kepler_df = lamost_kepler_df.merge(berger_df, on='KID', how='left', suffixes=('', '_berger')).merge(kepler_meta[['KID', 'KMAG']], on='KID')
+    lamost_kepler_df['kmag_abs'] = lamost_kepler_df['KMAG'] - 5 * np.log10(lamost_kepler_df['Dist']) + 5
+    lamost_kepler_df['final_age_norm'] = 0
+    lamost_kepler_df['age_error_norm'] = 0
+    return lamost_kepler_df
+
+
 current_date = datetime.date.today().strftime("%Y-%m-%d")
 datetime_dir = f"age_finetune_{current_date}"
 
@@ -188,6 +204,12 @@ test_dataloader = DataLoader(test_dataset,
                             collate_fn=kepler_collate_fn,
                             num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
 
+all_samples_dataset = generator.create_lamost_kepler_dataset(data_args, get_lamost_kepler_samples)
+all_samples_dataloader = DataLoader(all_samples_dataset,
+                                    batch_size=int(data_args.batch_size),
+                                    collate_fn=kepler_collate_fn,
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+
 for i in range(10):
     light, spec, y, light2, spec2, info = train_dataset[i]
     print("train dataset: ", light.shape, light2.shape,  spec.shape, spec2.shape, y)
@@ -200,24 +222,27 @@ tuner_args.out_dim = tuner_args.out_dim * len(quantiles)
 only_lc = False
 only_spec = False
 if data_args.approach == 'unimodal_light':
+    print("using unimodal light model")
     only_lc = True
     only_spec = False
     model = UniModalFineTuner(light_model.simsiam.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 elif data_args.approach == 'unimodal_spec':
+    print("using unimodal spec model")
     only_spec = True
     only_lc = False
     model = UniModalFineTuner(spec_model.encoder, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 elif data_args.approach == 'moco' or data_args.approach == 'simsiam' or data_args.approach == 'jepa':
+    print("using contrastive model")
     model = ContrastiveFineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 elif data_args.approach == 'dual_former':
+    print("using dual former model")
     model = FineTuner(pre_trained_model, tuner_args.get_dict(), head_type='transformer', use_sigma=False).to(local_rank)
 
 # for param in pre_trained_model.parameters():
 #         param.requires_grad = False
 
-print("loading finetune checkpoints from simsiam best run...")
-model = load_checkpoints_ddp(model, simsiam_checkpoint_path)
-
+print("loading finetune checkpoints from dual former best run...")
+model = load_checkpoints_ddp(model, dualformer_checkpoint_path)
 
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
@@ -310,8 +335,7 @@ print('results shapes: ', preds.shape, targets.shape, sigmas.shape)
 results_df = pd.DataFrame({'sigmas': sigmas})
 results_df['KID'] = aggregated_info['KID']
 results_df['age_ref'] = aggregated_info['age_ref']
-# results_df['ESA3'] = aggregated_info['ESA3']
-# results_df['flag_gyro_quality'] = aggregated_info['flag_gyro_quality']
+
 labels = data_args.prediction_labels_finetune
 for i, label in enumerate(labels):
     results_df[label] = targets[:, i]
@@ -323,6 +347,24 @@ print(results_df.head())
 results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_finetune_age_{exp_num}.csv", index=False)
 print(f"Results saved at {data_args.log_dir}/{datetime_dir}/predictions_finetune_age_{exp_num}.csv")
 # Access results
+
+print("inference on all kepler_lamost dataset...")
+preds_all, targets_all, sigmas_all, projections_all, aggregated_info_all = trainer.predict(all_samples_dataloader, device=local_rank)
+preds_all_cqr = loss_fn.predict(preds_all, cqr_errs)
+
+results_df_all = pd.DataFrame({'sigmas': sigmas_all})
+results_df_all['KID'] = aggregated_info_all['KID']
+
+labels = data_args.prediction_labels_finetune
+for i, label in enumerate(labels):
+    for q in range(len(quantiles)):
+        q_value = quantiles[q]
+        y_pred_q = preds_all_cqr[:,:, q]
+        results_df_all[f'pred_{label}_q{q_value:.3f}'] = y_pred_q[:, i]
+results_df_all.to_csv(f"{data_args.log_dir}/{datetime_dir}/predictions_finetune_age_{exp_num}_all_lamost_kepler.csv", index=False)
+print(f"Results saved at {data_args.log_dir}/{datetime_dir}/predictions_finetune_age_{exp_num}_all_lamost_kepler.csv")
+print("inference on all kepler_lamost dataset done.")
+exit(0)
 
 
 

@@ -355,18 +355,21 @@ class MultiTaskRegressor(nn.Module):
 
         self.avg_output = args.avg_output
         encoder_dim = conformer_args.encoder_dim
-        self.output_dim = encoder_dim
+        latent_dim = args.latent_dim if hasattr(args, 'latent_dim') else 0
+        self.output_dim = encoder_dim 
         self.regressor = nn.Sequential(
-            nn.Linear(encoder_dim, encoder_dim//2),
+            nn.Linear(encoder_dim + latent_dim, encoder_dim//2),
             nn.BatchNorm1d(encoder_dim//2),
             self.activation,
             nn.Dropout(conformer_args.dropout_p),
             nn.Linear(encoder_dim//2, args.output_dim*args.num_quantiles)
         )
     
-    def forward(self, x, y=None):
+    def forward(self, x, y=None, latent=None):
         x_enc, x = self.encoder(x)
         x = x.permute(0,2,1)
+        if latent is not None:
+            x_enc = torch.cat([x_enc, latent], dim=1)
         output_reg = self.regressor(x_enc)
         output_dec = self.decoder(x)
         return output_reg, output_dec, x_enc
@@ -487,6 +490,45 @@ class MultiEncoder(nn.Module):
         else:
             x_enc = backbone_out
         RoPE = self.pe(x_enc, x_enc.shape[1]).nan_to_num(0)
+        x_enc = self.encoder(x_enc, RoPE)
+        if (len(x_enc.shape) == 3):
+            x_enc = x_enc.sum(dim=1)
+        return x_enc, backbone_out
+
+class SpectraEncoder(MultiEncoder):
+    def __init__(self, 
+                 surveys=['LAMOST', 'APOGEE'],
+                 wavelength_rope_base=10000,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.wavelength_embedding = nn.Linear(1, self.rotary_ndims)
+        self.surveys = surveys
+        # Wavelength-based RoPE (replaces sequential positional encoding)
+        self.pe = WavelengthRotaryEmbedding(
+            dim=self.rotary_ndims,
+            base=wavelength_rope_base,
+            wavelength_scale='log'
+        )
+        
+    
+        
+    def forward(self, flux, wavelength):
+        """
+        Args:
+            flux: [batch_size, seq_len] - spectral flux values
+            wavelength: [seq_len] or [batch_size, seq_len] - wavelength values
+            survey_ids: [batch_size] - survey identifier
+            mask: [batch_size, seq_len] - attention mask
+        """
+        if len(wavelength.shape) == 2:
+            wavelength = wavelength.unsqueeze(1)
+        wv = self.wavelength_embedding(wavelength)  # [batch_size, rotary_ndims, seq_len]
+        backbone_out = self.backbone(flux)
+        if len(backbone_out.shape) == 2:
+            x_enc = backbone_out.unsqueeze(1)
+        else:
+            x_enc = backbone_out
+        RoPE = self.pe(wavelength, wavelength.shape[1]).nan_to_num(0)
         x_enc = self.encoder(x_enc, RoPE)
         if (len(x_enc.shape) == 3):
             x_enc = x_enc.sum(dim=1)

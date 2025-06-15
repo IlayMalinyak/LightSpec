@@ -44,7 +44,6 @@ torch.cuda.empty_cache()
 models = {'CNNEncoderDecoder': CNNEncoderDecoder, 'AstroEncoderDecoder': AstroEncoderDecoder,
             'CNNRegressor': CNNRegressor, 'MultiTaskRegressor': MultiTaskRegressor}
 
-prediction_labels = ['teff', 'logg', 'feh']
           
 # schedulers = {'WarmupScheduler': WarmupScheduler, 'OneCycleLR': OneCycleLR,
 #  'CosineAnnealingLR': CosineAnnealingLR, 'none': None}
@@ -61,25 +60,113 @@ def test_dataset_samples(dataset, num_iters=100):
         # print('y: ', len(y))
         # if 'rv2' in info.keys():
         #     print(info['snrg'], info['snri'], info['snrr'], info['snrz'])
-        # if i % 20 == 0:
-        #     plt.plot(info['wavelength'], x_masked.cpu().numpy(), label='masked')
-        #     plt.plot(info['wavelength'], x.cpu().numpy(), label='original')
-        #     plt.title(f"{info['spectra_type']} {info['id']}")
-        #     plt.xlabel('Wavelength')
-        #     plt.ylabel('Flux')
-        #     plt.savefig(f"/data/lightSpec/images/lamost_apogee_sample_{i}.png")
-        #     plt.clf()
+        if i % 10 == 0:
+            fig, axes = plt.subplots(nrows=2, ncols=1)
+            axes[0].plot(x_masked[0].cpu().numpy(),x_masked[1].cpu().numpy(), label='masked')
+            axes[1].plot(x[0].cpu().numpy(), x[1].cpu().numpy(), label='original')
+            fig.suptitle(f"{info['spectra_type']} {info['id']}")
+            axes[0].set_xlabel('Wavelength')
+            axes[1].set_ylabel('Flux')
+            plt.savefig(f"/data/lightSpec/images/lamost_apogee_sample_{i}.png")
+            plt.clf()
     print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.4f} seconds." \
         f"avg per iteration: {(time.time() - start_time)/num_iters:.6f} seconds")
+
+def clean_stellar_dataframe(df):
+    """
+    Clean stellar labels dataframe by removing rows with:
+    1. NaN values in both elements of each survey pair
+    2. Negative values in any of the target columns
+    
+    Parameters:
+    df: pandas DataFrame with stellar labels
+    
+    Returns:
+    cleaned_df: pandas DataFrame after cleaning
+    """
+    
+    # Define the survey pairs
+    pairs = [
+        ('TEFF', 'combined_teff'),
+        ('LOGG', 'combined_logg'), 
+        ('FE_H', 'combined_feh')
+    ]
+    
+    # VSINI doesn't have a pair, so we handle it separately
+    target_cols = ['TEFF', 'LOGG', 'FE_H', 'combined_teff', 'combined_logg', 'combined_feh']
+    positive_cols = ['TEFF', 'LOGG',  'combined_teff', 'combined_logg', 'SNR', 'combined_snrg', 'VSINI']
+    # Start with a copy of the original dataframe
+    cleaned_df = df.copy()
+    
+    print(f"Original dataframe shape: {cleaned_df.shape}")
+    
+    # # Step 1: Remove rows where both elements in each pair are NaN
+    # for apogee_col, lamost_col in pairs:
+    #     mask_both_nan = cleaned_df[apogee_col].isna() & cleaned_df[lamost_col].isna()
+    #     cleaned_df = cleaned_df[~mask_both_nan]
+    #     print(f"After removing rows with both {apogee_col} and {lamost_col} as NaN: {cleaned_df.shape}")
+
+    teff_mask = (cleaned_df['TEFF'] > 7500) & (~cleaned_df['TEFF'].isna())
+    cleaned_df = cleaned_df[~teff_mask]
+        
+    # Step 3: Remove rows with negative values in any target column
+    for col in positive_cols:
+        if col in cleaned_df.columns:
+            # Remove negative values (but keep NaN values since they might be valid in one survey)
+            mask_negative = (cleaned_df[col] < 0) & (~cleaned_df[col].isna())
+            cleaned_df = cleaned_df[~mask_negative]
+            print(f"After removing negative values in {col}: {cleaned_df.shape}")
+    
+    print(f"Final dataframe shape: {cleaned_df.shape}")
+    print(f"Removed {len(df) - len(cleaned_df)} rows ({((len(df) - len(cleaned_df))/len(df)*100):.1f}%)")
+    
+    return cleaned_df
 
 def create_train_test_dfs(meta_columns):
     lamost_apogee_catalog = pd.read_csv('/data/lamost/lamost_afgkm_teff_3000_7500_apogee_all.csv')
     lamost_apogee_catalog = lamost_apogee_catalog.drop_duplicates(subset=['combined_obsid', 'APOGEE_ID'])
     lamost_apogee_catalog['APOGEE_ID'] = lamost_apogee_catalog['APOGEE_ID'].apply(
     lambda x: x[2:-1] if isinstance(x, str) and x.startswith("b'") and x.endswith("'") else x)
+    lamost_apogee_catalog = clean_stellar_dataframe(lamost_apogee_catalog)
+   
+    
+    fig, ax = plt.subplots(nrows=3, ncols=2)
+    ax = ax.flatten()
+    ax[0].hist(lamost_apogee_catalog['TEFF'], bins=100, density=True, histtype='step',  label='APOGEE')
+    ax[0].hist(lamost_apogee_catalog['combined_teff'], bins=100,density=True, histtype='step', label='LAMOST')
+    ax[0].set_xlabel('Effective Temperature (K)')
+    ax[0].set_ylabel('Density')
+    ax[0].legend()
+    ax[1].hist(lamost_apogee_catalog['LOGG'], bins=100, density=True, histtype='step', label='APOGEE')
+    ax[1].hist(lamost_apogee_catalog['combined_logg'], bins=100, density=True, histtype='step', label='LAMOST')
+    ax[1].set_xlabel('Log Surface Gravity (log g)')
+    ax[1].set_ylabel('Density')
+    ax[1].legend()
+    ax[2].hist(lamost_apogee_catalog['FE_H'], bins=100, density=True, histtype='step', label='APOGEE')
+    ax[2].hist(lamost_apogee_catalog['combined_feh'], bins=100, density=True, histtype='step', label='LAMOST')
+    ax[2].set_xlabel('Metallicity [Fe/H]')
+    ax[2].set_ylabel('Density')
+    ax[2].legend()
+    ax[3].hist(lamost_apogee_catalog['VSINI'], bins=100, density=True, histtype='step', label='APOGEE')
+    ax[3].set_xlabel('Rotational Velocity (vsini)')
+    ax[3].set_ylabel('Density')
+    ax[3].legend()
+    ax[4].hist(lamost_apogee_catalog['SNR'], bins=100, density=True, histtype='step', label='APOGEE')
+    ax[4].hist(lamost_apogee_catalog['combined_snrg'], bins=100, density=True, histtype='step', label='LAMOST')
+    ax[4].set_xlabel('Signal-to-Noise Ratio (SNR)')
+    ax[4].set_ylabel('Density')
+    ax[4].legend()
+    plt.tight_layout()
+    plt.savefig(f"/data/lightSpec/images/lamost_apogee_catalog_hists.png")
+    plt.clf()
+
+    
+    lamost_apogee_catalog.dropna(subset=["combined_obsid"], inplace=True)
     print("lamost_apogee_catalog shape: ", lamost_apogee_catalog.shape,
      'apogee sampels: ', lamost_apogee_catalog['APOGEE_ID'].nunique())
-    
+    print("apogee teff samples not nan: ", lamost_apogee_catalog['TEFF'].notna().sum())
+    print("lamost teff samples not nan: ", lamost_apogee_catalog['combined_teff'].notna().sum())
+
     
     train_df, test_df = train_test_split(lamost_apogee_catalog, test_size=0.2, random_state=1234)
     return train_df, test_df
@@ -105,7 +192,7 @@ def setup():
 
 
 local_rank, world_size, gpus_per_node = setup()
-args_dir = '/data/lightSpec/nn/full_config_lamost_apogee.yaml'
+args_dir = '/data/lightSpec/nn/full_config_multi_survey.yaml'
 data_args = Container(**yaml.safe_load(open(args_dir, 'r'))['Data'])
 exp_num = data_args.exp_num
 model_name = data_args.spec_model_name

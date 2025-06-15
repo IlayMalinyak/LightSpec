@@ -52,6 +52,7 @@ R_SUN_KM = 6.957e5
 # finetune_checkpoint_path =  '/data/lightSpec/logs/nss_finetune_2025-04-29/nss_finetune_lightspec_dual_former_6_latent_giants_finetune_nss_hard.pth'
 finetune_checkpoint_path = '/data/lightSpec/logs/nss_finetune_2025-05-17/nss_finetune_lightspec_dual_former_6_latent_giants_nss_finetune.pth'
 jepa_checkpoint_path = '/data/lightSpec/logs/nss_finetune_2025-05-22/nss_finetune_lightspec_compare_jepa.pth'
+dualformer_checkpoint_path = '/data/lightSpec/logs/nss_finetune_2025-05-17/nss_finetune_lightspec_dual_former_6_latent_giants_nss_finetune_age_gyro_big.pth'
 
 torch.cuda.empty_cache()
 
@@ -83,6 +84,20 @@ def create_train_test_dfs(meta_columns):
         print("number of class ", c, " ", len(final_df[final_df['binarity_class']==c]))
     train_df, val_df  = train_test_split(final_df, test_size=0.2, random_state=42)
     return train_df, val_df 
+
+def get_lamost_kepler_samples():
+    lamost_kepler_df = pd.read_csv('/data/lamost/lamost_dr8_gaia_dr3_kepler_ids.csv')
+    berger_df = pd.read_csv('/data/lightPred/tables/berger_catalog_full.csv')
+    kepler_meta = pd.read_csv('/data/lightPred/tables/kepler_dr25_meta_data.csv')
+
+    lamost_kepler_df = lamost_kepler_df[~lamost_kepler_df['KID'].isna()]
+    lamost_kepler_df['KID'] = lamost_kepler_df['KID'].astype(int)
+    unamed_cols = [col for col in lamost_kepler_df.columns if 'Unnamed' in col]
+    lamost_kepler_df.drop(columns=unamed_cols, inplace=True)
+    lamost_kepler_df['binarity_class_hard'] = 0
+    lamost_kepler_df = lamost_kepler_df.merge(berger_df, on='KID', how='left', suffixes=('', '_berger')).merge(kepler_meta[['KID', 'KMAG']], on='KID')
+    lamost_kepler_df['kmag_abs'] = lamost_kepler_df['KMAG'] - 5 * np.log10(lamost_kepler_df['Dist']) + 5
+    return lamost_kepler_df
 
 
 current_date = datetime.date.today().strftime("%Y-%m-%d")
@@ -123,6 +138,12 @@ test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, num
 test_loader = DataLoader(test_dataset, batch_size=data_args.batch_size, 
                          collate_fn=kepler_collate_fn)
 
+all_samples_dataset = generator.create_lamost_kepler_dataset(data_args, get_lamost_kepler_samples)
+all_samples_dataloader = DataLoader(all_samples_dataset,
+                                    batch_size=int(data_args.batch_size),
+                                    collate_fn=kepler_collate_fn,
+                                    num_workers=int(os.environ["SLURM_CPUS_PER_TASK"]))
+
 for i in range(10):
     lc, spec, y, lc2, spec2, info = train_dataset[i]
     print(lc.shape, spec.shape, y)
@@ -147,7 +168,8 @@ elif data_args.approach == 'dual_former':
 #         param.requires_grad = False
 
 # tuner_args.out_dim = tuner_args.out_dim 
-# model = load_checkpoints_ddp(model, jepa_checkpoint_path)
+print("loading best model from ", dualformer_checkpoint_path)
+model = load_checkpoints_ddp(model, dualformer_checkpoint_path)
 
 model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
@@ -194,14 +216,14 @@ with open(config_save_path, "w") as config_file:
 
 print(f"Configuration (with model structure) saved at {config_save_path}.")
 
-fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
-                        early_stopping=10, best='loss', conf=True) 
-output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_nss_{exp_num}.json'
-with open(output_filename, "w") as f:
-    json.dump(fit_res, f, indent=2)
-fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
-plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_nss_{exp_num}.png")
-plt.clf()
+# fit_res = trainer.fit(num_epochs=data_args.num_epochs, device=local_rank,
+#                         early_stopping=10, best='loss', conf=True) 
+# output_filename = f'{data_args.log_dir}/{datetime_dir}/finetune_nss_{exp_num}.json'
+# with open(output_filename, "w") as f:
+#     json.dump(fit_res, f, indent=2)
+# fig, axes = plot_fit(fit_res, legend=exp_num, train_test_overlay=True)
+# plt.savefig(f"{data_args.log_dir}/{datetime_dir}/fit_finetune_nss_{exp_num}.png")
+# plt.clf()
 
 preds_cls, targets, probs, projections, features, aggregated_info = trainer.predict(test_loader, device=local_rank)
 
@@ -218,3 +240,16 @@ print(results_df.head())
 results_df.to_csv(f"{data_args.log_dir}/{datetime_dir}/preds_nss_{exp_num}.csv", index=False)
 
 print('predictions saved in', f"{data_args.log_dir}/{datetime_dir}/preds_nss_{exp_num}.csv")
+
+preds_cls_all, targets_all, probs_all, projections_all, features_all, aggregated_info_all = trainer.predict(all_samples_dataloader, device=local_rank)
+
+np.save(f"{data_args.log_dir}/{datetime_dir}/projections_nss_{exp_num}_all_kepler_lamost.npy", projections)
+np.save(f"{data_args.log_dir}/{datetime_dir}/features_nss_{exp_num}_all_kepler_lamost.npy", features)
+
+results_df_all = pd.DataFrame({'preds_cls': preds_cls_all})
+for c in range(probs.shape[1]):
+    results_df_all[f'pred_{c}'] = probs_all[:, c]
+results_df_all['kid'] = aggregated_info_all['KID']
+results_df_all.to_csv(f"{data_args.log_dir}/{datetime_dir}/preds_nss_{exp_num}_all_kepler_lamost.csv", index=False)
+
+print('inference saved in', f"{data_args.log_dir}/{datetime_dir}/preds_nss_{exp_num}_all_kepler_lamost.csv")

@@ -53,7 +53,7 @@ SIMULATION_DATA_DIR = '/data/simulations/dataset_big/lc'
 SIMULATION_LABELS_PATH = '/data/simulations/dataset_big/simulation_properties.csv'
 
 
-def get_kepler_data(data_args, df, transforms):
+def get_lc_data(data_args, df, transforms):
 
     return LightCurveDataset(df=df,
                         transforms=transforms,
@@ -63,15 +63,17 @@ def get_kepler_data(data_args, df, transforms):
                         masked_transforms = data_args.masked_transform,
                         use_acf=data_args.use_acf,
                         use_fft=data_args.use_fft,
+                        use_time=data_args.add_time,
                         scale_flux=data_args.scale_flux,
                         labels=data_args.prediction_labels_lc,
                         dims=data_args.dim_lc,
                                 )
-def get_lamost_data(data_args, df, transforms):
+def get_spectra_data(data_args, df, transforms):
 
     return SpectraDataset(data_args.spectra_dir, transforms=transforms, df=df, 
                                  max_len=int(data_args.max_len_spectra),
-                                 target_norm=data_args.target_norm,)
+                                 target_norm=data_args.target_norm,
+                                 use_wv=data_args.add_wv)
 
 def get_lightspec_data(data_args, df, light_transforms, spec_transforms):
 
@@ -123,12 +125,16 @@ def get_simulation_data(data_args, df, light_transforms, spec_transforms):
 
 def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None):
 
-
+    if 'multi_survey' in data_args.approach:
+        print("multi survey transformations!!!!!!")
+        norm_transformations = Normalize(['std'])
+    else:
+        norm_transformations = Normalize(['mag_median', 'std'])
     light_transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
                             MovingAvg(13),
                             ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
                             FFT(seq_len=int(data_args.max_len_lc)),
-                            Normalize(['mag_median', 'std']),
+                            norm_transformations,
                             ToTensor(), ])
     spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                                 ToTensor()
@@ -137,19 +143,24 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
         train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lc)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
         spec_transforms = None
-        train_dataset = get_kepler_data(data_args, train_df, light_transforms)
-        val_dataset = get_kepler_data(data_args, val_df, light_transforms)
-        test_dataset = get_kepler_data(data_args, test_df, light_transforms)
+        train_dataset = get_lc_data(data_args, train_df, light_transforms)
+        val_dataset = get_lc_data(data_args, val_df, light_transforms)
+        test_dataset = get_lc_data(data_args, test_df, light_transforms)
     elif dataset_name == 'Spectra':
         train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_spec)
         val_df, test_df = train_test_split(val_df, test_size=0.5, random_state=42)
-        spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
+        if 'multi_survey' in data_args.approach:
+            spec_transforms = Compose([SpectrumPreprocessor(),
+                                ToTensor()
+                            ])
+        else:
+            spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
                                 ToTensor()
                             ])
         light_transforms = None
-        train_dataset = get_lamost_data(data_args, train_df, spec_transforms)
-        val_dataset = get_lamost_data(data_args, val_df, spec_transforms)
-        test_dataset = get_lamost_data(data_args, test_df, spec_transforms)
+        train_dataset = get_spectra_data(data_args, train_df, spec_transforms)
+        val_dataset = get_spectra_data(data_args, val_df, spec_transforms)
+        test_dataset = get_spectra_data(data_args, test_df, spec_transforms)
 
     elif dataset_name == 'LightSpec':
         train_df, val_df = data_generation_fn(meta_columns=data_args.meta_columns_lightspec, 
@@ -199,6 +210,35 @@ def get_data(data_args, data_generation_fn, dataset_name='FineTune', config=None
     )
     return train_dataset, val_dataset, test_dataset, config
 
+
+def create_lamost_kepler_dataset(data_args, data_generation_fn,  lamost_kepler_df=None):
+    if lamost_kepler_df is None:
+        lamost_kepler_df = data_generation_fn()
+
+    light_transforms = Compose([ RandomCrop(int(data_args.max_len_lc)),
+                            MovingAvg(13),
+                            ACF(max_lag_day=None, max_len=int(data_args.max_len_lc)),
+                            FFT(seq_len=int(data_args.max_len_lc)),
+                            Normalize(['mag_median', 'std']),
+                            ToTensor(), ])
+    spec_transforms = Compose([LAMOSTSpectrumPreprocessor(continuum_norm=data_args.continuum_norm, plot_steps=False),
+                                ToTensor()
+                            ])
+    return FineTuneDataset(df=lamost_kepler_df,
+                            light_transforms=light_transforms,
+                            spec_transforms=spec_transforms,
+                            npy_path = '/data/lightPred/data/raw_npy',
+                            spec_path = data_args.spectra_dir,
+                            light_seq_len=int(data_args.max_len_lc),
+                            spec_seq_len=int(data_args.max_len_spectra),
+                            use_acf=data_args.use_acf,
+                            use_fft=data_args.use_fft,
+                            meta_columns=data_args.meta_columns_finetune,
+                            scale_flux=data_args.scale_flux,
+                            labels=data_args.prediction_labels_finetune
+                            )
+    
+
 def get_model(data_args,
             args_dir,
             config,
@@ -230,6 +270,8 @@ def get_model(data_args,
     latent_dim = len(data_args.prediction_labels_lightspec) if data_args.use_latent else 0
     dual_former_args.latent_dim = latent_dim
     print("latent dim: ", latent_dim)
+    if data_args.add_wv:
+        spec_model_args.latent_dim = 2
 
     # tuner_args.out_dim = len(data_args.prediction_labels_finetune) * len(optim_args.quantiles)
     # light_model_args.in_channels = data_args.in_channels_lc
@@ -277,7 +319,7 @@ def get_model(data_args,
     moco_args.freeze_lightcurve = data_args.freeze_backbone
     moco_args.freeze_spectra = data_args.freeze_backbone
 
-    if data_args.approach == 'dual_former' or 'unimodal' in data_args.approach:
+    if 'dual_former' in data_args.approach or 'unimodal' in data_args.approach:
 
         print("Using DualNet with transformer args: ", dual_former_args)
 

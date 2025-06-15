@@ -1021,7 +1021,7 @@ class JEPATrainer(Trainer):
 class ContrastiveTrainer(Trainer):
     def __init__(self, temperature=1, full_input=False, stack_pairs=True, only_lc=True,
                  use_w=False, use_pred_coeff=False, pred_coeff_val=None, ssl_weight=0.5,
-                 weight_decay=False,   **kwargs):
+                 weight_decay=False, **kwargs):
         super().__init__(**kwargs)
         self.stack_pairs = stack_pairs
         self.temperature = temperature
@@ -1032,6 +1032,7 @@ class ContrastiveTrainer(Trainer):
         self.weight_decay = weight_decay
         self.full_input = full_input
         self.only_lc = only_lc
+        self.add_time = add_time
         
         
     def train_batch(self, batch, batch_idx, device):
@@ -1552,11 +1553,11 @@ class MaskedRegressorTrainer(Trainer):
         x_masked, x, y, mask, _, info= batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
-        y = y.nan_to_num(-1)  # Replace NaNs with -1
+        # y = y.nan_to_num(-1)  # Replace NaNs with -1
+        wv = None
         if self.add_wv:
             # Add wv feature to x_masked and x
-            wv = torch.stack([torch.tensor(i['wavelength']) for i in info]).to(device).float()
-            x_masked = torch.cat((x_masked.unsqueeze(1), wv.unsqueeze(1)), dim=1)
+            wv = torch.stack([torch.tensor(i['wv_params']) for i in info]).to(device).float()
         
         # Get proximity weights for regression
         if self.w_name is None:
@@ -1566,22 +1567,22 @@ class MaskedRegressorTrainer(Trainer):
         
         
         # Forward pass for both tasks
-        reg_out,ssl_out,_  = self.model(x_masked, x)
+        reg_out,ssl_out,_  = self.model(x_masked, x, latent=wv)  # Masked filling task
 
         # print('shapes: ', x_masked.shape, x.shape, y.shape, mask.shape, reg_out.shape, ssl_out.shape)          
         # Calculate SSL loss (masked filling)
         if (len(x.shape) == 3) and (x.shape[1] > 1):
-            x = x[:, 0, :]
+            x = x[:, -1, :]
         ssl_loss = self.ssl_criterion(ssl_out, x)
         ssl_acc = self.mask_accuracy(ssl_out, x, mask)
-
         
         # Calculate regression loss
         reg_out = reg_out.view(b, -1, self.num_quantiles)
+
         out_diff = int(y.shape[1] - reg_out.shape[1])
         y = y[:, out_diff:]
         reg_loss = self.criterion(reg_out, y)
-        reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
+        reg_loss = (reg_loss * w.unsqueeze(-1)).nan_to_num(0).mean()
         out_median = reg_out[..., reg_out.shape[-1]//2]
         reg_acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
         self.train_aux_loss_1.append(ssl_loss.item())
@@ -1618,21 +1619,22 @@ class MaskedRegressorTrainer(Trainer):
         x_masked, x, y, mask, _, info = batch
         x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
         b = x_masked.shape[0]
-        y = y.nan_to_num(-1)  # Replace NaNs with -1
-
-        if self.add_wv:
-            # Add wv feature to x_masked and x
-            wv = torch.stack([torch.tensor(i['wavelength']) for i in info]).to(device).float()
-            x_masked = torch.cat((x_masked.unsqueeze(1), wv.unsqueeze(1)), dim=1)
+        # y = y.nan_to_num(-1)  # Replace NaNs with -1
         
         if self.w_name is None:
             w = torch.ones(x_masked.size(0)).to(device)
         else:
             w = torch.tensor([i[self.w_name] for i in info]).to(device)
-        # w = const * torch.exp(w*const)
-        
+
+        wv = None
+        if self.add_wv:
+            # Add wv feature to x_masked and 
+            wv = torch.stack([torch.tensor(i['wv_params']) for i in info]).to(device).float()
         with torch.no_grad():
-            reg_out,ssl_out,_  = self.model(x_masked, x)  # Masked filling task
+            reg_out,ssl_out,_  = self.model(x_masked, x, latent=wv)  # Masked filling task
+
+            if (len(x.shape) == 3) and (x.shape[1] > 1):
+                x = x[:, -1, :]
             
             ssl_loss = self.ssl_criterion(ssl_out, x)
             ssl_acc = self.mask_accuracy(ssl_out, x, mask)
@@ -1641,11 +1643,8 @@ class MaskedRegressorTrainer(Trainer):
             reg_out = reg_out.view(b, -1, self.num_quantiles)
             out_diff = int(y.shape[1] - reg_out.shape[1])
             y = y[:, out_diff:]
-            if self.drop_first_y:
-                reg_out = reg_out[:, 1:]
-                y = y[:, 1:]
             reg_loss = self.criterion(reg_out, y)
-            reg_loss = (reg_loss * w.unsqueeze(-1)).mean()
+            reg_loss = (reg_loss * w.unsqueeze(-1)).nan_to_num(0).mean()
             out_median = reg_out[..., reg_out.shape[-1]//2]
             reg_acc = (torch.abs(out_median - y) < y * 0.1).sum(0)
             self.val_aux_loss_1.append(ssl_loss.item())
@@ -1676,10 +1675,8 @@ class MaskedRegressorTrainer(Trainer):
         for i,(x_masked, x, y, mask, _ , info) in enumerate(pbar):
             x_masked, x, y, mask = x_masked.to(device), x.to(device), y.to(device), mask.to(device)
             b = x_masked.shape[0]
-            if self.add_wv:
-                # Add wv feature to x_masked and x
-                wv = torch.stack([torch.tensor(i['wavelength']) for i in info]).to(device).float()
-                x_masked = torch.cat((x_masked.unsqueeze(1), wv.unsqueeze(1)), dim=1)
+            if (len(x.shape) == 3) and (x.shape[1] > 1):
+                x = x[:, -1, :]
             for item in info:
                 for key, value in item.items():
                     # Check if value is a scalar (not an array/tensor)

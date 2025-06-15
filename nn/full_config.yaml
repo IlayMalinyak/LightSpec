@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: lightspec_carbon
+  exp_num: lightspec_inference
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -41,6 +41,8 @@ Data:
   freeze_backbone: True
   use_latent: True
   pred_coeff_val: 1
+  add_wv: False
+  add_time: False
   approach: "dual_former"
   only_main_seq: False
   calc_variance: True
@@ -459,4 +461,4 @@ Optimization:
   momentum: 0.95
   nesterov: true
   optimizer: "adamw"
-  quantiles: [0.1,0.25,0.5,0.75,0.9]
+  quantiles: [0.5]

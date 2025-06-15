@@ -1,7 +1,7 @@
 Data:
   # Basics
   log_dir: '/data/lightSpec/logs'
-  exp_num: lightspec_carbon
+  exp_num: lightspec_multi_survey_ref_solar
   light_model_name: "DoubleInputRegressor"
   spec_model_name: "MultiTaskRegressor"
   combined_model_name: "MultiEncoder"
@@ -9,9 +9,9 @@ Data:
   dataset: "LightSpecDataset"
   data_dir: '/data/lightPred/data'
   spectra_dir: '/data/lamost/data'
-  batch_size: 16
+  batch_size: 32
   num_epochs: 1000
-  max_len_spectra: 8704
+  max_len_spectra: 4096
   max_days_lc: 720
   max_len_lc: 34560
   lc_freq: 0.0208
@@ -22,8 +22,8 @@ Data:
   meta_columns_finetune: []
   meta_columns_simulation: []
   prediction_labels_lightspec: ["Teff",  "logg", "Prot",  "FeH", "Rstar",  "RUWE"]
-  prediction_labels_lc: ['Teff', 'logg', 'Prot']
-  prediction_labels_spec: ['Teff', 'logg', 'FeH', 'vsini']
+  prediction_labels_lc: ['Prot']
+  prediction_labels_spec: ['vsini', 'Teff', 'logg', 'FeH']
   prediction_labels_finetune: ['final_age_norm', 'age_error_norm']
   prediction_labels_simulation: ['Period']
   target_norm: 'solar'
@@ -41,10 +41,11 @@ Data:
   freeze_backbone: True
   use_latent: True
   pred_coeff_val: 1
-  approach: "dual_former"
+  approach: "dual_former_multi_survey"
   only_main_seq: False
   calc_variance: True
-  add_wv: True
+  add_wv: False
+  add_time: True
  
   checkpoint_path: '/data/lightSpec/logs/lightspec_2025-05-16/lightspec_dual_former_6_latent_giants_ablation_2.pth'
 
@@ -52,7 +53,7 @@ DoubleInputRegressor_lc:
   encoder_only: True
   stacked_input: True
   in_channels: 2
-  load_checkpoint: True
+  load_checkpoint: False
   output_dim: 1
   num_quantiles: 5
   dropout_p: 0.3  
@@ -166,7 +167,7 @@ MultiTaskSimSiam_lc:
 
 MultiTaskRegressor_spec:
   backbone: 'cnn'
-  in_channels: 2
+  in_channels: 1
   num_layers: 5
   stride: 1
   encoder_dims: [64,128,256,1024,2048]
@@ -177,6 +178,7 @@ MultiTaskRegressor_spec:
   output_dim: 4
   num_quantiles: 5
   beta: 1
+  latent_dim: 0
   load_checkpoint: False
   checkpoint_num: 1
   activation: "silu"

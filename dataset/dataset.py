@@ -70,6 +70,42 @@ def pad_with_last_element(tensor, seq_len):
     
     return padded
 
+def pad_with_cadence(time_tensor, seq_len):
+    """
+    Pad time array by continuing with the same time step cadence.
+    
+    Args:
+        time_tensor: Input time tensor of shape (1, T)
+        seq_len: Target sequence length
+        
+    Returns:
+        Padded time tensor of shape (1, seq_len)
+    """
+    _, T = time_tensor.shape
+    
+    if T >= seq_len:
+        # If the tensor is already longer than or equal to seq_len, truncate it
+        return time_tensor[:, :seq_len]
+    
+    # Calculate the time step (cadence) from the existing time array
+    if T > 1:
+        time_step = time_tensor[0, 1] - time_tensor[0, 0]
+    else:
+        time_step = 1.0  # Default time step if only one time point
+    
+    # Create the padded tensor
+    padded = torch.zeros((1, seq_len), dtype=time_tensor.dtype, device=time_tensor.device)
+    
+    # Copy the original data
+    padded[:, :T] = time_tensor
+    
+    # Continue the time series with the same cadence
+    last_time = time_tensor[0, -1]
+    for i in range(T, seq_len):
+        padded[0, i] = last_time + (i - T + 1) * time_step
+    
+    return padded
+
 def create_boundary_values_dict(df):
   boundary_values_dict = {}
   for c in df.columns:
@@ -271,13 +307,15 @@ class SpectraDataset(Dataset):
                     max_len=3909,
                     use_cache=True,
                     id='combined_obsid',
-                    target_norm='solar'
+                    target_norm='solar',
+                    use_wv=False
                     ):
         self.data_dir = Path(data_dir)
         self.transforms = transforms
         self.target_norm = target_norm
         self.df = df
         self.id = id
+        self.use_wv = use_wv
         if df is None:
             cache_file = os.path.join(self.data_dir, '.path_cache.txt')
             
@@ -293,9 +331,30 @@ class SpectraDataset(Dataset):
                         f.write('\n'.join(self.path_list))
         else:
             self.path_list = None
+            self._get_min_max_values()
         self.max_len = max_len
-        self.mask_transform = RandomMasking()
+        self.mask_transform = RandomMasking(mask_value=np.nan, replace_prob=0.95)
     
+    def _get_min_max_values(self):
+        # Assuming the values are NumPy arrays
+        combined_teff_array = np.array(self.df['combined_teff'].values)
+        teff_array = np.array(self.df['TEFF'].values)
+        combined_logg_array = np.array(self.df['combined_logg'].values)
+        logg_array = np.array(self.df['LOGG'].values)
+        combined_feh_array = np.array(self.df['combined_feh'].values)
+        feh_array = np.array(self.df['FE_H'].values)
+
+        # Compute min and max values while ignoring NaNs
+        self.max_teff = np.nanmax([np.nanmax(combined_teff_array), np.nanmax(teff_array)])
+        self.min_teff = np.nanmin([np.nanmin(combined_teff_array), np.nanmin(teff_array)])
+        self.max_logg = np.nanmax([np.nanmax(combined_logg_array), np.nanmax(logg_array)])
+        self.min_logg = np.nanmin([np.nanmin(combined_logg_array), np.nanmin(logg_array)])
+        self.max_feh = np.nanmax([np.nanmax(combined_feh_array), np.nanmax(feh_array)])
+        self.min_feh = np.nanmin([np.nanmin(combined_feh_array), np.nanmin(feh_array)])
+        self.max_vsini = self.df['VSINI'].max()
+        self.min_vsini = self.df['VSINI'].min()
+        print("min max teff values:", self.min_teff, self.max_teff, np.nanmax(combined_teff_array), np.nanmax(teff_array))
+
     def _file_listing(self):
         
         def process_chunk(file_names):
@@ -324,7 +383,7 @@ class SpectraDataset(Dataset):
         x = binaryext['FLUX'].astype(np.float32)
         wv = binaryext['WAVELENGTH'].astype(np.float32)
         rv = header['HELIO_RV']
-        meta = {'RV': rv, 'wavelength': wv}
+        meta = {'RV': rv, 'wavelength': wv, 'wv_params': (wv[0,0], wv[0,1]- wv[0,0])}
         return x, meta
     
     def read_apogee_spectra(self, filename):
@@ -332,15 +391,19 @@ class SpectraDataset(Dataset):
             data = hdul[1].data.astype(np.float32).squeeze()[None]
             header = hdul[1].header
         # Create pixel array (1-indexed for FITS convention)
-        pixels = np.arange(1, self.max_len + 1)
+        pixels = np.arange(1, data.shape[-1] + 1)
         
         # Calculate log10(wavelength):
-        # log_wave = CRVAL1 + CDELT1 * (pixel - CRPIX1)
         log_wavelength = header['CRVAL1'] + header['CDELT1'] * (pixels - header['CRPIX1'])
         
         # Convert to linear wavelength in Angstroms
         wv = 10**log_wavelength
-        meta = {'wavelength': wv}
+        wv = wv.reshape(1, -1)  # Ensure wv is 2D
+        valid_idx = np.where(data != 0)[1]
+        if len(valid_idx) > 0:
+            data = data[:, valid_idx]
+            wv = wv[:, valid_idx]
+        meta = {'wavelength': wv, 'wv_params': (wv[0,0], wv[0,1]- wv[0,0])}
         return data, meta
     
     
@@ -352,7 +415,7 @@ class SpectraDataset(Dataset):
         info['snrg'] = row['combined_snrg'] / 1000
         info['snri'] = row['combined_snri'] / 1000
         info['snrz'] = row['combined_snrz'] / 1000
-        info['vsini'] = -1
+        info['vsini'] = np.nan
         
         # Add joint probability information if available
         if 'joint_prob' in row:
@@ -365,9 +428,9 @@ class SpectraDataset(Dataset):
         info['Teff'] = row['TEFF']
         info['logg'] = row['LOGG']
         info['FeH'] = row['FE_H']
-        info['snrg'] = row['SNR'] / 5000 # factor of 5 to match LAMOST median snr
-        info['snri'] = row['SNR'] / 5000
-        info['snrz'] = row['SNR'] / 5000
+        info['snrg'] = row['SNR'] / 1000 # factor of 5 to match LAMOST median snr
+        info['snri'] = row['SNR'] / 1000
+        info['snrz'] = row['SNR'] / 1000
         info['vsini'] = row['VSINI']
         info['RV'] = row['VHELIO_AVG']
         return info
@@ -408,27 +471,34 @@ class SpectraDataset(Dataset):
             # print("Error reading file ", obsid, e)
             # spectra = np.zeros((self.spec_seq_len))
             # meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
-            return (torch.zeros(self.max_len),
-                    torch.zeros(self.max_len),
+            # dummy_spec = torch.zeros(self.max_len) if not self.use_wv else torch.zeros(2, self.max_len)
+            dummy_spec = torch.zeros(self.max_len)
+            return (dummy_spec,
+                    dummy_spec,
                     torch.zeros(4),
                     torch.zeros(self.max_len, dtype=torch.bool),
                     torch.zeros(self.max_len, dtype=torch.bool),
-                    {'obsid': obsid, 'snrg': 1e-4, 'snri': 1e-4,
+                    {'obsid': obsid, 'snrg': 1e-4, 'snri': 1e-4, 'wv_params': (0,0),
                      'snrz': 1e-4, 'spectra_type': 'missing', 'wavelength': np.zeros(self.max_len)})
         
             
         if self.transforms:
             spectra, _, info = self.transforms(spectra, None, info)
         spectra_masked, mask, _ = self.mask_transform(spectra, None, info)
-        info['wavelength'] = info['wavelength'].squeeze()
+        info['wavelength'] = torch.tensor(info['wavelength'].squeeze())
+        # print(((spectra - spectra_masked) != 0).sum() / spectra.shape[-1], "% masked values in spectra")
+
 
         if self.target_norm =='solar':
             target = torch.tensor([info['vsini'], info['Teff'] / T_sun, info['logg'], info['FeH']], dtype=torch.float32)
         elif self.target_norm == 'minmax':
-            teff = (info['Teff'] - T_MIN) / (T_MAX - T_MIN)
-            logg = (info['logg'] - LOGG_MIN) / (LOGG_MAX - LOGG_MIN)
-            feh = (info['FeH'] - FEH_MIN) / (FEH_MAX - FEH_MIN)
-            target = torch.tensor([info['vsini'], teff, logg, feh], dtype=torch.float32)
+            teff = (info['Teff'] - self.min_teff) / (self.max_teff - self.min_teff)
+            # teff = info['Teff'] / T_sun
+            logg = (info['logg'] - self.min_logg) / (self.max_logg - self.min_logg)
+            feh = (info['FeH'] - self.min_feh) / (self.max_feh - self.min_feh)
+            # vsini = (info['vsini'] - self.min_vsini) / (self.max_vsini - self.min_vsini)
+            vsini = info['vsini']
+            target = torch.tensor([vsini, teff, logg, feh], dtype=torch.float32)
         else:
             raise ValueError("Unknown target normalization method")
             
@@ -440,10 +510,18 @@ class SpectraDataset(Dataset):
             pad_spectra = torch.zeros(1, self.max_len - spectra.shape[-1])
             spectra = torch.cat([spectra, pad_spectra], dim=-1)
             pad_wv = torch.zeros(self.max_len - meta['wavelength'].shape[-1])
-            meta['wavelength'] = torch.cat([torch.tensor(meta['wavelength']), pad_wv], dim=0)
+            wv = pad_with_cadence(torch.tensor(info['wavelength']).unsqueeze(0), self.max_len)
+            meta['wavelength'] = wv
+
+        # if self.use_wv:
+        #     wv = info['wavelength']
+        #     if len(wv.shape) == 1:
+        #         wv = wv.unsqueeze(0)
+        #     spectra_masked = torch.cat([wv, spectra_masked], dim=0)
+        #     spectra = torch.cat([wv, spectra], dim=0)
+
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)
-        t4 = time.time()
         # print("read spectra: ", t1-start, "transform: ", t2-t1, "target: ", t3-t2, "pad: ", t4-t3)
         return (spectra_masked.float().squeeze(0), spectra.float().squeeze(0),\
          target.float(), mask.squeeze(0), mask.squeeze(0), info)
@@ -462,6 +540,7 @@ class LightCurveDataset():
                 masked_transforms:bool=False,
                 use_acf:bool=False,
                 use_fft:bool=False,
+                use_time:bool=False,
                 scale_flux:bool=True,
                 labels:object=None,
                  dims:int=1
@@ -490,6 +569,7 @@ class LightCurveDataset():
         self.mask_transform = RandomMasking(mask_prob=0.2) if masked_transforms else None
         self.use_acf = use_acf
         self.use_fft = use_fft
+        self.use_time = use_time
         self.scale_flux = scale_flux
         self.labels = labels
         self.dims = dims
@@ -547,26 +627,28 @@ class LightCurveDataset():
                     print(f"Error loading file for {row['KID']}: {str(e)}")
                     x = np.zeros((self.seq_len, 1))
                 time = np.linspace(0, len(x)//48, len(x))  # Assuming 48 data points per day 
-            elif 'TID' in row and not pd.isnan(row['TID']):
+                meta = {'time': time, 'ID': row['KID'], 'KID': row['KID'], 'lightcurve_type': 'Kepler'}
+            elif 'TID' in row and not pd.isna(row['TID']):
                 # read TESS sample
                 try:
-                    file_path = os.path.join('/data/tess', f"{int(row['TID'])}.fits")
+                    file_path = os.path.join('/data/tess/data', f"{int(row['TID'])}.fits")
                     x, time = self.read_tess_lc(file_path)
                 except FileNotFoundError as e:
-                    # print(f"Error: File not found for {row['TID']}", e)
+                    print(f"Error: File not found for {row['TID']}", e)
                     x = np.zeros((self.seq_len, 1))
                     time = np.linspace(0, len(x)//720, len(x)) # Assuming 720 data points per day
+                meta = {'time': time, 'ID': row['TID'], 'TID': row['TID'], 'lightcurve_type': 'TESS'}
             if 'Teff' in row.keys():
-                meta = {'TEFF': row['Teff'],
+                meta.update({'TEFF': row['Teff'],
                             'RADIUS': row['Rstar'],
                         'LOGG': row['logg'],
                         'M':row['Mstar'],
                         'FeH': row['FeH'],
-                        'Dist': row['Dist']}
+                        'Dist': row['Dist']})
             else:
-                meta = {'TEFF': None, 'RADIUS': None,
+                meta.update({'TEFF': None, 'RADIUS': None,
                         'LOGG': None, 'M': None, 'FeH':None,
-                        'Dist': None}
+                        'Dist': None})
             meta['KMAG'] = row['kmag_abs'] if 'kmag_abs' in row.keys() else None
             if self.labels is not None:
                 for label in self.labels:
@@ -660,6 +742,17 @@ class LightCurveDataset():
                 mask = pad_with_last_element(mask, self.seq_len)
             else:
                 mask = torch.zeros(1, self.seq_len)
+            if self.use_time:
+                # Handle potential byte order issues
+                time_data = info['time']
+                if hasattr(time_data, 'astype'):  # numpy array
+                    time_data = time_data.astype(float, copy=False)
+                time_array = torch.tensor(time_data).float()
+                if len(time_array.shape) == 1:
+                    time_array = time_array.unsqueeze(0)
+                time_array = pad_with_cadence(time_array, self.seq_len)
+                time_array = time_array - time_array[:, 0]
+                x = torch.cat((time_array, x), dim=0)
             if self.use_acf:
                 acf = torch.tensor(info['acf']).nan_to_num(0)
                 x = torch.cat((x, acf), dim=0)
@@ -676,7 +769,6 @@ class LightCurveDataset():
 
 
     def __getitem__(self, idx):
-        tic = time.time()
         x, info, qs, p_val = self.read_row(idx)
         x = self.fill_nan_np(x, interpolate=True)
         info['idx'] =  idx
@@ -697,9 +789,6 @@ class LightCurveDataset():
         info['Rstar'] = info['RADIUS']
         info['kmag_abs'] = info['KMAG']
        
-        info['KID'] = self.df.iloc[idx]['KID']
-        toc = time.time()
-        info['time'] = toc - tic
         if mask is None:
             mask = torch.zeros_like(x)
         if mask_y is None:
@@ -780,6 +869,7 @@ class LightSpecDataset(LightCurveDataset):
         kid = int(info['KID'])
         obsid = int(self.df.iloc[idx]['ObsID'])
         info['obsid'] = obsid
+        info['spectra_type'] = 'LAMOST' # TODO update this for APOGEE
         obsdir = str(obsid)[:4]
         spectra_filename = os.path.join(self.spec_path, f'{obsdir}/{obsid}.fits')
         try:

@@ -106,6 +106,10 @@ class RandomCrop:
         start = np.random.randint(0, x.shape[0] - self.crop_size)
         info['crop_start'] = start
         x = x[start:start + self.crop_size,...]
+        if 'time' in info.keys():
+            t = info['time']
+            t = t[start:start + self.crop_size]
+            info['time'] = t
         if mask is not None:
             mask = mask[start:start + self.crop_size,...]
         return x, mask, info
@@ -116,6 +120,10 @@ class RandomCrop:
         start = torch.randint(0, x.size(0) - self.crop_size, (1,))
         info['crop_start'] = start.item()
         x = x[start:start + self.crop_size,...]
+        if 'time' in info.keys():
+            t = info['time']
+            t = t[start:start + self.crop_size]
+            info['time'] = t
         if mask is not None:
             mask = mask[start:start + self.crop_size,...]
         return x, mask, info
@@ -211,7 +219,7 @@ class RandomMasking:
     Some masked elements are replaced with a predefined value, others with random numbers.
     """
     def __init__(self, mask_prob=0.15, replace_prob=0.8, mask_value=0, 
-                 random_low=0, random_high=None):
+                 random_low=None, random_high=None):
         """
         Initialize the RandomMasking transformation.
 
@@ -244,6 +252,8 @@ class RandomMasking:
             x = x[np.newaxis, :]
         if self.random_high is None:
             self.random_high = x.max()
+        if self.random_low is None:
+            self.random_low = x.min()
         mask = np.random.rand(*x[0].shape) < self.mask_prob
         
         # Create a copy of x to modify
@@ -262,6 +272,8 @@ class RandomMasking:
     def _mask_torch(self, x, mask=None, info=dict()):
         if self.random_high is None:
             self.random_high = x.max()
+        if self.random_low is None:
+            self.random_low = x.min()
         if mask is None:
             mask = torch.rand_like(x) < self.mask_prob
         
@@ -577,7 +589,129 @@ class SmoothSpectraGaussian():
         return x, mask, info
 
 
-class LAMOSTSpectrumPreprocessor:
+class SpectrumPreprocessor:
+    """
+    Preprocessing class for spectra implementing wavelength correction, 
+    resampling, denoising, continuum normalization, and secondary normalization.
+    
+    Follows preprocessing steps from
+    "Estimating stellar parameters from LAMOST low-resolution spectra", X. Li, B. Lin.
+    """
+    def __init__(self,              
+                 resample_step=0.0001,
+                 median_filter_size=3,
+                 polynomial_order=5,
+                 rv_norm=True,
+                 continuum_norm=True,
+                 plot_steps=False):
+        """
+        Initialize preprocessing parameters.
+        
+        Args:
+           
+            resample_step (float): Logarithmic resampling step size
+            median_filter_size (int): Size of median filter window
+            polynomial_order (int): Order of polynomial for continuum estimation
+        """
+        self.resample_step = resample_step
+        self.median_filter_size = median_filter_size
+        self.polynomial_order = polynomial_order
+        self.rv_norm = rv_norm
+        self.continuum_norm = continuum_norm
+        self.plot_steps = plot_steps
+    
+    def __call__(self, spectrum, mask=None, info=dict()):
+        if torch.is_tensor(spectrum):
+            spectrum = spectrum.numpy()
+        wavelength = info['wavelength']
+        if self.rv_norm:
+            radial_velocity = info['RV']
+            wavelength = self._wavelength_correction(wavelength, radial_velocity)
+
+        spectrum = self._median_filter_denoise(spectrum.squeeze())
+        # spectrum = self._continuum_normalization(spectrum)
+        spectrum = self._secondary_normalization(spectrum)
+        if self.rv_norm:
+            wavelength = self._wavelength_correction(wavelength, radial_velocity)
+        info['wavelength'] = wavelength
+        return spectrum[None,:], mask, info
+    
+    def _wavelength_correction(self, wavelength, radial_velocity):
+        """
+        Correct wavelength based on radial velocity.
+        
+        λ′ = λ * (1 + RV/c)
+        """
+        c = 299792.458  # Speed of light in km/s
+        return wavelength * (1 + radial_velocity / c)
+
+    def _linear_interpolation_resample(self, spectrum, wavelength, is_blue=True):
+        """
+        Resample spectrum using linear interpolation in logarithmic space.
+        """
+        # Determine wavelength range based on whether it's blue or red end
+        wave_range = self.blue_range if is_blue else self.red_range
+        
+        # Create logarithmic wavelength grid
+        log_wave_start = np.log10(wave_range[0])
+        log_wave_end = np.log10(wave_range[1])
+        new_log_wavelengths = np.arange(
+            log_wave_start, 
+            log_wave_end, 
+            self.resample_step
+        )
+        new_wavelengths = 10 ** new_log_wavelengths
+        
+        # Interpolate spectrum
+        interpolator = interpolate.interp1d(
+            wavelength, 
+            spectrum, 
+            kind='linear', 
+            fill_value='extrapolate'
+        )
+        resampled_spectrum = interpolator(new_wavelengths)
+        
+        return resampled_spectrum
+
+    def _median_filter_denoise(self, spectrum):
+        """
+        Apply median filtering for noise reduction.
+        """
+        return medfilt(spectrum, kernel_size=self.median_filter_size)
+
+    def _continuum_normalization(self, spectrum):
+        """
+        Estimate and normalize continuum using polynomial fitting.
+        """
+        x = np.arange(len(spectrum))
+        poly_coeffs = np.polyfit(x, spectrum, deg=self.polynomial_order)
+        continuum = np.polyval(poly_coeffs, x)
+        
+        # Normalize by dividing spectrum by its estimated continuum
+        normalized_spectrum = spectrum / continuum
+        
+        return normalized_spectrum
+
+    def _secondary_normalization(self, spectrum):
+        """
+        Secondary normalization with outlier replacement and z-score transformation.
+        """
+        mu = np.mean(spectrum)
+        sigma = np.std(spectrum)
+        
+        # Replace outliers
+        spectrum = np.where(
+            (spectrum < mu - 3*sigma) | (spectrum > mu + 3*sigma), 
+            mu, 
+            spectrum
+        )
+        
+        # Z-score transformation
+        normalized_spectrum = (spectrum - mu) / sigma
+        
+        return normalized_spectrum
+
+class LAMOSTSpectrumPreprocessor(SpectrumPreprocessor):
     """
     Preprocessing class for LAMOST spectra implementing wavelength correction, 
     resampling, denoising, continuum normalization, and secondary normalization.
@@ -604,15 +738,16 @@ class LAMOSTSpectrumPreprocessor:
             median_filter_size (int): Size of median filter window
             polynomial_order (int): Order of polynomial for continuum estimation
         """
+        super().__init__(
+            resample_step=resample_step,
+            median_filter_size=median_filter_size,
+            polynomial_order=polynomial_order,
+            rv_norm=rv_norm,
+            continuum_norm=continuum_norm,
+            plot_steps=plot_steps
+        )
         self.blue_range = blue_wavelength_range
         self.red_range = red_wavelength_range
-        self.resample_step = resample_step
-        self.median_filter_size = median_filter_size
-        self.polynomial_order = polynomial_order
-        self.rv_norm = rv_norm
-        self.continuum_norm = continuum_norm
-        self.plot_steps = plot_steps
-
 
 
     def __call__(self, spectrum, mask=None, info=dict()):
@@ -641,7 +776,7 @@ class LAMOSTSpectrumPreprocessor:
             merged_ax.plot(wavelength.squeeze(), spectrum.squeeze())
             merged_ax.set_title("Original Spectrum")
         
-        if info['spectra_type'] == 'APOGEE':
+        if 'spectra_type' in info.keys() and info['spectra_type'] == 'APOGEE':
            
             spectrum = self._median_filter_denoise(spectrum.squeeze())
             # spectrum = self._continuum_normalization(spectrum)
@@ -731,80 +866,6 @@ class LAMOSTSpectrumPreprocessor:
         
         return np.concatenate([blue_final, red_final])[None,:], mask, info
 
-    def _wavelength_correction(self, wavelength, radial_velocity):
-        """
-        Correct wavelength based on radial velocity.
-        
-        λ′ = λ * (1 + RV/c)
-        """
-        c = 299792.458  # Speed of light in km/s
-        return wavelength * (1 + radial_velocity / c)
-
-    def _linear_interpolation_resample(self, spectrum, wavelength, is_blue=True):
-        """
-        Resample spectrum using linear interpolation in logarithmic space.
-        """
-        # Determine wavelength range based on whether it's blue or red end
-        wave_range = self.blue_range if is_blue else self.red_range
-        
-        # Create logarithmic wavelength grid
-        log_wave_start = np.log10(wave_range[0])
-        log_wave_end = np.log10(wave_range[1])
-        new_log_wavelengths = np.arange(
-            log_wave_start, 
-            log_wave_end, 
-            self.resample_step
-        )
-        new_wavelengths = 10 ** new_log_wavelengths
-        
-        # Interpolate spectrum
-        interpolator = interpolate.interp1d(
-            wavelength, 
-            spectrum, 
-            kind='linear', 
-            fill_value='extrapolate'
-        )
-        resampled_spectrum = interpolator(new_wavelengths)
-        
-        return resampled_spectrum
-
-    def _median_filter_denoise(self, spectrum):
-        """
-        Apply median filtering for noise reduction.
-        """
-        return medfilt(spectrum, kernel_size=self.median_filter_size)
-
-    def _continuum_normalization(self, spectrum):
-        """
-        Estimate and normalize continuum using polynomial fitting.
-        """
-        x = np.arange(len(spectrum))
-        poly_coeffs = np.polyfit(x, spectrum, deg=self.polynomial_order)
-        continuum = np.polyval(poly_coeffs, x)
-        
-        # Normalize by dividing spectrum by its estimated continuum
-        normalized_spectrum = spectrum / continuum
-        
-        return normalized_spectrum
-
-    def _secondary_normalization(self, spectrum):
-        """
-        Secondary normalization with outlier replacement and z-score transformation.
-        """
-        mu = np.mean(spectrum)
-        sigma = np.std(spectrum)
-        
-        # Replace outliers
-        spectrum = np.where(
-            (spectrum < mu - 3*sigma) | (spectrum > mu + 3*sigma), 
-            mu, 
-            spectrum
-        )
-        
-        # Z-score transformation
-        normalized_spectrum = (spectrum - mu) / sigma
-        
-        return normalized_spectrum
 
     def __repr__(self):
         return (f"LAMOSTSpectrumPreprocessor("
