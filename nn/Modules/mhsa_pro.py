@@ -24,6 +24,59 @@ class AttentionConfig:
 # MHA_rotary: Multi-head Attention + Rotary Encoding + GeGLU FFN
 ########################################################################################################
 
+class WavelengthRotaryEmbedding(nn.Module):
+    def __init__(self, dim, base=10000, wavelength_scale='log'):
+        super().__init__()
+        self.dim = dim
+        self.base = base
+        self.wavelength_scale = wavelength_scale
+        
+        # Create inverse frequencies for RoPE
+        inv_freq = 1. / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        
+        # Cache for efficiency
+        self.wavelength_cached = None
+        self.cos_cached = None
+        self.sin_cached = None
+
+    def _wavelength_to_position(self, wavelength):
+        """Convert wavelength to position for RoPE"""
+        if self.wavelength_scale == 'log':
+            # Log scale for astronomical wavelengths
+            log_wave = torch.log(wavelength)
+            # Normalize to reasonable range (assuming wavelengths in Angstroms)
+            positions = (log_wave - 8.0) / 2.0  # Roughly [0, 2] for 3000-20000 Angstroms
+        elif self.wavelength_scale == 'linear':
+            # Linear normalization
+            positions = (wavelength - wavelength.min()) / (wavelength.max() - wavelength.min())
+        else:
+            raise ValueError("wavelength_scale must be 'log' or 'linear'")
+        
+        return positions
+
+    def forward(self, wavelength):
+        """Fully vectorized version"""
+        # Convert to positions (vectorized)
+        valid_mask = wavelength > 0
+        log_wave = torch.log(torch.clamp(wavelength, min=1e-8))  # Avoid log(0)
+        positions = (log_wave - 8.0) / 2.0
+        positions = positions * valid_mask.float()  # Zero out padding
+        
+        # Vectorized einsum for all batch items at once
+        # Reshape for broadcasting: [batch*seq, 1] × [1, dim//2] → [batch*seq, dim//2]
+        batch_size, seq_len = wavelength.shape
+        positions_flat = positions.view(-1, 1)  # [batch*seq, 1]
+        inv_freq_expanded = self.inv_freq.unsqueeze(0)  # [1, dim//2]
+        
+        freqs_flat = positions_flat * inv_freq_expanded  # [batch*seq, dim//2]
+        freqs = freqs_flat.view(batch_size, seq_len, -1)  # [batch, seq, dim//2]
+        
+        # Duplicate and compute cos/sin
+        emb = torch.cat([freqs, freqs], dim=-1)  # [batch, seq, dim]
+        return torch.stack([emb.cos(), emb.sin()])
+
+
 class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, base=10000):
         super().__init__()
@@ -67,6 +120,28 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     # print('in apply_rotary_pos_emb: ', q.shape, k.shape, cos.shape, sin.shape)
     cos, sin = cos[...,:q.shape[2],:], sin[...,:q.shape[2],:]
     return (q * cos) + (rotate_half(q) * sin), (k * cos) + (rotate_half(k) * sin)
+
+def apply_seq_len_rotary_pos_emb(x, cos, sin):
+    """
+    Args:
+        x: [batch_size, seq_len, dim] 
+        cos: [batch_size, seq_len, dim] - batch-specific cos encodings
+        sin: [batch_size, seq_len, dim] - batch-specific sin encodings
+    """
+    # print('in apply_seq_len_rotary_pos_emb: ', x.shape, cos.shape, sin.shape)
+    # Split x into pairs for rotation
+    x1, x2 = x[..., ::2], x[..., 1::2]
+    
+    # Apply rotation (now cos/sin are per-batch)
+    rotated_x1 = x1 * cos[..., ::2] - x2 * sin[..., ::2]
+    rotated_x2 = x1 * sin[..., 1::2] + x2 * cos[..., 1::2]
+    
+    # Recombine
+    rotated_x = torch.zeros_like(x)
+    rotated_x[..., ::2] = rotated_x1
+    rotated_x[..., 1::2] = rotated_x2
+    
+    return rotated_x
 
 class MHA_rotary(nn.Module):
     def __init__(self, args):

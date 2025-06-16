@@ -471,8 +471,13 @@ class SpectraDataset(Dataset):
             # print("Error reading file ", obsid, e)
             # spectra = np.zeros((self.spec_seq_len))
             # meta = {'RV': 0, 'wavelength': np.zeros(self.spec_seq_len)}
-            # dummy_spec = torch.zeros(self.max_len) if not self.use_wv else torch.zeros(2, self.max_len)
-            dummy_spec = torch.zeros(self.max_len)
+            dummy_flux = torch.zeros(self.max_len)
+            if self.use_wv:
+                dummy_wv = torch.ones(dummy_flux.shape) * 5000
+                dummy_spec = torch.cat([dummy_wv.unsqueeze(0), dummy_flux.unsqueeze(0)], dim=0)
+            else:
+                dummy_spec = dummy_flux.unsqueeze(0)
+            # dummy_spec = torch.zeros(self.max_len)
             return (dummy_spec,
                     dummy_spec,
                     torch.zeros(4),
@@ -513,12 +518,12 @@ class SpectraDataset(Dataset):
             wv = pad_with_cadence(torch.tensor(info['wavelength']).unsqueeze(0), self.max_len)
             meta['wavelength'] = wv
 
-        # if self.use_wv:
-        #     wv = info['wavelength']
-        #     if len(wv.shape) == 1:
-        #         wv = wv.unsqueeze(0)
-        #     spectra_masked = torch.cat([wv, spectra_masked], dim=0)
-        #     spectra = torch.cat([wv, spectra], dim=0)
+        if self.use_wv:
+            wv = info['wavelength']
+            if len(wv.shape) == 1:
+                wv = wv.unsqueeze(0)
+            spectra_masked = torch.cat([wv, spectra_masked], dim=0)
+            spectra = torch.cat([wv, spectra], dim=0)
 
         spectra = torch.nan_to_num(spectra, nan=0)
         spectra_masked = torch.nan_to_num(spectra_masked, nan=0)

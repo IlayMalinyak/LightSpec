@@ -60,15 +60,15 @@ def test_dataset_samples(dataset, num_iters=100):
         # print('y: ', len(y))
         # if 'rv2' in info.keys():
         #     print(info['snrg'], info['snri'], info['snrr'], info['snrz'])
-        if i % 10 == 0:
-            fig, axes = plt.subplots(nrows=2, ncols=1)
-            axes[0].plot(x_masked[0].cpu().numpy(),x_masked[1].cpu().numpy(), label='masked')
-            axes[1].plot(x[0].cpu().numpy(), x[1].cpu().numpy(), label='original')
-            fig.suptitle(f"{info['spectra_type']} {info['id']}")
-            axes[0].set_xlabel('Wavelength')
-            axes[1].set_ylabel('Flux')
-            plt.savefig(f"/data/lightSpec/images/lamost_apogee_sample_{i}.png")
-            plt.clf()
+        # if i % 10 == 0:
+        #     fig, axes = plt.subplots(nrows=2, ncols=1)
+        #     axes[0].plot(x_masked[0].cpu().numpy(),x_masked[1].cpu().numpy(), label='masked')
+        #     axes[1].plot(x[0].cpu().numpy(), x[1].cpu().numpy(), label='original')
+        #     fig.suptitle(f"{info['spectra_type']} {info['id']}")
+        #     axes[0].set_xlabel('Wavelength')
+        #     axes[1].set_ylabel('Flux')
+        #     plt.savefig(f"/data/lightSpec/images/lamost_apogee_sample_{i}.png")
+        #     plt.clf()
     print(f"Time taken for {num_iters} iterations: {time.time() - start_time:.4f} seconds." \
         f"avg per iteration: {(time.time() - start_time)/num_iters:.6f} seconds")
 
@@ -161,7 +161,7 @@ def create_train_test_dfs(meta_columns):
     plt.clf()
 
     
-    lamost_apogee_catalog.dropna(subset=["combined_obsid"], inplace=True)
+    # lamost_apogee_catalog.dropna(subset=["combined_obsid"], inplace=True)
     print("lamost_apogee_catalog shape: ", lamost_apogee_catalog.shape,
      'apogee sampels: ', lamost_apogee_catalog['APOGEE_ID'].nunique())
     print("apogee teff samples not nan: ", lamost_apogee_catalog['TEFF'].notna().sum())
@@ -205,7 +205,7 @@ os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
  data_generation_fn=create_train_test_dfs, dataset_name='Spectra')
 
-# test_dataset_samples(train_dataset, num_iters=100)
+# test_dataset_samples(train_dataset, num_iters=1000)
 # exit()
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)

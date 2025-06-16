@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from nn.Modules.conformer import ConformerEncoder, ConformerDecoder
-from nn.Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding
+from nn.Modules.mhsa_pro import RotaryEmbedding, ContinuousRotaryEmbedding, WavelengthRotaryEmbedding, apply_seq_len_rotary_pos_emb
 from nn.Modules.flash_mhsa import MHA as Flash_Mha
 from nn.Modules.mlp import Mlp as MLP
 from nn.simsiam import projection_MLP, SimSiam
@@ -11,6 +11,7 @@ import numbers
 import torch.nn.init as init
 from typing import Union, List, Optional, Tuple
 from torch import Size, Tensor
+import time
 
 
 def get_activation(args):
@@ -342,7 +343,12 @@ class MultiTaskRegressor(nn.Module):
     def __init__(self, args, conformer_args):
         
         super().__init__()
-        self.encoder = MultiEncoder(args, conformer_args)
+        self.use_wv = False
+        if args.encoder_type == 'multi':
+            self.encoder = MultiEncoder(args, conformer_args) # one survey case
+        elif args.encoder_type == 'spectra':
+            self.encoder = SpectraEncoder(args, conformer_args) # multiple surveys case
+            self.use_wv = True
         self.decoder = CNNDecoder(args)
         # self.projector = projection_MLP(conformer_args.encoder_dim)
         
@@ -366,7 +372,14 @@ class MultiTaskRegressor(nn.Module):
         )
     
     def forward(self, x, y=None, latent=None):
-        x_enc, x = self.encoder(x)
+        if x.shape[1] == 2:
+            wv, x = x[:,0,:], x[:,1:,:]
+        else:
+            wv, x = None, x
+        if self.use_wv:
+            x_enc, x = self.encoder(x, wv)
+        else:
+            x_enc, x = self.encoder(x)
         x = x.permute(0,2,1)
         if latent is not None:
             x_enc = torch.cat([x_enc, latent], dim=1)
@@ -496,22 +509,23 @@ class MultiEncoder(nn.Module):
         return x_enc, backbone_out
 
 class SpectraEncoder(MultiEncoder):
-    def __init__(self, 
+    def __init__(self,
+                args, 
+                conformer_args, 
                  surveys=['LAMOST', 'APOGEE'],
                  wavelength_rope_base=10000,
-                 **kwargs):
-        super().__init__(**kwargs)
-        self.wavelength_embedding = nn.Linear(1, self.rotary_ndims)
+                 ):
+        super().__init__(args, conformer_args)
         self.surveys = surveys
+        assert args.in_channels == args.wv_dim, "Input channels must match wavelength dimension"
+        self.flux_embedding = nn.Linear(1, args.wv_dim)
         # Wavelength-based RoPE (replaces sequential positional encoding)
-        self.pe = WavelengthRotaryEmbedding(
-            dim=self.rotary_ndims,
+        self.wv_pe = WavelengthRotaryEmbedding(
+            dim=args.wv_dim,
             base=wavelength_rope_base,
             wavelength_scale='log'
         )
-        
-    
-        
+                
     def forward(self, flux, wavelength):
         """
         Args:
@@ -520,18 +534,34 @@ class SpectraEncoder(MultiEncoder):
             survey_ids: [batch_size] - survey identifier
             mask: [batch_size, seq_len] - attention mask
         """
-        if len(wavelength.shape) == 2:
-            wavelength = wavelength.unsqueeze(1)
-        wv = self.wavelength_embedding(wavelength)  # [batch_size, rotary_ndims, seq_len]
+        # print("flux shape: ", flux.shape, "wavelength shape: ", wavelength.shape)
+        if len(flux.shape) == 2:
+            flux = flux.unsqueeze(-1)
+        elif len(flux.shape) == 3 and flux.shape[1] == 1:
+            flux = flux.permute(0, 2, 1)
+        if wavelength is None:
+            wavelength = torch.ones(flux.shape[0], flux.shape[1], device=flux.device) * 5000.0  # Default wavelength if not provided
+        t1 = time.time()
+        cos_wv, sin_wv = self.wv_pe(wavelength)
+        t2 = time.time()
+        flux = self.flux_embedding(flux)  # Project to the desired input channels
+        t3 = time.time()
+        flux = apply_seq_len_rotary_pos_emb(flux, cos_wv, sin_wv)
+        t4 = time.time()
+        flux = flux.permute(0, 2, 1)  # [B, C, L] for Backbone
         backbone_out = self.backbone(flux)
         if len(backbone_out.shape) == 2:
             x_enc = backbone_out.unsqueeze(1)
         else:
             x_enc = backbone_out
-        RoPE = self.pe(wavelength, wavelength.shape[1]).nan_to_num(0)
+        t5 = time.time()
+        RoPE = self.pe(x_enc, x_enc.shape[1]).nan_to_num(0)
+        t6 = time.time()
         x_enc = self.encoder(x_enc, RoPE)
+        t7 = time.time()
         if (len(x_enc.shape) == 3):
             x_enc = x_enc.sum(dim=1)
+        # print("times: ", t2-t1, t3-t2, t4-t3, t5-t4, t6-t5, t7-t6)
         return x_enc, backbone_out
 
 

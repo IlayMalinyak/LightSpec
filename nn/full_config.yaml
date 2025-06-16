@@ -177,6 +177,7 @@ MultiTaskSimSiam_lc:
 
 MultiTaskRegressor_spec:
   backbone: 'cnn'
+  encoder_type: 'multi'
   in_channels: 1
   num_layers: 5
   stride: 1
