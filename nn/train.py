@@ -731,7 +731,8 @@ class MaskedSSLTrainer(Trainer):
 
 
 class DualFormerTrainer(Trainer):
-    def __init__(self, use_y_as_latent=False, alpha=0.5, print_every=500, calc_variance=False, **kwargs):
+    def __init__(self, use_y_as_latent=False, alpha=0.5, print_every=500, calc_variance=False,
+    opposite_pairs=False, **kwargs):
         super().__init__(**kwargs)
         self.use_y_as_latent = use_y_as_latent
         self.alpha = alpha
@@ -739,7 +740,7 @@ class DualFormerTrainer(Trainer):
         # self.spec_losses = []
         self.print_every = print_every
         self.calc_variance = calc_variance
-    
+        self.opposite_pairs = opposite_pairs
     def off_diagonal(self, x):
         n, m = x.shape
         assert n == m
@@ -772,6 +773,13 @@ class DualFormerTrainer(Trainer):
         
         # Return the mean squared error as the loss
         return torch.mean(diff**2)
+    
+    def _opposite_duality_loss(self, proj1, proj2, emb1, emb2):
+        left_side = torch.sum(proj1 * emb2, dim=1)
+        right_side = torch.sum(emb1 * proj2, dim=1)
+        diff = left_side - right_side
+        return torch.mean(diff**2)
+    
     def train_batch(self,batch, batch_idx, device):
         lc, spectra, y, lc_target, spectra_target, info = batch 
         lc, spectra, y, lc_target, spectra_target = lc.to(device), spectra.to(device), y.to(device), lc_target.to(device), spectra_target.to(device)
@@ -798,8 +806,11 @@ class DualFormerTrainer(Trainer):
         self.alpha = 0
         
         lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
-        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']            
-        duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']
+        if self.opposite_pairs:
+            duality_loss = self._opposite_duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        else:
+            duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
         cov_loss = self._cov_loss(lc_proj, spec_proj)
         loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2 
         loss.backward()
@@ -845,8 +856,11 @@ class DualFormerTrainer(Trainer):
         self.alpha = 0
             
         lc_proj, spec_proj = dual_pred['proj1'], dual_pred['proj2']
-        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']            
-        duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        lc_emb, spec_emb = dual_pred['emb1'], dual_pred['emb2']  
+        if self.opposite_pairs:
+            duality_loss = self._opposite_duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
+        else:
+            duality_loss = self._duality_loss(lc_proj, spec_proj, lc_emb, spec_emb)
         cov_loss = self._cov_loss(lc_proj, spec_proj)
         
         loss = reg_loss * self.alpha + duality_loss * (1 - self.alpha) / 2 + cov_loss * (1 - self.alpha) / 2 
@@ -1032,7 +1046,6 @@ class ContrastiveTrainer(Trainer):
         self.weight_decay = weight_decay
         self.full_input = full_input
         self.only_lc = only_lc
-        self.add_time = add_time
         
         
     def train_batch(self, batch, batch_idx, device):

@@ -337,12 +337,12 @@ class SpectraDataset(Dataset):
     
     def _get_min_max_values(self):
         # Assuming the values are NumPy arrays
-        combined_teff_array = np.array(self.df['combined_teff'].values)
-        teff_array = np.array(self.df['TEFF'].values)
-        combined_logg_array = np.array(self.df['combined_logg'].values)
-        logg_array = np.array(self.df['LOGG'].values)
-        combined_feh_array = np.array(self.df['combined_feh'].values)
-        feh_array = np.array(self.df['FE_H'].values)
+        combined_teff_array = np.array(self.df['combined_teff'].values) if 'combined_teff' in self.df.columns else np.zeros(len(self.df))
+        teff_array = np.array(self.df['TEFF'].values) if 'TEFF' in self.df.columns else np.zeros(len(self.df))
+        combined_logg_array = np.array(self.df['combined_logg'].values) if 'combined_logg' in self.df.columns else np.zeros(len(self.df))
+        logg_array = np.array(self.df['LOGG'].values) if 'LOGG' in self.df.columns else np.zeros(len(self.df))
+        combined_feh_array = np.array(self.df['combined_feh'].values) if 'combined_feh' in self.df.columns else np.zeros(len(self.df))
+        feh_array = np.array(self.df['FE_H'].values) if 'FE_H' in self.df.columns else np.zeros(len(self.df))
 
         # Compute min and max values while ignoring NaNs
         self.max_teff = np.nanmax([np.nanmax(combined_teff_array), np.nanmax(teff_array)])
@@ -351,8 +351,8 @@ class SpectraDataset(Dataset):
         self.min_logg = np.nanmin([np.nanmin(combined_logg_array), np.nanmin(logg_array)])
         self.max_feh = np.nanmax([np.nanmax(combined_feh_array), np.nanmax(feh_array)])
         self.min_feh = np.nanmin([np.nanmin(combined_feh_array), np.nanmin(feh_array)])
-        self.max_vsini = self.df['VSINI'].max()
-        self.min_vsini = self.df['VSINI'].min()
+        self.max_vsini = self.df['VSINI'].max() if 'VSINI' in self.df.columns else 0
+        self.min_vsini = self.df['VSINI'].min() if 'VSINI' in self.df.columns else 0
         print("min max teff values:", self.min_teff, self.max_teff, np.nanmax(combined_teff_array), np.nanmax(teff_array))
 
     def _file_listing(self):
@@ -533,7 +533,7 @@ class SpectraDataset(Dataset):
 
 class LightCurveDataset():
     """
-    A dataset for Kepler data.
+    A dataset for Light curve data.
     """
     def __init__(self,
                 df:pd.DataFrame=None,
@@ -762,6 +762,7 @@ class LightCurveDataset():
                 acf = torch.tensor(info['acf']).nan_to_num(0)
                 x = torch.cat((x, acf), dim=0)
             if self.use_fft:
+                
                 fft = torch.tensor(info['fft']).nan_to_num(0)
                 x = torch.cat((x, fft), dim=0)
         except Exception as e:

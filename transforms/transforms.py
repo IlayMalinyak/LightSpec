@@ -13,6 +13,7 @@ from statsmodels.tsa.stattools import acf as A
 
 
 
+
 class Compose:
     """Composes several transforms together. 
     Adapted from https://pytorch.org/vision/master/_modules/torchvision/transforms/transforms.html#Compose
@@ -746,6 +747,8 @@ class LAMOSTSpectrumPreprocessor(SpectrumPreprocessor):
             continuum_norm=continuum_norm,
             plot_steps=plot_steps
         )
+        print("LAMOSTSpectrumPreprocessor initialized with blue and red wavelength ranges.")
+        print("plot_steps: ", plot_steps)
         self.blue_range = blue_wavelength_range
         self.red_range = red_wavelength_range
 
@@ -770,11 +773,17 @@ class LAMOSTSpectrumPreprocessor(SpectrumPreprocessor):
         wavelength = info['wavelength']
 
         if self.plot_steps:
-            fig, ax = plt.subplots(6, 2, figsize=(60, 36), gridspec_kw={'height_ratios': [1, 1, 1, 1, 1, 1]})
+            plt.rcParams.update({'xtick.labelsize': 40, 'ytick.labelsize': 40})
+            plt.rcParams.update({'font.size': 40})
+            fig, ax = plt.subplots(6, 2, figsize=(40, 40), gridspec_kw={'height_ratios': [1, 1, 1, 1, 1, 1]})
 
-            merged_ax = fig.add_subplot(611)  # Spans across both columns
+            merged_ax = plt.subplot2grid((6, 2), (0, 0), colspan=2, fig=fig)
             merged_ax.plot(wavelength.squeeze(), spectrum.squeeze())
             merged_ax.set_title("Original Spectrum")
+
+            # Remove the individual subplots in the first row to avoid overlap
+            ax[0, 0].remove()
+            ax[0, 1].remove()
         
         if 'spectra_type' in info.keys() and info['spectra_type'] == 'APOGEE':
            
@@ -860,9 +869,11 @@ class LAMOSTSpectrumPreprocessor(SpectrumPreprocessor):
             ax[5,1].plot(np.arange(len(red_final)), red_final, label='Red Final')
             ax[5, 0].set_title("Secondary Normalization blue")
             ax[5, 1].set_title("Secondary Normalization red")
-            fig.suptitle(f"LAMOST Spectrum Preprocessing - {info['obsid']}")
+            fig.suptitle(f"LAMOST {info['id']}")
             plt.tight_layout()
-            plt.savefig(f'/data/lightSpec/images/lamost_{info["obsid"]}_preprocessing.png')
+            target_id = info['id']
+            plt.savefig(f'/data/lightSpec/images/lamost_{target_id}_preprocessing.png')
+            print(f"Saved preprocessing steps to /data/lightSpec/images/lamost_{target_id}_preprocessing.png")
         
         return np.concatenate([blue_final, red_final])[None,:], mask, info
 

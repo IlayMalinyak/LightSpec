@@ -98,6 +98,8 @@ def create_train_test_dfs(meta_columns):
     p_dfs = [lightpred_df, santos_df, mcq14_df, reinhold_df]
     kepler_df = priority_merge_prot(p_dfs, kepler_df)
 
+    print("total number of samples: ", len(kepler_df))
+
     train_df, test_df = train_test_split(kepler_df, test_size=0.2, random_state=1234)
     return train_df, test_df
 
@@ -150,12 +152,30 @@ create_raw_samples(data_args, num_samples=10)
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args, data_generation_fn=create_train_test_dfs, dataset_name='Kepler')
 
 nans = 0
-for i in range(100):
+for i in range(10):
     lc, target_lc, y, _,_, info = train_dataset[i]
     if y.isnan().any():
         nans += 1
     print(lc.shape, target_lc.shape, y)
+    time = lc[0]
+    freqs = info['fft_freqs']
+    fig, ax = plt.subplots(2,2, figsize=(30,16))
+    ax[0,0].plot(time, lc[1])
+    ax[0,0].set_xlabel('Time (days)')
+    ax[0,0].set_ylabel('Flux')
+    ax[0,1].plot(time, lc[2])
+    ax[0,1].set_xlabel('Time (days)')
+    ax[0,1].set_ylabel('Flux')
+    ax[1,0].plot(time, lc[3])
+    ax[1,0].set_xlabel('Lag (days)')
+    ax[1,0].set_ylabel('ACF')
+    ax[1,1].plot(freqs, lc[4])
+    ax[1,1].set_xlabel('Normalized Frequency')
+    ax[1,1].set_ylabel('log(Magnitude)')
+    plt.suptitle(f"KID: {info['ID']}")
+    plt.savefig(f"/data/lightSpec/images/lc_{i}_kepler.png")
 print(nans)
+exit()
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,

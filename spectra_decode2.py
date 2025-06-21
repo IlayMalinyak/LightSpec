@@ -227,40 +227,7 @@ def create_train_test_dfs(meta_columns):
     for c in ['combined_teff', 'combined_logg', 'combined_feh']:
         print(c, lamost_catalog[c].min(), lamost_catalog[c].max())
     
-    # Calculate joint probability distribution for target variables
-    # First, bin the continuous values to create discrete categories
-    num_bins = 200  # Adjust number of bins as needed
-    
-    # Create bins for each variable
-    teff_bins = pd.cut(lamost_catalog['combined_teff'], bins=num_bins, labels=False)
-    logg_bins = pd.cut(lamost_catalog['combined_logg'], bins=num_bins, labels=False)
-    feh_bins = pd.cut(lamost_catalog['combined_feh'], bins=num_bins, labels=False)
-    
-    # Combine bins to create joint categories
-    lamost_catalog['joint_bin'] = teff_bins.astype(str) + '_' + logg_bins.astype(str) + '_' + feh_bins.astype(str)
-    
-    # Calculate joint probability
-    joint_counts = lamost_catalog['joint_bin'].value_counts()
-    total_samples = len(lamost_catalog)
-    joint_probs = joint_counts / total_samples
-    
-    # Assign probabilities back to the dataframe
-    lamost_catalog['joint_prob'] = lamost_catalog['joint_bin'].map(joint_probs)
-    
-    # Calculate inverse probability for weighting (rare combinations get higher weights)
-    lamost_catalog['joint_weight'] = 1.0 / lamost_catalog['joint_prob']
-    
-    # Normalize weights to have mean = 1.0
-    mean_weight = lamost_catalog['joint_weight'].mean()
-    lamost_catalog['joint_weight'] = lamost_catalog['joint_weight'] / mean_weight
-    
-    # Print some statistics about the joint distribution
-    print(f"Number of unique joint bins: {len(joint_probs)}")
-    print(f"Min joint probability: {lamost_catalog['joint_prob'].min():.6f}")
-    print(f"Max joint probability: {lamost_catalog['joint_prob'].max():.6f}")
-    print(f"Min weight: {lamost_catalog['joint_weight'].min():.2f}")
-    print(f"Max weight: {lamost_catalog['joint_weight'].max():.2f}")
-
+    print("Number of samples in the catalog: ", len(lamost_catalog))
     
     train_df, test_df = train_test_split(lamost_catalog, test_size=0.2, random_state=1234)
     return train_df, test_df
@@ -299,8 +266,8 @@ os.makedirs(f"{data_args.log_dir}/{datetime_dir}", exist_ok=True)
 train_dataset, val_dataset, test_dataset, complete_config = generator.get_data(data_args,
  data_generation_fn=create_train_test_dfs, dataset_name='Spectra')
 
-test_dataset_samples(train_dataset, num_iters=100)
-# exit()
+test_dataset_samples(train_dataset, num_iters=10)
+exit()
 
 train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=local_rank)
 train_dataloader = DataLoader(train_dataset,

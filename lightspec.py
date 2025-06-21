@@ -333,7 +333,7 @@ if __name__ == "__main__":
                         val_dataloader=val_dataloader, device=local_rank, num_quantiles=len(optim_args.quantiles),
                                 exp_num=datetime_dir, log_path=data_args.log_dir, range_update=None,
                                 accumulation_step=accumulation_step, max_iter=np.inf, print_every=20,
-                                alpha=data_args.alpha,
+                                alpha=data_args.alpha, opposite_pairs=data_args.opposite_pairs,
                             exp_name=f"{exp_num}")
     else:
         if data_args.approach == 'jepa':
